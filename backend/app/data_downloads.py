@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 import logging
+import re
+import shutil
 import ssl
 import threading
 import time
@@ -19,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pyarrow.parquet as pq
 from fastapi import APIRouter, HTTPException
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
@@ -610,3 +613,257 @@ def delete_download(task_id: str):
         if file_path.exists():
             file_path.unlink(missing_ok=True)
     return {"ok": True}
+
+
+def parse_spec_to_interval(spec: str) -> str:
+    """Convert Nautilus interval spec like '1-MINUTE-LAST-EXTERNAL' to '1m', '4-HOUR-LAST-EXTERNAL' to '4h'."""
+    m = re.match(r"^(\d+)-([A-Z]+)-LAST-EXTERNAL$", spec)
+    if not m:
+        return spec
+    num, unit = m.group(1), m.group(2)
+    u_map = {"MINUTE": "m", "HOUR": "h", "DAY": "d", "WEEK": "w", "MONTH": "M"}
+    return f"{num}{u_map.get(unit, unit.lower())}"
+
+
+def scan_catalog_summary(
+    catalog_path: Path,
+    query: str | None = None,
+    market_type: str | None = None,
+    interval: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict[str, Any]:
+    """Scan and aggregate statistics for all instruments in the Parquet Data Catalog."""
+    catalog_path = catalog_path.expanduser().resolve()
+    bar_dir = catalog_path / "data" / "bar"
+    manifest_path, manifest = _manifest(catalog_path)
+
+    registered_instruments: dict[str, Any] = {}
+    try:
+        if catalog_path.exists():
+            catalog = ParquetDataCatalog(str(catalog_path))
+            for inst in catalog.instruments():
+                registered_instruments[inst.id.value] = inst
+    except Exception as err:
+        logger.warning("读取 Catalog Instruments 失败: %s", err)
+
+    symbols_map: dict[str, dict[str, Any]] = {}
+    total_catalog_bars = 0
+    total_catalog_size = 0
+
+    if bar_dir.exists():
+        for d in sorted(bar_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            m = re.match(r"^(.+?\.[A-Z0-9]+)-(\d+-[A-Z]+-LAST-EXTERNAL)$", d.name)
+            if not m:
+                continue
+            inst_id, spec = m.group(1), m.group(2)
+            tf_interval = parse_spec_to_interval(spec)
+            is_perp = "-PERP." in inst_id or inst_id.endswith("-PERP")
+            inst_market_type = "um" if is_perp else "spot"
+            raw_symbol = inst_id.split(".")[0].replace("-PERP", "")
+
+            tf_bars = 0
+            tf_size = 0
+            tf_start: int | None = None
+            tf_end: int | None = None
+            parquet_files = sorted(d.glob("*.parquet"))
+
+            for f in parquet_files:
+                st = f.stat()
+                tf_size += st.st_size
+                try:
+                    meta = pq.read_metadata(f)
+                    tf_bars += meta.num_rows
+                except Exception:
+                    pass
+
+                try:
+                    t = pq.read_table(f, columns=["ts_init"])
+                    ts_list = t["ts_init"].to_pylist()
+                    if ts_list:
+                        f_min, f_max = min(ts_list), max(ts_list)
+                        tf_start = f_min if tf_start is None else min(tf_start, f_min)
+                        tf_end = f_max if tf_end is None else max(tf_end, f_max)
+                except Exception:
+                    pass
+
+            if tf_bars == 0 and not parquet_files:
+                continue
+
+            total_catalog_bars += tf_bars
+            total_catalog_size += tf_size
+
+            if inst_id not in symbols_map:
+                inst_obj = registered_instruments.get(inst_id)
+                base = inst_obj.base_currency.code if inst_obj else raw_symbol.replace("USDT", "").replace("USDC", "").replace("BUSD", "")
+                quote = inst_obj.quote_currency.code if inst_obj else ("USDT" if "USDT" in raw_symbol else "USD")
+                symbols_map[inst_id] = {
+                    "symbol": raw_symbol,
+                    "instrument_id": inst_id,
+                    "market_type": inst_market_type,
+                    "market_type_label": "U本位永续" if inst_market_type == "um" else "现货",
+                    "base_currency": base,
+                    "quote_currency": quote,
+                    "total_bars": 0,
+                    "total_size_bytes": 0,
+                    "file_count": 0,
+                    "start_time": None,
+                    "end_time": None,
+                    "start_date": None,
+                    "end_date": None,
+                    "timeframes": [],
+                }
+
+            entry = symbols_map[inst_id]
+            entry["total_bars"] += tf_bars
+            entry["total_size_bytes"] += tf_size
+            entry["file_count"] += len(parquet_files)
+
+            if tf_start is not None:
+                entry["_min_ns"] = min(entry.get("_min_ns", tf_start), tf_start)
+            if tf_end is not None:
+                entry["_max_ns"] = max(entry.get("_max_ns", tf_end), tf_end)
+
+            start_dt_str = datetime.fromtimestamp(tf_start / 1e9, UTC).strftime("%Y-%m-%d %H:%M:%S") if tf_start else None
+            end_dt_str = datetime.fromtimestamp(tf_end / 1e9, UTC).strftime("%Y-%m-%d %H:%M:%S") if tf_end else None
+
+            entry["timeframes"].append({
+                "interval": tf_interval,
+                "spec": spec,
+                "bar_type": d.name,
+                "bars": tf_bars,
+                "size_bytes": tf_size,
+                "file_count": len(parquet_files),
+                "start_time": start_dt_str,
+                "end_time": end_dt_str,
+                "start_date": start_dt_str[:10] if start_dt_str else None,
+                "end_date": end_dt_str[:10] if end_dt_str else None,
+            })
+
+    all_timeframes_set: set[str] = set()
+    items: list[dict[str, Any]] = []
+
+    for inst_id, entry in symbols_map.items():
+        min_ns = entry.pop("_min_ns", None)
+        max_ns = entry.pop("_max_ns", None)
+        if min_ns:
+            dt = datetime.fromtimestamp(min_ns / 1e9, UTC)
+            entry["start_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+            entry["start_date"] = dt.strftime("%Y-%m-%d")
+        if max_ns:
+            dt = datetime.fromtimestamp(max_ns / 1e9, UTC)
+            entry["end_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
+            entry["end_date"] = dt.strftime("%Y-%m-%d")
+
+        # Sort timeframes
+        entry["timeframes"].sort(key=lambda x: (x["interval"] not in TIMEFRAMES, x["interval"]))
+        for tf in entry["timeframes"]:
+            all_timeframes_set.add(tf["interval"])
+
+        if query:
+            q = query.strip().upper()
+            if q not in entry["symbol"].upper() and q not in inst_id.upper():
+                continue
+
+        if market_type and market_type != "all":
+            if entry["market_type"] != market_type:
+                continue
+
+        if interval and interval != "all":
+            if not any(tf["interval"] == interval for tf in entry["timeframes"]):
+                continue
+
+        if start_date and entry["end_date"]:
+            if entry["end_date"] < start_date.isoformat():
+                continue
+
+        if end_date and entry["start_date"]:
+            if entry["start_date"] > end_date.isoformat():
+                continue
+
+        items.append(entry)
+
+    items.sort(key=lambda x: x["symbol"])
+
+    return {
+        "catalog_path": str(catalog_path),
+        "total_symbols": len(items),
+        "total_bars": sum(x["total_bars"] for x in items),
+        "total_size_bytes": sum(x["total_size_bytes"] for x in items),
+        "all_symbols_count": len(symbols_map),
+        "all_bars_count": total_catalog_bars,
+        "all_size_bytes": total_catalog_size,
+        "available_timeframes": sorted(all_timeframes_set),
+        "items": items,
+    }
+
+
+def delete_catalog_symbol_data(catalog_path: Path, instrument_id: str, interval: str | None = None) -> bool:
+    """Delete a symbol or specific timeframe data from catalog and update manifest."""
+    catalog_path = catalog_path.expanduser().resolve()
+    bar_dir = catalog_path / "data" / "bar"
+    manifest_path, manifest = _manifest(catalog_path)
+    deleted_anything = False
+
+    if bar_dir.exists():
+        for d in list(bar_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            if not d.name.startswith(f"{instrument_id}-"):
+                continue
+            if interval:
+                spec = d.name[len(instrument_id) + 1:]
+                if parse_spec_to_interval(spec) != interval:
+                    continue
+            shutil.rmtree(d, ignore_errors=True)
+            deleted_anything = True
+
+    if not interval:
+        is_perp = "-PERP." in instrument_id or instrument_id.endswith("-PERP")
+        type_dir = catalog_path / "data" / ("crypto_perpetual" if is_perp else "currency_pair")
+        inst_folder = type_dir / instrument_id
+        if inst_folder.exists():
+            shutil.rmtree(inst_folder, ignore_errors=True)
+            deleted_anything = True
+
+    if "archives" in manifest:
+        raw_symbol = instrument_id.split(".")[0].replace("-PERP", "")
+        keys_to_delete = [
+            k for k in manifest["archives"]
+            if f"/{raw_symbol}/" in k and (not interval or f"/{raw_symbol}/{interval}/" in k)
+        ]
+        for k in keys_to_delete:
+            manifest["archives"].pop(k, None)
+        _save_manifest(manifest_path, manifest)
+
+    return deleted_anything
+
+
+@router.get("/catalog/summary")
+def catalog_summary(
+    query: str | None = None,
+    market_type: str | None = None,
+    interval: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    catalog_path: str | None = None,
+):
+    path = Path(catalog_path or settings.catalog_path)
+    return scan_catalog_summary(
+        path,
+        query=query,
+        market_type=market_type,
+        interval=interval,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+@router.delete("/catalog/symbols/{instrument_id}")
+def delete_catalog_symbol(instrument_id: str, interval: str | None = None, catalog_path: str | None = None):
+    path = Path(catalog_path or settings.catalog_path)
+    deleted = delete_catalog_symbol_data(path, instrument_id, interval)
+    return {"ok": True, "deleted": deleted}
+

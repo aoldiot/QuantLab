@@ -25,3 +25,7 @@ export type ResearchProject={id:string;client_id:string;title:string;original_id
 export type ResearchMessage={id:string;role:'user'|'assistant'|'system';content:string;message_type:string;metadata:Record<string,any>;created_at:string}
 export type ResearchDecision={id:string;question:string;options:string[];recommendation:string|null;impact:string|null;status:'PENDING'|'RESOLVED'|'DISMISSED';answer:string|null;origin:'DISCUSSION'|'SPECIFICATION';source_message_id:string|null;created_at:string;resolved_at:string|null}
 export type ResearchRun={id:string;name:string;status:string;stage:string;progress:number;metrics:Record<string,number|null>|null;created_at:string}
+export interface CatalogTimeframeItem{interval:string;spec:string;bar_type:string;bars:number;size_bytes:number;file_count:number;start_time:string|null;end_time:string|null;start_date:string|null;end_date:string|null}
+export interface CatalogSymbolItem{symbol:string;instrument_id:string;market_type:string;market_type_label:string;base_currency:string;quote_currency:string;total_bars:number;total_size_bytes:number;file_count:number;start_time:string|null;end_time:string|null;start_date:string|null;end_date:string|null;timeframes:CatalogTimeframeItem[];updated_at?:string|null}
+export interface CatalogSummary{catalog_path:string;total_symbols:number;total_bars:number;total_size_bytes:number;all_symbols_count:number;all_bars_count:number;all_size_bytes:number;available_timeframes:string[];items:CatalogSymbolItem[]}
+

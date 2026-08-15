@@ -59,6 +59,17 @@ export const api={
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),
   iterateResearch:(id:string,data:{target:'DISCUSSING'|'SPEC_REVIEW'|'READY_FOR_BACKTEST';reason:string})=>request<ResearchProject>(`/research/${id}/iterate`,{method:'POST',body:JSON.stringify(data)}),
   dataSymbols:(marketType:string)=>request<{symbol:string;base:string;quote:string}[]>(`/data/symbols?market_type=${marketType}`),
+  dataCatalogSummary:(params?:Record<string,string>)=>{
+    const qs=params?new URLSearchParams(Object.entries(params).filter(([_,v])=>Boolean(v))).toString():''
+    return request<import('./types').CatalogSummary>(`/data/catalog/summary${qs?'?'+qs:''}`)
+  },
+  deleteCatalogSymbol:(instrumentId:string,interval?:string,catalogPath?:string)=>{
+    const qs=new URLSearchParams()
+    if(interval)qs.set('interval',interval)
+    if(catalogPath)qs.set('catalog_path',catalogPath)
+    const qStr=qs.toString()
+    return request<{ok:boolean;deleted:boolean}>(`/data/catalog/symbols/${encodeURIComponent(instrumentId)}${qStr?'?'+qStr:''}`,{method:'DELETE'})
+  },
   dataDownloads:()=>request<any[]>('/data/downloads'),
   dataDownloadLatest:()=>request<any>('/data/downloads/latest'),
   createDataDownload:(data:unknown)=>request<any>('/data/downloads',{method:'POST',body:JSON.stringify(data)}),
