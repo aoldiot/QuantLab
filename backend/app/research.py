@@ -12,11 +12,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from pathlib import Path
+
 from .agent.service import create_worktree, session_out
 from .backtest_service import create_backtest_run
 from .config import settings
 from .db import get_db
-from .git_versions import GitVersionError, publish_revision, resolve_revision
+from .git_versions import code_hash, manifest_hash
+from .llm_config import get_hermes_config
 from .models import (
     AgentMessage,
     AgentSession,
@@ -135,21 +138,27 @@ def _extract_text(payload: dict[str, Any]) -> str:
     return "\n".join(texts).strip()
 
 
-async def call_hermes(project: ResearchProject, prompt: str, instructions: str = RESEARCH_INSTRUCTIONS) -> str:
+async def call_hermes(
+    project: ResearchProject,
+    prompt: str,
+    instructions: str = RESEARCH_INSTRUCTIONS,
+    db: AsyncSession | None = None,
+) -> str:
+    base_url, api_key, model, timeout_seconds = await get_hermes_config(db)
     headers = {"Content-Type": "application/json"}
-    if settings.hermes_api_key:
-        headers["Authorization"] = f"Bearer {settings.hermes_api_key}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     body = {
-        "model": settings.hermes_model,
+        "model": model,
         "conversation": project.hermes_conversation,
         "input": prompt,
         "instructions": instructions,
         "store": True,
     }
-    timeout = httpx.Timeout(settings.hermes_timeout_seconds)
+    timeout = httpx.Timeout(timeout_seconds)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(f"{settings.hermes_base_url.rstrip('/')}/responses", headers=headers, json=body)
+            response = await client.post(f"{base_url.rstrip('/')}/responses", headers=headers, json=body)
             response.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Hermes 调用失败：{exc}") from exc
@@ -312,7 +321,7 @@ async def send_message(project_id: str, data: ResearchMessageCreate, db: AsyncSe
     _ensure_active(project)
     db.add(ResearchMessage(project_id=project.id, role="user", content=data.content))
     await db.commit()
-    answer = await call_hermes(project, data.content)
+    answer = await call_hermes(project, data.content, db=db)
     content, raised = _split_decisions(answer)
     message = ResearchMessage(project_id=project.id, role="assistant", content=content)
     db.add(message)
@@ -395,19 +404,19 @@ def _parse_json(text: str) -> dict[str, Any]:
     return value
 
 
-async def _generate_spec_content(project: ResearchProject, settled: str = "") -> dict[str, Any]:
+async def _generate_spec_content(project: ResearchProject, settled: str = "", db: AsyncSession | None = None) -> dict[str, Any]:
     fields = ", ".join(SPEC_FIELDS)
     prompt = f"""根据当前全部研讨生成可交给 Claude Code 实现的策略规格。
 必须且只能包含这些顶层字段：{fields}。
 strategy_name 只能使用小写字母、数字和下划线，并以字母开头。规则必须明确可计算，不使用“明显”“适当”等模糊词。用户已在研讨阶段拍板全部待决策项，open_questions 通常应为空数组；只有研讨确实未覆盖、且必须由用户拍板的新决策才写入 open_questions，并给出明确选项、推荐项和简短影响。不要询问某项改动能否提升胜率、收益、盈亏比或 Sharpe；这类问题放入 hypothesis、backtest_plan 和 acceptance_criteria，交给实验回答。{settled}"""
-    raw = await call_hermes(project, prompt, SPEC_INSTRUCTIONS)
+    raw = await call_hermes(project, prompt, SPEC_INSTRUCTIONS, db=db)
     try:
         return _parse_json(raw)
     except HTTPException as first_error:
         repair_prompt = f"""上一次输出未通过机器校验：{first_error.detail}。
 请重新生成完整规格。严格只输出有效 JSON 对象，英文顶层字段必须为：{fields}。
 不要复述错误，不要输出 Markdown。"""
-        repaired = await call_hermes(project, repair_prompt, SPEC_INSTRUCTIONS)
+        repaired = await call_hermes(project, repair_prompt, SPEC_INSTRUCTIONS, db=db)
         try:
             return _parse_json(repaired)
         except HTTPException as exc:
@@ -421,7 +430,7 @@ async def generate_specification(project_id: str, db: AsyncSession = Depends(get
     pending = await _pending_decisions(project.id, db)
     if pending:
         raise HTTPException(409, f"还有 {len(pending)} 项待决策问题需要你拍板，请先在研讨阶段完成决策")
-    content = await _generate_spec_content(project, _resolved_decision_brief(await _decisions(project.id, db)))
+    content = await _generate_spec_content(project, _resolved_decision_brief(await _decisions(project.id, db)), db=db)
     current = await _latest_spec(project.id, db)
     version = 1 if not current else current.version + 1
     spec = StrategySpecification(project_id=project.id, version=version, content=content)
@@ -602,37 +611,48 @@ async def publish_research_strategy(project_id: str, db: AsyncSession = Depends(
     strategy = await db.scalar(select(Strategy).where(Strategy.slug == manifest.slug))
     if strategy:
         await db.refresh(strategy, ["versions"])
-    try:
-        revision = publish_revision(manifest, f"research: publish {project.title}")
-    except GitVersionError as exc:
-        if "没有发生改变" not in str(exc):
-            raise HTTPException(400, str(exc)) from exc
-        revision = resolve_revision(manifest, require_clean=False)
-        if strategy and strategy.versions:
-            latest = max(strategy.versions, key=lambda item: item.created_at)
-            project.strategy_id = strategy.id
-            project.status = ResearchStatus.READY_FOR_BACKTEST
-            await db.commit()
-            await db.refresh(project)
-            return _research_strategy_out(strategy, latest)
+
+    strategy_name = spec.content['strategy_name']
+    source_path = Path(__file__).resolve().parent / "strategies" / f"{strategy_name}.py"
+    code = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+    c_hash = code_hash(code) if code else None
+    m_hash = manifest_hash(manifest)
+
     if strategy is None:
         strategy = Strategy(name=manifest.name, slug=manifest.slug, description=manifest.description, category=manifest.category)
         db.add(strategy)
         await db.flush()
         await db.refresh(strategy, ["versions"])
+
+    if strategy.versions:
+        latest = max(strategy.versions, key=lambda item: item.created_at)
+        if latest.code_hash and latest.code_hash == c_hash:
+            project.strategy_id = strategy.id
+            project.status = ResearchStatus.READY_FOR_BACKTEST
+            await db.commit()
+            await db.refresh(project)
+            return _research_strategy_out(strategy, latest)
+
     version_name = manifest.version
     if any(item.version == version_name for item in strategy.versions):
         version_name = _next_version(max(strategy.versions, key=lambda item: item.created_at).version)
-    version = StrategyVersion(strategy_id=strategy.id, version=version_name, entrypoint=module,
-                              parameter_schema=manifest.parameter_schema(), data_requirements=manifest.data_requirements(),
-                              git_commit=revision.commit, git_ref=revision.ref, git_repo=str(revision.repo),
-                              manifest_hash=revision.manifest_hash, description=f"研究项目：{project.title}")
+    version = StrategyVersion(
+        strategy_id=strategy.id,
+        version=version_name,
+        entrypoint=module,
+        code=code,
+        code_hash=c_hash,
+        parameter_schema=manifest.parameter_schema(),
+        data_requirements=manifest.data_requirements(),
+        manifest_hash=m_hash,
+        description=f"研究项目：{project.title}",
+    )
     db.add(version)
     project.strategy_id = strategy.id
     project.status = ResearchStatus.READY_FOR_BACKTEST
     await db.commit()
-    await db.refresh(strategy, ["versions"])
     await db.refresh(project)
+    await db.refresh(strategy, ["versions"])
     return _research_strategy_out(strategy, version)
 
 
@@ -671,7 +691,7 @@ async def analyze_backtest(project_id: str, run_id: str, db: AsyncSession = Depe
     await db.commit()
     prompt = "请分析本次正式回测。必须区分客观事实与推断，判断是否支持原始假设，并提出最有信息价值的下一步实验。\n策略规格：\n" + json.dumps(spec.content if spec else {}, ensure_ascii=False) + "\n回测配置：\n" + json.dumps(run.config, ensure_ascii=False) + "\n指标：\n" + json.dumps(run.metrics, ensure_ascii=False) + "\n结果摘要：\n" + json.dumps(run.result, ensure_ascii=False)[:60000]
     try:
-        answer = await call_hermes(project, prompt)
+        answer = await call_hermes(project, prompt, db=db)
     except Exception:
         project.status = ResearchStatus.READY_FOR_ANALYSIS
         await db.commit()

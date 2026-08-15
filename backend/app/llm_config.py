@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import uuid
 from datetime import UTC, datetime
 
+import httpx
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException
@@ -41,8 +43,12 @@ def mask_api_key(value: str) -> str:
 
 def config_out(config: LlmConfiguration | None) -> dict:
     if config is None:
-        return {"configured": False}
+        return {
+            "configured": False,
+            "hermes_configured": False,
+        }
     key = decrypt_api_key(config.api_key_encrypted)
+    hermes_key = decrypt_api_key(config.hermes_api_key_encrypted) if config.hermes_api_key_encrypted else ""
     return {
         "configured": True,
         "base_url": config.base_url,
@@ -56,6 +62,14 @@ def config_out(config: LlmConfiguration | None) -> dict:
         "last_test_ok": config.last_test_ok,
         "last_test_message": config.last_test_message,
         "last_tested_at": config.last_tested_at,
+        "hermes_configured": bool(config.hermes_base_url and config.hermes_model),
+        "hermes_base_url": config.hermes_base_url,
+        "hermes_api_key_masked": mask_api_key(hermes_key) if hermes_key else "",
+        "hermes_model": config.hermes_model,
+        "hermes_timeout_seconds": config.hermes_timeout_seconds,
+        "hermes_last_test_ok": config.hermes_last_test_ok,
+        "hermes_last_test_message": config.hermes_last_test_message,
+        "hermes_last_tested_at": config.hermes_last_tested_at,
         "updated_at": config.updated_at,
     }
 
@@ -65,6 +79,22 @@ async def get_config(db: AsyncSession) -> LlmConfiguration:
     if not config:
         raise HTTPException(503, "尚未配置 LLM")
     return config
+
+
+async def get_hermes_config(db: AsyncSession | None = None) -> tuple[str, str, str, int]:
+    """Returns (base_url, api_key, model, timeout_seconds) for Hermes from DB."""
+    if db is None:
+        raise HTTPException(503, "未提供数据库会话，无法获取 Hermes 配置")
+    config = await db.get(LlmConfiguration, 1)
+    if not config or not config.hermes_base_url or not config.hermes_model:
+        raise HTTPException(503, "尚未配置 Hermes，请先前往系统设置配置")
+    api_key = decrypt_api_key(config.hermes_api_key_encrypted) if config.hermes_api_key_encrypted else ""
+    return (
+        config.hermes_base_url,
+        api_key,
+        config.hermes_model,
+        config.hermes_timeout_seconds or 600,
+    )
 
 
 def sdk_env(config: LlmConfiguration) -> dict[str, str]:
@@ -91,14 +121,32 @@ async def save_llm_configuration(data: LlmConfigurationUpdate, db: AsyncSession 
     if config is None:
         if not data.api_key:
             raise HTTPException(422, "首次配置必须填写 API Key")
-        config = LlmConfiguration(id=1, base_url=data.base_url, model=data.model, api_key_encrypted=encrypt_api_key(data.api_key))
+        config = LlmConfiguration(
+            id=1,
+            base_url=data.base_url,
+            model=data.model,
+            api_key_encrypted=encrypt_api_key(data.api_key),
+            hermes_base_url=data.hermes_base_url,
+            hermes_model=data.hermes_model,
+            hermes_timeout_seconds=data.hermes_timeout_seconds,
+            hermes_api_key_encrypted=encrypt_api_key(data.hermes_api_key) if data.hermes_api_key else None,
+        )
         db.add(config)
-    elif data.api_key:
-        config.api_key_encrypted = encrypt_api_key(data.api_key)
-    for field in ("base_url", "auth_type", "model", "small_fast_model", "timeout_seconds", "max_turns", "default_permission_mode"):
+    else:
+        if data.api_key:
+            config.api_key_encrypted = encrypt_api_key(data.api_key)
+        if data.hermes_api_key:
+            config.hermes_api_key_encrypted = encrypt_api_key(data.hermes_api_key)
+    for field in (
+        "base_url", "auth_type", "model", "small_fast_model", "timeout_seconds",
+        "max_turns", "default_permission_mode", "hermes_base_url", "hermes_model",
+        "hermes_timeout_seconds",
+    ):
         setattr(config, field, getattr(data, field))
     config.last_test_ok = None
     config.last_test_message = None
+    config.hermes_last_test_ok = None
+    config.hermes_last_test_message = None
     await db.commit()
     await db.refresh(config)
     return config_out(config)
@@ -134,3 +182,49 @@ async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(
     if not config.last_test_ok:
         raise HTTPException(502, config.last_test_message)
     return {"ok": True, "deep": deep, "message": config.last_test_message}
+
+
+@router.post("/test-hermes")
+async def test_hermes_configuration(db: AsyncSession = Depends(get_db)):
+    base_url, api_key, model, timeout_seconds = await get_hermes_config(db)
+    config = await db.get(LlmConfiguration, 1)
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = {
+        "model": model,
+        "conversation": f"quantlab-test-{uuid.uuid4()}",
+        "input": "测试连接。请只回复 quantlab-hermes-ok",
+        "instructions": "严格只回复 quantlab-hermes-ok",
+        "store": False,
+    }
+    timeout = httpx.Timeout(min(timeout_seconds, 30))
+    result_text = ""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(f"{base_url.rstrip('/')}/responses", headers=headers, json=body)
+            resp.raise_for_status()
+            data = resp.json()
+            texts = []
+            for item in data.get("output", []):
+                for part in item.get("content", []):
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        texts.append(part["text"])
+            if not texts and isinstance(data.get("output_text"), str):
+                texts.append(data["output_text"])
+            result_text = "\n".join(texts).strip() or resp.text
+        if config:
+            config.hermes_last_test_ok = True
+            config.hermes_last_test_message = result_text[:500] or "Hermes 连接成功"
+            config.hermes_last_tested_at = datetime.now(UTC)
+            await db.commit()
+    except Exception as exc:
+        if config:
+            config.hermes_last_test_ok = False
+            config.hermes_last_test_message = str(exc)[:1000]
+            config.hermes_last_tested_at = datetime.now(UTC)
+            await db.commit()
+        raise HTTPException(502, f"Hermes 连接失败：{exc}") from exc
+
+    return {"ok": True, "message": result_text[:500] or "Hermes 连接成功"}

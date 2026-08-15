@@ -86,6 +86,8 @@ class StrategyVersion(Base):
     strategy_id: Mapped[str] = mapped_column(ForeignKey("strategies.id"))
     version: Mapped[str] = mapped_column(String(30))
     entrypoint: Mapped[str] = mapped_column(String(255))
+    code: Mapped[str] = mapped_column(Text, default="")
+    code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     parameter_schema: Mapped[dict] = mapped_column(JSON)
     data_requirements: Mapped[dict] = mapped_column(JSON)
     description: Mapped[str] = mapped_column(Text, default="")
@@ -112,7 +114,7 @@ class BacktestRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    research_project_id: Mapped[str | None] = mapped_column(ForeignKey("research_projects.id"), nullable=True, index=True)
+    research_project_id: Mapped[str | None] = mapped_column(ForeignKey("research_projects.id", ondelete="SET NULL"), nullable=True, index=True)
 
 
 class LlmConfiguration(Base):
@@ -129,16 +131,26 @@ class LlmConfiguration(Base):
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hermes_base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    hermes_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hermes_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    hermes_timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True, default=600)
+    hermes_last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    hermes_last_test_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hermes_last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class GitConfiguration(Base):
     __tablename__ = "git_configuration"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    remote_url: Mapped[str] = mapped_column(String(1000))
-    username: Mapped[str] = mapped_column(String(300))
-    password_encrypted: Mapped[str] = mapped_column(Text)
-    auto_push: Mapped[bool] = mapped_column(Boolean, default=True)
+    remote_url: Mapped[str] = mapped_column(String(1000), default="")
+    username: Mapped[str] = mapped_column(String(300), default="")
+    password_encrypted: Mapped[str] = mapped_column(Text, default="")
+    auto_push: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_backup_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_backup_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_backup_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -152,8 +164,8 @@ class AgentSession(Base):
     sdk_session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     workspace_path: Mapped[str] = mapped_column(String(500))
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    research_project_id: Mapped[str | None] = mapped_column(ForeignKey("research_projects.id"), nullable=True, index=True)
-    specification_id: Mapped[str | None] = mapped_column(ForeignKey("strategy_specifications.id"), nullable=True)
+    research_project_id: Mapped[str | None] = mapped_column(ForeignKey("research_projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    specification_id: Mapped[str | None] = mapped_column(ForeignKey("strategy_specifications.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     messages: Mapped[list["AgentMessage"]] = relationship(back_populates="session", cascade="all, delete-orphan")
@@ -178,9 +190,9 @@ class ResearchProject(Base):
     original_idea: Mapped[str] = mapped_column(Text)
     status: Mapped[ResearchStatus] = mapped_column(Enum(ResearchStatus), default=ResearchStatus.DISCUSSING, index=True)
     hermes_conversation: Mapped[str] = mapped_column(String(200), unique=True)
-    strategy_id: Mapped[str | None] = mapped_column(ForeignKey("strategies.id"), nullable=True)
-    implementation_session_id: Mapped[str | None] = mapped_column(ForeignKey("agent_sessions.id"), nullable=True)
-    latest_backtest_id: Mapped[str | None] = mapped_column(ForeignKey("backtest_runs.id"), nullable=True)
+    strategy_id: Mapped[str | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
+    implementation_session_id: Mapped[str | None] = mapped_column(ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True)
+    latest_backtest_id: Mapped[str | None] = mapped_column(ForeignKey("backtest_runs.id", ondelete="SET NULL"), nullable=True)
     conclusion_verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)
     conclusion_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     conclusion_next_step: Mapped[str | None] = mapped_column(Text, nullable=True)

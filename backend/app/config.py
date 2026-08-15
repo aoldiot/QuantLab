@@ -22,10 +22,6 @@ class Settings(BaseSettings):
     agent_max_concurrency: int = 5
     agent_workspace_retention_days: int = 7
     data_download_concurrency: int = 8
-    hermes_base_url: str = "http://127.0.0.1:8642/v1"
-    hermes_api_key: str = ""
-    hermes_model: str = "hermes-agent"
-    hermes_timeout_seconds: int = 600
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("data_root", "artifact_root", "catalog_path", "strategy_git_repo_path", mode="after")

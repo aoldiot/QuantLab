@@ -421,10 +421,6 @@ erDiagram
 | `AGENT_MAX_CONCURRENCY` | `5` | Agent 同时执行上限 |
 | `AGENT_WORKSPACE_RETENTION_DAYS` | `7` | worktree 保留天数 |
 | `DATA_DOWNLOAD_CONCURRENCY` | `8` | 数据归档并行下载数 |
-| `HERMES_BASE_URL` | `http://127.0.0.1:8642/v1` | Hermes API 地址 |
-| `HERMES_API_KEY` | 空 | Hermes Bearer Token |
-| `HERMES_MODEL` | `hermes-agent` | Hermes 模型名 |
-| `HERMES_TIMEOUT_SECONDS` | `600` | Hermes 请求超时 |
 | `VITE_API_URL` | `http://localhost:8000/api` | 前端 API 根地址 |
 
 ## 9. 本地开发与部署

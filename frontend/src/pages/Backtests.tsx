@@ -2,7 +2,7 @@ import {useEffect,useMemo,useState} from 'react'
 import {ArrowDown,ArrowUp,ChevronRight,Plus,Trash2} from 'lucide-react'
 import {Link,useNavigate} from 'react-router-dom'
 import {api} from '../api'
-import {ConfirmDialog,Header,Status} from '../components'
+import {ConfirmDialog,Status} from '../components'
 import type {Run,Strategy} from '../types'
 
 type SortKey='name'|'strategy'|'market'|'status'|'progress'|'return'|'sharpe'|'created'
@@ -18,9 +18,17 @@ export default function Backtests(){
   const heading=(label:string,key:SortKey)=><button className="sort-heading" onClick={()=>changeSort(key)}>{label}{sort===key&&(direction==='asc'?<ArrowUp/>:<ArrowDown/>)}</button>
   const open=(id:string)=>navigate('/backtests/'+id)
   const remove=async()=>{const run=pendingDelete;if(!run)return;setDeleting(run.id);setError('');try{await api.deleteRun(run.id);setRuns(current=>current.filter(item=>item.id!==run.id));setPendingDelete(null)}catch(reason){setError((reason as Error).message)}finally{setDeleting('')}}
-  return <><Header title="回测管理" subtitle="按策略、日期和状态筛选，点击表头排序" actions={<Link className="button primary" to="/backtests/new"><Plus size={17}/>新建回测</Link>}/>
+  return <>
     {error&&<div className="form-error">历史回测加载失败：{error}</div>}
-    <div className="backtest-filters"><label>策略<select value={strategyFilter} onChange={e=>setStrategyFilter(e.target.value)}><option>全部</option>{strategies.map(item=><option key={item.id}>{item.name}</option>)}</select></label><label>状态<select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}>{statuses.map(value=><option key={value}>{value}</option>)}</select></label><label>开始日期<input type="date" value={from} max={to||undefined} onChange={e=>setFrom(e.target.value)}/></label><label>结束日期<input type="date" value={to} min={from||undefined} onChange={e=>setTo(e.target.value)}/></label><button onClick={()=>{setStrategyFilter('全部');setStatusFilter('全部');setFrom('');setTo('')}}>重置筛选</button><span>{visible.length} / {runs.length}</span></div>
+    <div className="backtest-filters">
+      <label>策略<select value={strategyFilter} onChange={e=>setStrategyFilter(e.target.value)}><option>全部</option>{strategies.map(item=><option key={item.id}>{item.name}</option>)}</select></label>
+      <label>状态<select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}>{statuses.map(value=><option key={value}>{value}</option>)}</select></label>
+      <label>开始日期<input type="date" value={from} max={to||undefined} onChange={e=>setFrom(e.target.value)}/></label>
+      <label>结束日期<input type="date" value={to} min={from||undefined} onChange={e=>setTo(e.target.value)}/></label>
+      <button onClick={()=>{setStrategyFilter('全部');setStatusFilter('全部');setFrom('');setTo('')}}>重置筛选</button>
+      <span className="filter-count">{visible.length} / {runs.length}</span>
+      <Link className="button primary new-backtest-btn" to="/backtests/new"><Plus size={16}/>新建回测</Link>
+    </div>
     <div className="table-card backtest-history"><table><thead><tr><th>{heading('任务名称','name')}</th><th>{heading('回测策略','strategy')}</th><th>{heading('市场与周期','market')}</th><th>{heading('状态','status')}</th><th>{heading('进度','progress')}</th><th>{heading('总收益','return')}</th><th>{heading('Sharpe','sharpe')}</th><th>{heading('创建时间','created')}</th><th aria-label="操作"/></tr></thead><tbody>
       {visible.length===0?<tr><td colSpan={9} className="empty-row">没有符合当前筛选条件的回测任务。</td></tr>:visible.map(run=><tr key={run.id} className="clickable-run" tabIndex={0} onClick={()=>open(run.id)} onKeyDown={event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();open(run.id)}}} aria-label={`查看回测详情：${run.name}`}>
         <td><strong>{run.name}</strong><small>{run.config.symbols?.join(' / ')}</small></td><td>{strategyNames[String(run.config.strategy_version_id)]??'已删除策略'}</td><td>{run.config.venue} · {run.config.timeframes?.join(' / ')}</td><td><Status value={run.status}/></td><td><div className="progress"><i style={{width:run.progress+'%'}}/></div><small>{run.stage}</small></td><td className={(run.metrics?.total_return??0)>=0?'positive':'negative'}>{run.metrics?`${run.metrics.total_return}%`:'—'}</td><td>{run.metrics?.sharpe??'—'}</td><td>{new Date(run.created_at).toLocaleString()}</td><td><div className="run-actions"><span className="detail-link">查看详情<ChevronRight/></span><button type="button" className="delete-run" disabled={deleting===run.id||['QUEUED','RUNNING','ANALYZING'].includes(run.status)} onClick={event=>{event.stopPropagation();setPendingDelete(run)}} title={['QUEUED','RUNNING','ANALYZING'].includes(run.status)?'运行中的任务不能删除':'删除回测'} aria-label={`删除回测：${run.name}`}><Trash2/></button></div></td>

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .git_versions import manifest_hash
 from .models import BacktestRun, StrategyVersion
 from .runner import execute_backtest
 from .schemas import BacktestCreate
@@ -21,16 +21,41 @@ async def create_backtest_run(data: BacktestCreate, db: AsyncSession, research_p
         resolved_parameters = validate_parameters(manifest, data.strategy_parameters)
     except (ImportError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    if not version.git_commit or not version.git_repo:
-        raise HTTPException(409, "该策略版本未绑定 Git commit，请重新发布为 Git 版本")
-    if not version.manifest_hash or manifest_hash(manifest) != version.manifest_hash:
-        raise HTTPException(409, "策略工作区代码与所选 Git 版本不一致，请发布新的策略版本后再回测")
-    run = BacktestRun(name=data.name, strategy_version_id=data.strategy_version_id,
-                      config=data.model_dump(mode="json"), research_project_id=research_project_id)
+
+    strategy_code = version.code
+    if not strategy_code:
+        module_name = version.entrypoint.partition(":")[0].rsplit(".", 1)[-1]
+        disk_file = Path(__file__).resolve().parent / "strategies" / f"{module_name}.py"
+        if disk_file.exists():
+            strategy_code = disk_file.read_text(encoding="utf-8")
+        else:
+            raise HTTPException(409, f"未找到该策略版本的源代码文件：{module_name}")
+
+    run = BacktestRun(
+        name=data.name,
+        strategy_version_id=data.strategy_version_id,
+        config=data.model_dump(mode="json"),
+        research_project_id=research_project_id,
+    )
     run.config["strategy_parameters"] = resolved_parameters
-    run.config["strategy_revision"] = {"commit": version.git_commit, "ref": version.git_ref, "manifest_hash": version.manifest_hash}
+    run.config["strategy_version"] = {
+        "version": version.version,
+        "code_hash": version.code_hash,
+        "manifest_hash": version.manifest_hash,
+    }
     db.add(run)
     await db.commit()
     await db.refresh(run)
-    asyncio.create_task(execute_backtest(run.id, {"module": version.entrypoint, "git_commit": version.git_commit, "git_repo": version.git_repo, "data_requirements": manifest.data_requirements()}))
+
+    asyncio.create_task(
+        execute_backtest(
+            run.id,
+            {
+                "module": version.entrypoint,
+                "code": strategy_code,
+                "code_hash": version.code_hash,
+                "data_requirements": manifest.data_requirements(),
+            },
+        )
+    )
     return run

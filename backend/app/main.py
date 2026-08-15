@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.util import find_spec
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent.service import cleanup_expired_worktrees, repair_agent_session_paths
@@ -18,9 +19,8 @@ from .backtests.chart_data import load_chart
 from .config import settings
 from .data_downloads import router as data_downloads_router
 from .db import SessionLocal, get_db
-from .git_config import push_credentials
 from .git_config import router as git_config_router
-from .git_versions import GitVersionError, publish_revision, resolve_revision
+from .git_versions import code_hash, manifest_hash
 from .llm_config import router as llm_config_router
 from .models import BacktestRun, ResearchProject, ResearchStatus, RunStatus, Strategy, StrategyStatus, StrategyVersion
 from .research import router as research_router
@@ -164,15 +164,22 @@ async def create_strategy(data: StrategyCreate, db: AsyncSession = Depends(get_d
         raise HTTPException(400, str(exc)) from exc
     if await db.scalar(select(Strategy.id).where(Strategy.slug == manifest.slug)):
         raise HTTPException(409, "策略已经注册")
-    try:
-        revision = publish_revision(manifest, data.version_description, await push_credentials(db))
-    except GitVersionError as exc:
-        raise HTTPException(400, str(exc)) from exc
+    module_name = data.module.partition(":")[0].rsplit(".", 1)[-1]
+    source_path = Path(__file__).resolve().parent / "strategies" / f"{module_name}.py"
+    code = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+    c_hash = code_hash(code) if code else None
+    m_hash = manifest_hash(manifest)
     s = Strategy(name=manifest.name, slug=manifest.slug, description=manifest.description, category=manifest.category)
-    s.versions.append(StrategyVersion(version=manifest.version, entrypoint=data.module,
-        parameter_schema=manifest.parameter_schema(), data_requirements=manifest.data_requirements(),
-        git_commit=revision.commit, git_ref=revision.ref, git_repo=str(revision.repo),
-        manifest_hash=revision.manifest_hash, description=data.version_description))
+    s.versions.append(StrategyVersion(
+        version=manifest.version,
+        entrypoint=data.module,
+        code=code,
+        code_hash=c_hash,
+        parameter_schema=manifest.parameter_schema(),
+        data_requirements=manifest.data_requirements(),
+        manifest_hash=m_hash,
+        description=data.version_description,
+    ))
     db.add(s); await db.commit(); await db.refresh(s, ["versions"])
     return strategy_out(s)
 
@@ -202,6 +209,17 @@ async def delete_strategy(strategy_id: str, db: AsyncSession = Depends(get_db)):
     if active:
         raise HTTPException(409, f"该策略还有 {len(active)} 个回测正在运行或排队，请等待结束或先取消")
     run_ids = [run.id for run in runs]
+    if run_ids:
+        await db.execute(
+            update(ResearchProject)
+            .where(ResearchProject.latest_backtest_id.in_(run_ids))
+            .values(latest_backtest_id=None)
+        )
+    await db.execute(
+        update(ResearchProject)
+        .where(ResearchProject.strategy_id == strategy_id)
+        .values(strategy_id=None)
+    )
     for run in runs:
         await db.delete(run)
     await db.flush()
@@ -220,6 +238,8 @@ def version_out(version: StrategyVersion, current_id: str) -> StrategyVersionOut
         strategy_id=version.strategy_id,
         version=version.version,
         entrypoint=version.entrypoint,
+        code=version.code or "",
+        code_hash=version.code_hash,
         parameter_schema=version.parameter_schema,
         data_requirements=version.data_requirements,
         is_latest=version.id == current_id,
@@ -248,25 +268,32 @@ async def create_strategy_version(strategy_id: str, data: StrategyVersionCreate,
         raise HTTPException(400, str(exc)) from exc
     if manifest.slug != strategy.slug:
         raise HTTPException(400, f"Manifest slug 必须是 {strategy.slug}")
+
+    module_name = data.module.partition(":")[0].rsplit(".", 1)[-1]
+    source_path = Path(__file__).resolve().parent / "strategies" / f"{module_name}.py"
+    code = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+    c_hash = code_hash(code) if code else None
+    m_hash = manifest_hash(manifest)
+
+    latest = latest_version(strategy)
+    if latest and latest.code_hash and latest.code_hash == c_hash:
+        raise HTTPException(400, "策略代码未发生改变，无需重复发布版本")
+
     if any(version.version == manifest.version for version in strategy.versions):
-        candidate = next_patch_version(latest_version(strategy).version)
+        candidate = next_patch_version(latest.version)
         while any(version.version == candidate for version in strategy.versions):
             candidate = next_patch_version(candidate)
         manifest = replace(manifest, version=candidate)
-    try:
-        revision = publish_revision(manifest, data.description, await push_credentials(db))
-    except GitVersionError as exc:
-        raise HTTPException(400, str(exc)) from exc
+
     version = StrategyVersion(
         strategy_id=strategy.id,
         version=manifest.version,
         entrypoint=data.module,
+        code=code,
+        code_hash=c_hash,
         parameter_schema=manifest.parameter_schema(),
         data_requirements=manifest.data_requirements(),
-        git_commit=revision.commit,
-        git_ref=revision.ref,
-        git_repo=str(revision.repo),
-        manifest_hash=revision.manifest_hash,
+        manifest_hash=m_hash,
         description=data.description,
     )
     db.add(version)
@@ -274,6 +301,21 @@ async def create_strategy_version(strategy_id: str, data: StrategyVersionCreate,
     await db.commit()
     await db.refresh(strategy, ["versions"])
     return version_out(version, latest_version(strategy).id)
+
+
+@app.post("/api/strategies/{strategy_id}/versions/{version_id}/restore")
+async def restore_strategy_version(strategy_id: str, version_id: str, db: AsyncSession = Depends(get_db)):
+    strategy = await get_strategy_or_404(strategy_id, db)
+    version = next((item for item in strategy.versions if item.id == version_id), None)
+    if not version:
+        raise HTTPException(404, "策略版本不存在")
+    if not version.code:
+        raise HTTPException(400, "该历史版本未记录源码，无法还原")
+    module_name = version.entrypoint.partition(":")[0].rsplit(".", 1)[-1]
+    source_path = Path(__file__).resolve().parent / "strategies" / f"{module_name}.py"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text(version.code, encoding="utf-8")
+    return {"ok": True, "message": f"已将代码成功还原至版本 v{version.version}"}
 
 
 @app.delete("/api/strategies/{strategy_id}/versions/{version_id}", status_code=204)
@@ -335,6 +377,11 @@ async def delete_backtest(run_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "回测不存在")
     if r.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.ANALYZING}:
         raise HTTPException(409, "运行中或排队中的回测不能删除，请先取消并等待任务结束")
+    await db.execute(
+        update(ResearchProject)
+        .where(ResearchProject.latest_backtest_id == run_id)
+        .values(latest_backtest_id=None)
+    )
     await db.delete(r)
     await db.commit()
     artifact_root = settings.artifact_root.resolve()

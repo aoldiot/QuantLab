@@ -9,7 +9,6 @@ from pathlib import Path
 
 from .config import settings
 from .db import SessionLocal
-from .git_versions import GitVersionError, export_revision, resolve_export_repo
 from .models import BacktestRun, ResearchProject, ResearchStatus, RunStatus
 
 
@@ -78,21 +77,27 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
     payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     source_root = work_dir / "source"
-    try:
-        repo = resolve_export_repo(Path(strategy["git_repo"]), strategy["git_commit"])
-        export_revision(repo, strategy["git_commit"], source_root)
-    except (GitVersionError, KeyError) as exc:
-        await _update(run_id, status=RunStatus.FAILED, stage="Git 版本导出失败", progress=100, error_message=str(exc))
-        return
     snapshot_backend = source_root / "backend"
-    if not snapshot_backend.exists():
-        await _update(run_id, status=RunStatus.FAILED, stage="Git 版本导出失败", progress=100,
-                      error_message="Git 快照中不存在 backend 目录")
-        return
+    strategies_dir = snapshot_backend / "app" / "strategies"
+    strategies_dir.mkdir(parents=True, exist_ok=True)
+    (snapshot_backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (strategies_dir / "__init__.py").write_text("", encoding="utf-8")
 
-    # Strategy source is pinned to its Git revision. Platform runtime files are
-    # versioned by the running QuantLab service and must move together; copying
-    # only analytics can otherwise mix incompatible worker/contract signatures.
+    module_entry = strategy.get("module") or strategy.get("entrypoint", "")
+    module_name = module_entry.partition(":")[0].rsplit(".", 1)[-1]
+    strategy_code = strategy.get("code")
+    if not strategy_code:
+        disk_file = Path(__file__).resolve().parent / "strategies" / f"{module_name}.py"
+        if disk_file.exists():
+            strategy_code = disk_file.read_text(encoding="utf-8")
+        else:
+            await _update(run_id, status=RunStatus.FAILED, stage="策略代码读取失败", progress=100,
+                          error_message=f"数据库和工作区中均未找到策略代码：{module_name}")
+            return
+
+    (strategies_dir / f"{module_name}.py").write_text(strategy_code, encoding="utf-8")
+
+    # Copy platform runtime files into sandbox
     current_app = Path(__file__).resolve().parent
     runtime_files = (
         (current_app / "config.py", snapshot_backend / "app" / "config.py"),

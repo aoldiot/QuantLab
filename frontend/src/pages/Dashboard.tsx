@@ -1,2 +1,32 @@
-import {ArrowRight,FlaskConical,Layers3,PlayCircle,Plus} from 'lucide-react';import {Link} from 'react-router-dom';import {Card,Header} from '../components'
-export default function Dashboard(){return <><Header title="仪表盘" subtitle="策略研究与回测工作区" actions={<Link className="button primary" to="/backtests/new"><Plus size={17}/>新建回测</Link>}/><div className="stats"><Card><span>策略</span><strong>1</strong><small>1 个可回测版本</small></Card><Card><span>回测任务</span><strong>0</strong><small>等待首次运行</small></Card><Card><span>运行中</span><strong className="cyan">0</strong><small>Worker 空闲</small></Card><Card><span>系统状态</span><strong className="green">正常</strong><small>API 与数据库可用</small></Card></div><div className="grid two"><Card title="开始使用"><div className="quick"><Link to="/strategies"><Layers3/><div><b>查看策略</b><small>检查参数定义与数据要求</small></div><ArrowRight/></Link><Link to="/backtests/new"><FlaskConical/><div><b>创建回测</b><small>填写参数并提交后台任务</small></div><ArrowRight/></Link><Link to="/backtests"><PlayCircle/><div><b>任务中心</b><small>跟踪进度并查看结果</small></div><ArrowRight/></Link></div></Card><Card title="系统架构"><div className="architecture"><span>Web 配置</span><i>→</i><span>隔离子进程</span><i>→</i><span>BacktestNode</span><i>→</i><span>ReportProvider</span></div><p className="muted">所有结果来自真实 NautilusTrader 回测。数据或配置错误会直接失败并保留日志。</p></Card></div></>}
+import {ArrowRight,FlaskConical,Layers3,PlayCircle,Plus} from 'lucide-react'
+import {Link} from 'react-router-dom'
+import {Card} from '../components'
+
+export default function Dashboard(){
+  return <>
+    <div className="stats">
+      <Card><span>策略</span><strong>1</strong><small>1 个可回测版本</small></Card>
+      <Card><span>回测任务</span><strong>0</strong><small>等待首次运行</small></Card>
+      <Card><span>运行中</span><strong className="cyan">0</strong><small>Worker 空闲</small></Card>
+      <Card><span>系统状态</span><strong className="green">正常</strong><small>API 与数据库可用</small></Card>
+    </div>
+    <div className="grid two">
+      <Card title="开始使用">
+        <div style={{marginBottom:14}}>
+          <Link className="button primary" to="/backtests/new" style={{width:'100%',justifyContent:'center'}}>
+            <Plus size={16}/>新建回测
+          </Link>
+        </div>
+        <div className="quick">
+          <Link to="/strategies"><Layers3/><div><b>查看策略</b><small>检查参数定义与数据要求</small></div><ArrowRight/></Link>
+          <Link to="/backtests/new"><FlaskConical/><div><b>创建回测</b><small>填写参数并提交后台任务</small></div><ArrowRight/></Link>
+          <Link to="/backtests"><PlayCircle/><div><b>任务中心</b><small>跟踪进度并查看结果</small></div><ArrowRight/></Link>
+        </div>
+      </Card>
+      <Card title="系统架构">
+        <div className="architecture"><span>Web 配置</span><i>→</i><span>隔离子进程</span><i>→</i><span>BacktestNode</span><i>→</i><span>ReportProvider</span></div>
+        <p className="muted">所有结果来自真实 NautilusTrader 回测。数据或配置错误会直接失败并保留日志。</p>
+      </Card>
+    </div>
+  </>
+}

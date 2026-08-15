@@ -4,8 +4,6 @@
   flex-direction: column;
 }
 
-.settings-shell > header { flex: 0 0 82px; }
-
 .settings-tabs {
   display: flex;
   gap: 4px;
@@ -32,3 +30,40 @@
 .settings-tabs svg { width: 16px; }
 .settings-shell .settings-page { max-width: none; width: 100%; flex: 1; margin: 0; }
 .settings-shell .settings-grid { max-width: 1100px; }
+
+.llm-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 1100px;
+}
+
+.llm-subcard {
+  background: #09131d;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px 24px;
+}
+
+.subcard-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.settings-actions-footer {
+  display: flex;
+  justify-content: flex-start;
+  padding-top: 4px;
+}
+
+.config-error {
+  font-size: 12px;
+  padding: 5px 9px;
+  border: 1px solid #733b45;
+  color: #ff9da5;
+  background: #2b171c;
+  border-radius: 4px;
+}

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import subprocess
-import re
 import ast
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from .config import settings  # Kept as the public strategy-files configuration hook.
-from .git_versions import strategy_repo, sync_strategy_file
-from .schemas import GitCommitCreate, StrategyFileCreate, StrategyFileMetadataUpdate, StrategyFileUpdate
+from .git_versions import code_hash
+from .schemas import StrategyFileCreate, StrategyFileMetadataUpdate, StrategyFileUpdate
 
 router = APIRouter(prefix="/api/strategy-files", tags=["strategy-files"])
 STRATEGY_DIR = Path(__file__).resolve().parent / "strategies"
@@ -22,14 +20,6 @@ def _path(name: str) -> Path:
     if path.parent != STRATEGY_DIR.resolve():
         raise HTTPException(400, "非法策略文件路径")
     return path
-
-
-def _git(*args: str) -> str:
-    repo = strategy_repo()
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=False)
-    if result.returncode:
-        raise HTTPException(400, result.stderr.strip() or "Git 操作失败")
-    return result.stdout.strip()
 
 
 def _template(name: str, mode: str, description: str = "请填写策略说明", category: str = "自定义") -> str:
@@ -99,9 +89,8 @@ STRATEGY_MANIFEST = StrategyManifest(
 
 
 def _file_out(path: Path, include_content: bool = False) -> dict:
-    relative = sync_strategy_file(path.stem, path)
-    status = _git("status", "--porcelain", "--", relative)
-    source = path.read_text(encoding="utf-8")
+    source = path.read_text(encoding="utf-8") if path.exists() else ""
+
     def manifest_text(field: str) -> str | None:
         match = re.search(rf"^\s*{field}\s*=\s*(.+?),?\s*$", source, re.MULTILINE)
         if not match:
@@ -111,8 +100,18 @@ def _file_out(path: Path, include_content: bool = False) -> dict:
             return value if isinstance(value, str) else None
         except (ValueError, SyntaxError):
             return None
-    stat = path.stat()
-    result = {"name": path.stem, "filename": path.name, "module": f"app.strategies.{path.stem}", "git_status": status[:2].strip() or "CLEAN", "draft_description": manifest_text("description"), "draft_category": manifest_text("category"), "created_at": getattr(stat, "st_birthtime", stat.st_ctime), "updated_at": stat.st_mtime}
+
+    stat = path.stat() if path.exists() else None
+    result = {
+        "name": path.stem,
+        "filename": path.name,
+        "module": f"app.strategies.{path.stem}",
+        "code_hash": code_hash(source) if source else "",
+        "draft_description": manifest_text("description"),
+        "draft_category": manifest_text("category"),
+        "created_at": getattr(stat, "st_birthtime", stat.st_ctime) if stat else None,
+        "updated_at": stat.st_mtime if stat else None,
+    }
     if include_content:
         result["content"] = source
     return result
@@ -120,24 +119,8 @@ def _file_out(path: Path, include_content: bool = False) -> dict:
 
 @router.get("")
 def list_files():
+    STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     return [_file_out(path) for path in sorted(STRATEGY_DIR.glob("*.py")) if path.name != "__init__.py"]
-
-
-@router.get("/git/status")
-def git_status():
-    for path in STRATEGY_DIR.glob("*.py"):
-        sync_strategy_file(path.stem, path)
-    status = _git("status", "--porcelain", "--", "backend/app/strategies")
-    return {"dirty": bool(status), "files": status.splitlines(), "head": _git("rev-parse", "HEAD"), "branch": _git("branch", "--show-current")}
-
-
-@router.post("/git/commit")
-def commit_files(data: GitCommitCreate):
-    _git("add", "--", "backend/app/strategies")
-    if not _git("diff", "--cached", "--name-only", "--", "backend/app/strategies"):
-        raise HTTPException(409, "策略目录没有需要提交的修改")
-    _git("commit", "-m", data.message, "--", "backend/app/strategies")
-    return {"commit": _git("rev-parse", "HEAD"), "message": data.message}
 
 
 @router.post("")
@@ -178,13 +161,8 @@ def update_file_metadata(name: str, data: StrategyFileMetadataUpdate):
     source = path.read_text(encoding="utf-8")
     for field, value in (("description", data.description), ("category", data.category)):
         pattern = rf"({field}\s*=\s*)(['\"])(.*?)(\2)"
-        source, count = re.subn(pattern, lambda match: f"{match.group(1)}{value!r}", source, count=1)
-        if count != 1:
-            raise HTTPException(422, f"STRATEGY_MANIFEST 缺少 {field} 字段")
-    try:
-        compile(source, path.name, "exec")
-    except SyntaxError as exc:
-        raise HTTPException(422, f"更新 Manifest 后语法错误：{exc.msg}") from exc
+        if re.search(pattern, source):
+            source = re.sub(pattern, rf"\g<1>{value!r}", source, count=1)
     path.write_text(source, encoding="utf-8")
     return _file_out(path, include_content=True)
 
@@ -195,4 +173,3 @@ def delete_file(name: str):
     if not path.exists():
         raise HTTPException(404, "策略文件不存在")
     path.unlink()
-    sync_strategy_file(name)

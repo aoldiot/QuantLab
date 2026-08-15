@@ -63,10 +63,11 @@ class StrategyManifest:
 
 
 def load_manifest(module_path: str) -> StrategyManifest:
-    module = reload(import_module(module_path))
+    clean_module = module_path.partition(":")[0]
+    module = reload(import_module(clean_module))
     manifest = getattr(module, "STRATEGY_MANIFEST", None)
     if not isinstance(manifest, StrategyManifest):
-        raise TypeError(f"{module_path} 必须导出 StrategyManifest 类型的 STRATEGY_MANIFEST")
+        raise TypeError(f"{clean_module} 必须导出 StrategyManifest 类型的 STRATEGY_MANIFEST")
     validate_plot_contract(module, manifest)
     return manifest
 

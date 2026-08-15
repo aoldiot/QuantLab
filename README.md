@@ -80,7 +80,7 @@ INSTRUMENT_ID_TEMPLATE={symbol}-PERP.{venue}
 
 系统设置页保存全局 Anthropic Messages API 配置。API Key 使用 `LLM_SECRET_ENCRYPTION_KEY` 加密，后端通过 `claude-agent-sdk` 自带的 runtime 运行 Agent，不依赖本机 Claude Code 或本机登录。
 
-策略研究页通过 Hermes API Server 进行研究研讨和回测分析。启动 `hermes gateway` 后，在后端环境中配置 `HERMES_BASE_URL`（默认 `http://127.0.0.1:8642/v1`）与 `HERMES_API_KEY`（应与 Hermes 的 `API_SERVER_KEY` 一致）。QuantLab 仅向 Hermes 提供受控研究上下文；策略代码仍由 Claude Agent SDK 在隔离 worktree 中实现。
+策略研究页通过 Hermes API Server 进行研究研讨和回测分析。启动 `hermes gateway` 后，可在前端「系统设置 - LLM 配置」中直接配置 Hermes Base URL 与 API Key（API Key 加密存储）。QuantLab 仅向 Hermes 提供受控研究上下文；策略代码仍由 Claude Agent SDK 在隔离 worktree 中实现。
 
 策略详情页可启动隔离的 Git worktree Agent 会话，支持 Plan、审批执行、自动编辑和完全自动模式。会话与工具事件写入 PostgreSQL，工作区保存在 `data/agent/worktrees/`，修改经 Diff 确认后才应用到正式策略文件。数据库结构使用 Alembic 管理，`start.sh` 会先执行 `alembic upgrade head`。
 
