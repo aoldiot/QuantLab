@@ -99,6 +99,10 @@ def _tasks_dir() -> Path:
     return path
 
 
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def _save_task_to_disk(task: dict[str, Any]) -> None:
     try:
         task_id = task.get("id")
@@ -134,9 +138,6 @@ def _init_load_tasks() -> None:
 
 _init_load_tasks()
 
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _publish(task_id: str, **changes: Any) -> None:
