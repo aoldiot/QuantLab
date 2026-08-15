@@ -4,10 +4,9 @@ import csv
 import hashlib
 import io
 import json
+import ssl
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 import zipfile
 from calendar import monthrange
@@ -18,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
@@ -36,6 +36,16 @@ EXCHANGE_INFO = {
 }
 TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
 CATALOG_FORMAT_VERSION = 2
+
+_HTTP_CLIENT = httpx.Client(
+    timeout=httpx.Timeout(60.0, connect=20.0),
+    follow_redirects=True,
+    headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept-Encoding": "gzip, deflate",
+    },
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
+)
 
 
 class DownloadCreate(BaseModel):
@@ -100,36 +110,60 @@ def _log(task_id: str, message: str, level: str = "info") -> None:
 
 
 def _json_get(url: str) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={"User-Agent": "QuantLab/0.1"})
-    with urllib.request.urlopen(request, timeout=25) as response:
-        return json.load(response)
+    last_error: Exception | None = None
+    for attempt in range(5):
+        try:
+            response = _HTTP_CLIENT.get(url)
+            if response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after and retry_after.isdigit() else (2**attempt) * 0.5
+                time.sleep(min(delay, 15))
+                continue
+            response.raise_for_status()
+            return response.json()
+        except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt == 4:
+                break
+            time.sleep((2**attempt) * 0.5)
+    raise RuntimeError(f"请求接口失败 ({url}): {last_error}") from last_error
 
 
 def _download(url: str) -> bytes | None:
-    for attempt in range(4):
-        request = urllib.request.Request(url, headers={"User-Agent": "QuantLab/0.1"})
+    for attempt in range(5):
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                return response.read()
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
+            response = _HTTP_CLIENT.get(url)
+            if response.status_code == 404:
                 return None
-            if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt == 4:
+                    response.raise_for_status()
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after and retry_after.isdigit() else (2**attempt) * 0.5
+                time.sleep(min(delay, 20))
+                continue
+            response.raise_for_status()
+            return response.content
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            if attempt == 4:
                 raise
-            retry_after = exc.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after and retry_after.isdigit() else 2**attempt
-            time.sleep(min(delay, 30))
-        except (TimeoutError, urllib.error.URLError):
-            if attempt == 3:
+            time.sleep((2**attempt) * 0.5)
+        except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
+            if attempt == 4:
                 raise
-            time.sleep(2**attempt)
+            time.sleep((2**attempt) * 0.5)
     return None
 
 
 def _fetch_archive(archive: Archive) -> tuple[bytes | None, bytes | None]:
-    content = _download(archive.url)
-    checksum = _download(f"{archive.url}.CHECKSUM") if content is not None else None
-    return content, checksum
+    try:
+        content = _download(archive.url)
+        checksum = _download(f"{archive.url}.CHECKSUM") if content is not None else None
+        return content, checksum
+    except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
+        return None, None
 
 
 def _symbol_map(market_type: str) -> dict[str, dict[str, Any]]:
@@ -291,7 +325,10 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
         symbols = list(dict.fromkeys(normalize_symbol(item) for item in payload.symbols))
         missing = [item for item in symbols if item not in markets]
         if missing:
-            raise ValueError(f"Binance 当前不存在或未交易的品种: {', '.join(missing)}")
+            _log(task_id, f"跳过未在交易中的品种: {', '.join(missing)}", "warning")
+            symbols = [item for item in symbols if item in markets]
+        if not symbols:
+            raise ValueError("没有可用的有效交易品种")
         instruments = {symbol: make_instrument(markets[symbol], payload.market_type) for symbol in symbols}
         catalog = ParquetDataCatalog(str(catalog_path))
         # Instrument metadata is tiny and uses a deterministic catalog path.
@@ -313,14 +350,17 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
             futures = {pool.submit(_fetch_archive, archive): archive for archive in pending_monthly}
             for future in as_completed(futures):
                 archive = futures[future]
-                monthly_results[archive.key] = future.result()
+                try:
+                    monthly_results[archive.key] = future.result()
+                except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
+                    monthly_results[archive.key] = (None, None)
 
         work: list[tuple[str, str, Archive, bool]] = []
         for symbol, interval, monthly in plan:
             if payload.mode == "incremental" and monthly.key in manifest["archives"]:
                 work.append((symbol, interval, monthly, True))
             else:
-                monthly_content, _ = monthly_results[monthly.key]
+                monthly_content, _ = monthly_results.get(monthly.key, (None, None))
                 if monthly_content is not None:
                     _log(task_id, f"月归档可用 {monthly.url}", "success")
                     work.append((symbol, interval, monthly, False))
@@ -336,36 +376,45 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
             futures = {pool.submit(_fetch_archive, archive): archive for archive in pending_daily}
             for future in as_completed(futures):
                 archive = futures[future]
-                daily_results[archive.key] = future.result()
+                try:
+                    daily_results[archive.key] = future.result()
+                except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
+                    daily_results[archive.key] = (None, None)
 
         for completed, (symbol, interval, archive, known_complete) in enumerate(work, 1):
             if known_complete or (payload.mode == "incremental" and archive.key in manifest["archives"]):
                 skipped += 1
                 _log(task_id, f"已存在，跳过 {archive.key}", "muted")
             else:
-                content, checksum = (monthly_results if archive.fallbacks else daily_results)[archive.key]
+                content, checksum = (monthly_results if archive.fallbacks else daily_results).get(archive.key, (None, None))
                 if content is None:
                     missing_files += 1
-                    _log(task_id, f"远端归档不存在，已跳过 {archive.url}", "warning")
+                    _log(task_id, f"远端归档不存在或下载失败，已跳过 {archive.url}", "warning")
                 else:
-                    digest = hashlib.sha256(content).hexdigest()
-                    if checksum:
-                        expected = checksum.decode("utf-8").strip().split()[0].lower()
-                        if expected != digest:
-                            raise ValueError(f"Binance CHECKSUM 校验失败: {archive.url}")
-                    else:
-                        _log(task_id, "远端未提供 CHECKSUM，继续处理 ZIP", "warning")
-                    bars = parse_archive(content, instruments[symbol], interval, payload.start_date, payload.end_date)
-                    if bars:
-                        catalog.write_data(bars)
-                        rows += len(bars)
-                    manifest["archives"][archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
-                    _save_manifest(manifest_path, manifest)
-                    downloaded += 1
-                    _log(task_id, f"转换并写入 {len(bars):,} 根 K 线", "success")
+                    try:
+                        digest = hashlib.sha256(content).hexdigest()
+                        if checksum:
+                            expected = checksum.decode("utf-8").strip().split()[0].lower()
+                            if expected != digest:
+                                _log(task_id, f"CHECKSUM 校验不一致，跳过归档: {archive.url}", "warning")
+                                missing_files += 1
+                                continue
+                        else:
+                            _log(task_id, "远端未提供 CHECKSUM，继续处理 ZIP", "warning")
+                        bars = parse_archive(content, instruments[symbol], interval, payload.start_date, payload.end_date)
+                        if bars:
+                            catalog.write_data(bars)
+                            rows += len(bars)
+                        manifest["archives"][archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
+                        _save_manifest(manifest_path, manifest)
+                        downloaded += 1
+                        _log(task_id, f"转换并写入 {len(bars):,} 根 K 线", "success")
+                    except Exception as e:  # noqa: BLE001
+                        missing_files += 1
+                        _log(task_id, f"解析写入归档失败 ({archive.url}): {e}", "warning")
             _publish(task_id, completed_files=completed, progress=round(completed / max(1, total) * 100), rows=rows, downloaded_files=downloaded, skipped_files=skipped, missing_files=missing_files)
         _publish(task_id, status="completed", stage="完成", progress=100, finished_at=_now())
-        _log(task_id, f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个", "success")
+        _log(task_id, f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个，缺失/跳过 {missing_files} 个", "success")
     except Exception as exc:  # noqa: BLE001 - task failures must be reflected in task state
         _publish(task_id, status="failed", stage="失败", error=str(exc), finished_at=_now())
         _log(task_id, str(exc), "error")
