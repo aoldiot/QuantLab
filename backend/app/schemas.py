@@ -87,6 +87,33 @@ class StrategyOut(BaseModel):
     updated_at: datetime | None = None
 
 
+class CatalogCheckRequest(BaseModel):
+    symbols: list[str] = Field(min_length=1)
+    timeframes: list[str] = Field(min_length=1)
+    start_date: date
+    end_date: date
+    venue: str = "BINANCE"
+    catalog_path: str | None = None
+
+
+class CatalogMissingDetail(BaseModel):
+    symbol: str
+    instrument_id: str
+    timeframe: str
+    status: Literal["MISSING_INSTRUMENT", "MISSING_DATA", "PARTIAL_RANGE", "OK"]
+    message: str
+
+
+class CatalogCheckResponse(BaseModel):
+    ok: bool
+    has_missing: bool
+    catalog_exists: bool
+    catalog_path: str
+    missing_symbols: list[str]
+    details: list[CatalogMissingDetail]
+    summary_text: str
+
+
 class BacktestCreate(BaseModel):
     name: str
     strategy_version_id: str
@@ -102,10 +129,12 @@ class BacktestCreate(BaseModel):
     funding: bool = True
     catalog_path: str | None = None
     chunk_size: int | None = Field(default=None, gt=0)
+    ignore_missing_data: bool = False
 
     def model_post_init(self, __context):
         if self.end_date <= self.start_date:
             raise ValueError("结束日期必须晚于开始日期")
+
 
 
 class BacktestOut(BaseModel):

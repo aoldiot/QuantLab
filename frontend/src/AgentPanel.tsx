@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {agentSocketUrl,api} from './api'
 import type {AgentSession,PermissionMode} from './types'
+import {getClientId} from './utils'
 
 type ChatLine={role:'user'|'assistant'|'system';text:string;kind?:'tool'}
 type ChangeSummary={diff:string;files:{path:string;additions:number;deletions:number}[];additions:number;deletions:number}
@@ -13,7 +14,8 @@ const modes:{value:PermissionMode;label:string;description:string;icon:typeof Ha
   {value:'plan',label:'规划',description:'只分析代码并给出方案，不修改文件',icon:FileCode2},
   {value:'bypassPermissions',label:'完全自动',description:'在平台安全边界内自动执行允许的操作',icon:Bolt},
 ]
-const clientId=()=>{let value=localStorage.getItem('quantlab_client_id');if(!value){value=crypto.randomUUID();localStorage.setItem('quantlab_client_id',value)}return value}
+const clientId=getClientId
+
 function collectText(value:unknown):string[]{if(typeof value==='string')return[];if(Array.isArray(value))return value.flatMap(collectText);if(value&&typeof value==='object'){const item=value as Record<string,unknown>;const own=typeof item.text==='string'?[item.text]:[];return own.concat(Object.entries(item).filter(([key])=>key!=='text').flatMap(([,child])=>collectText(child)))}return[]}
 const toolNames:Record<string,string>={Read:'读取文件',Glob:'查找文件',Grep:'搜索代码',Edit:'编辑文件',Write:'写入文件',Bash:'执行命令',Skill:'调用策略技能',Agent:'启动子任务',AskUserQuestion:'询问用户',WebSearch:'联网搜索',WebFetch:'读取网页'}
 const fieldNames:Record<string,string>={command:'命令',file_path:'文件路径',path:'路径',pattern:'搜索规则',query:'查询内容',old_string:'原内容',new_string:'新内容',content:'内容',description:'说明'}

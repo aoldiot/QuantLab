@@ -27,6 +27,9 @@ from .research import router as research_router
 from .schemas import (
     BacktestCreate,
     BacktestOut,
+    CatalogCheckRequest,
+    CatalogCheckResponse,
+    CatalogMissingDetail,
     StrategyCreate,
     StrategyOut,
     StrategyUpdate,
@@ -34,6 +37,7 @@ from .schemas import (
     StrategyVersionOut,
 )
 from .strategy_contract import load_manifest
+
 from .strategy_files import router as strategy_files_router
 
 
@@ -392,9 +396,153 @@ async def delete_backtest(run_id: str, db: AsyncSession = Depends(get_db)):
         shutil.rmtree(artifact, ignore_errors=True)
 
 
+def check_catalog_coverage_batch(req: CatalogCheckRequest) -> CatalogCheckResponse:
+    from nautilus_trader.model.data import Bar
+    from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
+    from .backtests.builder import instrument_id, timeframe_to_bar_spec
+    import logging
+
+    resolved_path = Path(req.catalog_path or settings.catalog_path).expanduser().resolve()
+    if not resolved_path.exists():
+        missing = [s.strip() for s in req.symbols if s.strip()]
+        details = [
+            CatalogMissingDetail(
+                symbol=s,
+                instrument_id=instrument_id(s, req.venue),
+                timeframe=tf,
+                status="MISSING_DATA",
+                message=f"Catalog 目录不存在: {resolved_path}",
+            )
+            for s in missing
+            for tf in req.timeframes
+        ]
+        return CatalogCheckResponse(
+            ok=False,
+            has_missing=True,
+            catalog_exists=False,
+            catalog_path=str(resolved_path),
+            missing_symbols=missing,
+            details=details,
+            summary_text=f"Catalog 目录不存在：{resolved_path}",
+        )
+
+    registered_instruments = set()
+    catalog = None
+    try:
+        catalog = ParquetDataCatalog(str(resolved_path))
+        for inst in catalog.instruments():
+            registered_instruments.add(inst.id.value)
+    except Exception as err:
+        logging.getLogger("uvicorn.error").warning("读取 Catalog Instruments 失败: %s", err)
+
+    bar_dir = resolved_path / "data" / "bar"
+    start_str = f"{req.start_date}T00:00:00Z"
+    end_str = f"{req.end_date}T23:59:59Z"
+
+    details: list[CatalogMissingDetail] = []
+    missing_symbol_set: set[str] = set()
+
+    for s in [sym.strip() for sym in req.symbols if sym.strip()]:
+        inst_id = instrument_id(s, req.venue)
+        is_inst_registered = inst_id in registered_instruments
+
+        for tf in req.timeframes:
+            try:
+                spec = timeframe_to_bar_spec(tf)
+            except Exception:
+                details.append(
+                    CatalogMissingDetail(
+                        symbol=s,
+                        instrument_id=inst_id,
+                        timeframe=tf,
+                        status="MISSING_DATA",
+                        message=f"不支持的数据周期: {tf}",
+                    )
+                )
+                missing_symbol_set.add(s)
+                continue
+
+            bar_dir_name = f"{inst_id}-{spec}-EXTERNAL"
+            bar_path = bar_dir / bar_dir_name
+
+            files = []
+            if bar_path.is_dir() and catalog is not None:
+                try:
+                    files = catalog._query_files(Bar, [bar_dir_name], start_str, end_str)
+                except Exception:
+                    files = list(bar_path.glob("*.parquet"))
+
+            if not is_inst_registered and not bar_path.exists():
+                details.append(
+                    CatalogMissingDetail(
+                        symbol=s,
+                        instrument_id=inst_id,
+                        timeframe=tf,
+                        status="MISSING_INSTRUMENT",
+                        message="未在 Catalog 中找到该标的的交易对定义及行情数据",
+                    )
+                )
+                missing_symbol_set.add(s)
+            elif not bar_path.exists() or len(list(bar_path.glob("*.parquet"))) == 0:
+                details.append(
+                    CatalogMissingDetail(
+                        symbol=s,
+                        instrument_id=inst_id,
+                        timeframe=tf,
+                        status="MISSING_DATA",
+                        message=f"缺少 {tf} 周期 Parquet 行情数据",
+                    )
+                )
+                missing_symbol_set.add(s)
+            elif not files:
+                details.append(
+                    CatalogMissingDetail(
+                        symbol=s,
+                        instrument_id=inst_id,
+                        timeframe=tf,
+                        status="PARTIAL_RANGE",
+                        message=f"{tf} 周期在请求时间范围 ({req.start_date} ~ {req.end_date}) 内未找到可用数据",
+                    )
+                )
+                missing_symbol_set.add(s)
+            else:
+                details.append(
+                    CatalogMissingDetail(
+                        symbol=s,
+                        instrument_id=inst_id,
+                        timeframe=tf,
+                        status="OK",
+                        message="数据完整",
+                    )
+                )
+
+    missing_symbols = sorted(missing_symbol_set)
+    has_missing = len(missing_symbols) > 0
+    if has_missing:
+        summary_text = f"检测到 {len(missing_symbols)} 个币种缺少 Catalog 数据：{', '.join(missing_symbols)}"
+    else:
+        summary_text = "所有标的 Catalog 数据均已完备"
+
+    return CatalogCheckResponse(
+        ok=not has_missing,
+        has_missing=has_missing,
+        catalog_exists=True,
+        catalog_path=str(resolved_path),
+        missing_symbols=missing_symbols,
+        details=details,
+        summary_text=summary_text,
+    )
+
+
+@app.post("/api/backtests/check-catalog", response_model=CatalogCheckResponse)
+async def check_backtest_catalog(req: CatalogCheckRequest):
+    return check_catalog_coverage_batch(req)
+
+
 @app.post("/api/backtests", response_model=BacktestOut)
 async def create_backtest(data: BacktestCreate, db: AsyncSession = Depends(get_db)):
     return run_out(await create_backtest_run(data, db))
+
 
 
 @app.post("/api/backtests/{run_id}/cancel", response_model=BacktestOut)

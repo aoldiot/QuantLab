@@ -2,8 +2,8 @@ import {useEffect,useMemo,useState} from 'react'
 import {Check,Info,Play,Save,ShieldCheck} from 'lucide-react'
 import {useLocation,useNavigate} from 'react-router-dom'
 import {api} from '../api'
-import {Card} from '../components'
-import type {Strategy} from '../types'
+import {Card,CatalogMissingDialog} from '../components'
+import type {CatalogCheckResponse,Strategy} from '../types'
 
 export default function NewBacktest(){
   const nav=useNavigate(),location=useLocation()
@@ -13,40 +13,81 @@ export default function NewBacktest(){
   const[selected,setSelected]=useState('')
   const[busy,setBusy]=useState(false)
   const[error,setError]=useState('')
+  const[catalogCheck,setCatalogCheck]=useState<CatalogCheckResponse|null>(null)
+  const[pendingData,setPendingData]=useState<Record<string,any>|null>(null)
+
   useEffect(()=>{api.strategies().then(x=>{setStrategies(x);setSelected(copiedStrategy&&x.some(s=>s.id===copiedStrategy)?copiedStrategy:x[0]?.id??'')})},[copiedStrategy])
   const strategy=useMemo(()=>strategies.find(x=>x.id===selected),[strategies,selected])
-  async function submit(e:React.FormEvent<HTMLFormElement>){
-    e.preventDefault()
+
+  async function executeCreate(data:Record<string,any>){
     setBusy(true)
     setError('')
-    const f=new FormData(e.currentTarget)
-    const params:Record<string,unknown>={}
-    Object.entries(strategy!.parameter_schema).forEach(([key,spec])=>{
-      const raw=f.get('param_'+key)
-      params[key]=spec.type==='boolean'?raw==='on':spec.type==='integer'?Number(raw):spec.type==='number'?Number(raw):raw
-    })
     try{
-      const run=await api.createRun({
-        name:f.get('name'),
-        strategy_version_id:strategy!.latest_version_id,
-        strategy_parameters:params,
-        venue:copied?.venue??'BINANCE',
-        symbols:String(f.get('symbols')).split(',').map(x=>x.trim()).filter(Boolean),
-        timeframes:strategy!.data_requirements.timeframes,
-        start_date:f.get('start'),
-        end_date:f.get('end'),
-        initial_balance:Number(f.get('capital')),
-        leverage:Number(f.get('leverage')),
-        execution_model:f.get('model'),
-        funding:strategy!.data_requirements.funding,
-        catalog_path:f.get('catalog_path')||null
-      })
+      const run=await api.createRun(data)
       nav('/backtests/'+run.id)
     }catch(e){
       setError(e instanceof Error?e.message:'创建失败')
       setBusy(false)
     }
   }
+
+  async function submit(e:React.FormEvent<HTMLFormElement>){
+    e.preventDefault()
+    if(!strategy)return
+    setBusy(true)
+    setError('')
+    const f=new FormData(e.currentTarget)
+    const params:Record<string,unknown>={}
+    Object.entries(strategy.parameter_schema).forEach(([key,spec])=>{
+      const raw=f.get('param_'+key)
+      params[key]=spec.type==='boolean'?raw==='on':spec.type==='integer'?Number(raw):spec.type==='number'?Number(raw):raw
+    })
+    const payload={
+      name:f.get('name'),
+      strategy_version_id:strategy.latest_version_id,
+      strategy_parameters:params,
+      venue:copied?.venue??'BINANCE',
+      symbols:String(f.get('symbols')).split(',').map(x=>x.trim()).filter(Boolean),
+      timeframes:strategy.data_requirements.timeframes,
+      start_date:String(f.get('start')),
+      end_date:String(f.get('end')),
+      initial_balance:Number(f.get('capital')),
+      leverage:Number(f.get('leverage')),
+      execution_model:f.get('model'),
+      funding:strategy.data_requirements.funding,
+      catalog_path:(f.get('catalog_path') as string)||null,
+      ignore_missing_data:false,
+    }
+
+    try{
+      const check=await api.checkBacktestCatalog({
+        symbols:payload.symbols,
+        timeframes:payload.timeframes,
+        start_date:payload.start_date,
+        end_date:payload.end_date,
+        venue:payload.venue,
+        catalog_path:payload.catalog_path,
+      })
+      if(check.has_missing){
+        setCatalogCheck(check)
+        setPendingData(payload)
+        setBusy(false)
+        return
+      }
+      await executeCreate(payload)
+    }catch(e){
+      setError(e instanceof Error?e.message:'校验 Catalog 数据失败')
+      setBusy(false)
+    }
+  }
+
+  async function confirmProceedWithMissing(){
+    if(!pendingData)return
+    await executeCreate({...pendingData,ignore_missing_data:true})
+    setCatalogCheck(null)
+    setPendingData(null)
+  }
+
   const oldParams=copied?.strategy_parameters??{}
   return <>
     <div className="steps">{['选择策略','策略参数','交易范围','账户设置','执行模型','确认'].map((x,i)=><div className={i<5?'done':''} key={x}><span>{i<4?<Check/>:i+1}</span>{x}</div>)}</div>
@@ -104,5 +145,13 @@ export default function NewBacktest(){
         <div className="tip"><Info/>所有字段都可以在提交前调整。</div>
       </aside>
     </form>
+    <CatalogMissingDialog
+      open={Boolean(catalogCheck)}
+      checkResult={catalogCheck}
+      busy={busy}
+      onCancel={()=>{setCatalogCheck(null);setPendingData(null)}}
+      onConfirm={confirmProceedWithMissing}
+    />
   </>
 }
+

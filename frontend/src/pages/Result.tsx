@@ -5,6 +5,7 @@ import {Area,AreaChart,Bar,BarChart,CartesianGrid,Line,LineChart,ResponsiveConta
 import {api} from '../api'
 import {Card,Metric} from '../components'
 import type {Run} from '../types'
+import {getClientId} from '../utils'
 import CandleStudio from '../CandleStudio'
 
 type Tab='overview'|'candles'|'parameters'
@@ -18,7 +19,7 @@ export default function Result(){
   if(error)return <Card className="failure"><h2>回测详情加载失败</h2><p>{error}</p></Card>
   if(!run)return <div className="loading">加载回测任务…</div>
   const copyRun=()=>navigate('/backtests/new',{state:{copiedConfig:run.config,strategyId}})
-  const repair=async()=>{if(!run.research_project_id||repairing)return;setRepairing(true);setRepairError('');try{let client_id=localStorage.getItem('quantlab_client_id');if(!client_id){client_id=crypto.randomUUID();localStorage.setItem('quantlab_client_id',client_id)}const created=await api.repairResearchRun(run.research_project_id,run.id,client_id);navigate('/research',{state:{repairProjectId:run.research_project_id,repairSessionId:created.session.id,repairPrompt:created.prompt}})}catch(reason){setRepairError((reason as Error).message);setRepairing(false)}}
+  const repair=async()=>{if(!run.research_project_id||repairing)return;setRepairing(true);setRepairError('');try{const client_id=getClientId();const created=await api.repairResearchRun(run.research_project_id,run.id,client_id);navigate('/research',{state:{repairProjectId:run.research_project_id,repairSessionId:created.session.id,repairPrompt:created.prompt}})}catch(reason){setRepairError((reason as Error).message);setRepairing(false)}}
   const value=(item:unknown)=>item==null||item===''?'—':Array.isArray(item)?item.join(' / '):typeof item==='object'?JSON.stringify(item,null,2):String(item)
   return <><div className="strategy-title backtest-title"><Link className="detail-back" to="/backtests" aria-label="返回回测管理" title="返回回测管理"><ArrowLeft/></Link><div><h1>{run.name}</h1><small>{run.config.start_date} — {run.config.end_date}</small></div></div>
     <div className="detail-tabs">{([['overview','回测总览'],['candles','K 线'],['parameters','回测参数']] as [Tab,string][]).map(([key,label])=><button className={tab===key?'active':''} onClick={()=>setTab(key)} key={key}>{key==='candles'&&<CandlestickChart/>}{label}</button>)}</div>

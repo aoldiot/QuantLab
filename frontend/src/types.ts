@@ -28,4 +28,8 @@ export type ResearchRun={id:string;name:string;status:string;stage:string;progre
 export interface CatalogTimeframeItem{interval:string;spec:string;bar_type:string;bars:number;size_bytes:number;file_count:number;start_time:string|null;end_time:string|null;start_date:string|null;end_date:string|null}
 export interface CatalogSymbolItem{symbol:string;instrument_id:string;market_type:string;market_type_label:string;base_currency:string;quote_currency:string;total_bars:number;total_size_bytes:number;file_count:number;start_time:string|null;end_time:string|null;start_date:string|null;end_date:string|null;timeframes:CatalogTimeframeItem[];updated_at?:string|null}
 export interface CatalogSummary{catalog_path:string;total_symbols:number;total_bars:number;total_size_bytes:number;all_symbols_count:number;all_bars_count:number;all_size_bytes:number;available_timeframes:string[];items:CatalogSymbolItem[]}
+export interface CatalogMissingDetail{symbol:string;instrument_id:string;timeframe:string;status:'MISSING_INSTRUMENT'|'MISSING_DATA'|'PARTIAL_RANGE'|'OK';message:string}
+export interface CatalogCheckResponse{ok:boolean;has_missing:boolean;catalog_exists:boolean;catalog_path:string;missing_symbols:string[];details:CatalogMissingDetail[];summary_text:string}
+export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean}
+
 
