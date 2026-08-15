@@ -12,13 +12,16 @@
 .confirm-modal{width:430px}.confirm-modal p{color:var(--muted);line-height:1.7;white-space:pre-line}.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}.button.danger{background:#7a2934;border-color:#a33c4b;color:#fff}.button.danger:hover{background:#91303d}.category-manager{width:560px}.category-manager-list{display:flex;flex-direction:column;gap:8px;margin:20px 0}.category-manager-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center}.category-manager-row input{min-width:0;background:#0b151f;color:#e2ebf4;border:1px solid #34485d;border-radius:5px;padding:10px 12px}.category-manager-row button{width:36px;height:36px;display:grid;place-items:center}.category-manager-row svg{width:15px}.category-add{display:grid;grid-template-columns:1fr auto;gap:10px}.category-add input{background:#0b151f;color:#e2ebf4;border:1px solid #34485d;border-radius:5px;padding:10px 12px}.category-tabs-wrap{display:flex;align-items:flex-start;gap:8px}.category-tabs-wrap .strategy-category-tabs{flex:1}.category-edit-button{width:32px;height:32px;display:grid;place-items:center;padding:0}.category-edit-button svg{width:15px}
 
 /* Data Management Tabs & Catalog Explorer Styles */
-.data-page-tabs{display:flex;gap:10px;margin-bottom:20px;border-bottom:1px solid var(--line);padding-bottom:12px}
-.data-tab-btn{display:inline-flex;align-items:center;gap:9px;padding:9px 18px;border-radius:6px;border:1px solid #233549;background:#0d1823;color:#9cb0c5;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s ease}
+.data-page-tabs{display:flex;align-items:center;gap:10px;margin-bottom:20px;border-bottom:1px solid var(--line);padding-bottom:12px;height:auto}
+.data-tab-btn{display:inline-flex;align-items:center;gap:9px;height:38px;padding:0 16px;border-radius:6px;border:1px solid #233549;background:#0d1823;color:#9cb0c5;font-weight:600;font-size:13px;cursor:pointer;transition:all .2s ease;margin:0;max-width:none}
 .data-tab-btn:hover{background:#11202e;color:#e3eef7;border-color:#354d68}
 .data-tab-btn.active{background:linear-gradient(135deg,#102a3a,#0e202d);border-color:var(--cyan);color:#2fe1f1;box-shadow:0 0 16px rgba(24,200,216,.15)}
-.data-tab-btn svg{color:inherit}
-.data-tab-badge{background:#1b3247;color:var(--cyan);font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;border:1px solid #234d66}
-.data-tab-badge.running{background:#352711;color:var(--amber);border-color:#745220;display:inline-flex;align-items:center;gap:4px}
+.data-tab-btn svg{color:inherit;width:16px;height:16px;flex-shrink:0}
+.data-tab-badge{background:#1b3247;color:var(--cyan);font-size:11px;font-weight:700;padding:2px 7px;border-radius:10px;border:1px solid #234d66;display:inline-flex;align-items:center;gap:4px;margin:0;max-width:none}
+.data-tab-badge.is-running,
+.data-tab-badge.running{background:#352711!important;color:var(--amber)!important;border:1px solid #745220!important;display:inline-flex!important;align-items:center!important;gap:4px!important;padding:2px 7px!important;font-size:11px!important;font-weight:700!important;border-radius:10px!important;margin:0!important;max-width:none!important}
+.data-tab-badge.is-running svg,
+.data-tab-badge.running svg{width:11px!important;height:11px!important;color:var(--amber)!important;flex-shrink:0}
 
 .catalog-metrics-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
 .catalog-metric-card{background:linear-gradient(145deg,#101a26,#0d1520);border:1px solid #213247;border-radius:8px;padding:16px 18px;display:flex;align-items:center;gap:15px;box-shadow:0 4px 20px #00000026}

@@ -432,7 +432,7 @@ export default function DataDownloads() {
           <Download size={16} />
           <span>数据采集与下载</span>
           {running && (
-            <span className="data-tab-badge running">
+            <span className="data-tab-badge is-running">
               <LoaderCircle size={11} className="spin" />
               {task?.progress}%
             </span>
