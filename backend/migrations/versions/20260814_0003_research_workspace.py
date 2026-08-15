@@ -2,8 +2,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-from app.db import Base
 from app import models  # noqa: F401
+from app.db import Base
 
 revision = "20260814_0003"
 down_revision = "20260814_0002"
