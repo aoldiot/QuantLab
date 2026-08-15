@@ -117,13 +117,8 @@ def _agent_root() -> Path:
 
 
 def _canonical_strategy_file(strategy_name: str) -> Path:
-    direct = (Path(__file__).resolve().parent.parent / "strategies" / f"{strategy_name}.py").resolve()
-    if direct.exists():
-        return direct
-    repo_file = (settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{strategy_name}.py").resolve()
-    if repo_file.exists():
-        return repo_file
-    return direct
+    from ..strategy_files import _path
+    return _path(strategy_name)
 
 
 def _run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -181,7 +176,9 @@ def cleanup_expired_worktrees() -> None:
 
 
 async def repair_agent_session_paths() -> None:
-    """Rebase persisted worktree paths after the project directory is moved."""
+    """Rebase persisted worktree paths after the project directory is moved and restore strategies."""
+    from ..strategy_files import ensure_strategy_storage
+    ensure_strategy_storage()
     root = _agent_root() / "worktrees"
     async with SessionLocal() as db:
         sessions = (await db.scalars(select(AgentSession))).all()
@@ -514,12 +511,26 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
                     }
                 })
 
+            # Auto-save and sync generated strategy code from worktree to canonical & persistent storage
+            worktree_file = Path(session.workspace_path) / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
+            if worktree_file.exists():
+                try:
+                    code_content = worktree_file.read_text(encoding="utf-8")
+                    if code_content.strip():
+                        from ..strategy_files import save_strategy_code
+                        save_strategy_code(session.strategy_name, code_content)
+                        baseline = _agent_root() / "baselines" / session.id / f"{session.strategy_name}.py"
+                        baseline.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(worktree_file, baseline)
+                        logger.info("已自动保存会话 %s 策略代码到持久化存储", session.id)
+                except Exception as err:
+                    logger.warning("自动保存策略代码失败: %s", err)
+
             if session.research_project_id:
                 async with SessionLocal() as db:
                     project = await db.get(ResearchProject, session.research_project_id)
                     if project and project.status in {ResearchStatus.IMPLEMENTING, ResearchStatus.DISCUSSING, ResearchStatus.SPEC_REVIEW}:
                         strat_file = _canonical_strategy_file(session.strategy_name)
-                        worktree_file = Path(session.workspace_path) / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
                         if strat_file.exists() or worktree_file.exists():
                             project.status = ResearchStatus.CODE_REVIEW
                             await db.commit()
@@ -646,7 +657,8 @@ async def apply_session(session_id: str, data: AgentApplyRequest, db: AsyncSessi
         compile(code, destination.name, "exec")
     except (OSError, SyntaxError) as exc:
         raise HTTPException(422, f"策略验证失败：{exc}") from exc
-    destination.write_text(code, encoding="utf-8")
+    from ..strategy_files import save_strategy_code
+    save_strategy_code(session.strategy_name, code)
     baseline = _agent_root() / "baselines" / session.id / f"{session.strategy_name}.py"
     baseline.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, baseline)

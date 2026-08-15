@@ -513,8 +513,9 @@ async def create_implementation(project_id: str, data: ResearchImplementationCre
             await cancel_active_session(project.implementation_session_id)
     name = str(spec.content["strategy_name"])
     path = _path(name)
-    if not path.exists():
-        path.write_text(_template(name, "PORTFOLIO", str(spec.content.get("hypothesis", project.title)), "研究策略"), encoding="utf-8")
+    if not path.exists() or not path.read_text(encoding="utf-8").strip():
+        from .strategy_files import save_strategy_code
+        save_strategy_code(name, _template(name, "PORTFOLIO", str(spec.content.get("hypothesis", project.title)), "研究策略"))
     session = AgentSession(client_id=data.client_id, strategy_name=name, permission_mode=data.permission_mode,
                            workspace_path="pending", research_project_id=project.id, specification_id=spec.id)
     db.add(session)
@@ -590,7 +591,24 @@ async def research_strategy_preview(project_id: str, db: AsyncSession = Depends(
     spec = await _latest_spec(project.id, db)
     if not spec or not spec.content.get("strategy_name"):
         raise HTTPException(409, "请先生成并确认策略规格")
-    module = f"app.strategies.{spec.content['strategy_name']}"
+    name = str(spec.content["strategy_name"])
+
+    # Auto sync worktree code to canonical & persistent storage if available
+    if project.implementation_session_id:
+        session = await db.get(AgentSession, project.implementation_session_id)
+        if session and session.workspace_path:
+            worktree_file = Path(session.workspace_path) / "backend/app/strategies" / f"{name}.py"
+            if worktree_file.exists():
+                try:
+                    content = worktree_file.read_text(encoding="utf-8")
+                    if content.strip():
+                        from .strategy_files import save_strategy_code
+                        save_strategy_code(name, content)
+                except Exception:
+                    pass
+
+    _path(name)
+    module = f"app.strategies.{name}"
     try:
         manifest = load_manifest(module)
     except (ImportError, AttributeError, TypeError) as exc:
@@ -606,7 +624,24 @@ async def publish_research_strategy(project_id: str, db: AsyncSession = Depends(
     spec = await _latest_spec(project.id, db)
     if not spec or spec.status != SpecificationStatus.APPROVED:
         raise HTTPException(409, "请先确认策略规格")
-    module = f"app.strategies.{spec.content['strategy_name']}"
+    strategy_name = spec.content['strategy_name']
+
+    # Auto sync worktree code to canonical & persistent storage if available
+    if project.implementation_session_id:
+        session = await db.get(AgentSession, project.implementation_session_id)
+        if session and session.workspace_path:
+            worktree_file = Path(session.workspace_path) / "backend/app/strategies" / f"{strategy_name}.py"
+            if worktree_file.exists():
+                try:
+                    content = worktree_file.read_text(encoding="utf-8")
+                    if content.strip():
+                        from .strategy_files import save_strategy_code
+                        save_strategy_code(strategy_name, content)
+                except Exception:
+                    pass
+
+    _path(strategy_name)
+    module = f"app.strategies.{strategy_name}"
     try:
         manifest = load_manifest(module)
     except (ImportError, AttributeError, TypeError) as exc:
@@ -615,8 +650,7 @@ async def publish_research_strategy(project_id: str, db: AsyncSession = Depends(
     if strategy:
         await db.refresh(strategy, ["versions"])
 
-    strategy_name = spec.content['strategy_name']
-    source_path = Path(__file__).resolve().parent / "strategies" / f"{strategy_name}.py"
+    source_path = _path(strategy_name)
     code = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
     c_hash = code_hash(code) if code else None
     m_hash = manifest_hash(manifest)

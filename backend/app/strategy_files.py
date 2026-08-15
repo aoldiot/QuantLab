@@ -1,16 +1,90 @@
-from __future__ import annotations
-
 import ast
+import logging
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
+from .config import settings
 from .git_versions import code_hash
 from .schemas import StrategyFileCreate, StrategyFileMetadataUpdate, StrategyFileUpdate
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/strategy-files", tags=["strategy-files"])
-STRATEGY_DIR = Path(__file__).resolve().parent / "strategies"
+STRATEGY_DIR = (Path(__file__).resolve().parent / "strategies").resolve()
+PERSISTENT_STRATEGY_DIR = (settings.data_root / "strategies").resolve()
+
+
+def ensure_strategy_storage() -> None:
+    """Ensure persistent strategy directory exists and sync strategies two-way on startup/access."""
+    STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+    PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1. Sync from STRATEGY_DIR to PERSISTENT_STRATEGY_DIR (preserve built-ins)
+    for p in STRATEGY_DIR.glob("*.py"):
+        if p.name == "__init__.py":
+            continue
+        dest = PERSISTENT_STRATEGY_DIR / p.name
+        if not dest.exists() or p.stat().st_mtime > dest.stat().st_mtime:
+            try:
+                shutil.copy2(p, dest)
+            except Exception as e:
+                logger.warning("同步策略到持久化目录失败 %s: %s", p.name, e)
+
+    # 2. Sync from PERSISTENT_STRATEGY_DIR to STRATEGY_DIR (restore user/research strategies after restart)
+    for p in PERSISTENT_STRATEGY_DIR.glob("*.py"):
+        if p.name == "__init__.py":
+            continue
+        dest = STRATEGY_DIR / p.name
+        if not dest.exists() or p.stat().st_mtime > dest.stat().st_mtime:
+            try:
+                shutil.copy2(p, dest)
+            except Exception as e:
+                logger.warning("从持久化目录恢复策略失败 %s: %s", p.name, e)
+
+    # 3. Recover any generated strategies from agent worktrees if missing or outdated
+    worktrees_root = settings.data_root / "agent" / "worktrees"
+    if worktrees_root.exists():
+        for wt_file in worktrees_root.glob("*/backend/app/strategies/*.py"):
+            if wt_file.name == "__init__.py":
+                continue
+            canonical_file = STRATEGY_DIR / wt_file.name
+            persisted_file = PERSISTENT_STRATEGY_DIR / wt_file.name
+            should_recover = False
+            if not canonical_file.exists() or not persisted_file.exists():
+                should_recover = True
+            else:
+                # If canonical file is a blank template but worktree has actual generated code
+                try:
+                    c_size = canonical_file.stat().st_size
+                    wt_size = wt_file.stat().st_size
+                    if wt_size > c_size and wt_size > 1200:
+                        should_recover = True
+                except Exception:
+                    pass
+
+            if should_recover:
+                try:
+                    content = wt_file.read_text(encoding="utf-8")
+                    if content.strip():
+                        canonical_file.write_text(content, encoding="utf-8")
+                        persisted_file.write_text(content, encoding="utf-8")
+                        logger.info("已从 Agent 工作区自动恢复策略文件：%s", wt_file.name)
+                except Exception as e:
+                    logger.warning("恢复 Agent 策略文件失败 %s: %s", wt_file.name, e)
+
+
+def save_strategy_code(name: str, code: str) -> Path:
+    """Save strategy code to both ephemeral STRATEGY_DIR and persistent PERSISTENT_STRATEGY_DIR."""
+    STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+    PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+    canonical = (STRATEGY_DIR / f"{name}.py").resolve()
+    persisted = (PERSISTENT_STRATEGY_DIR / f"{name}.py").resolve()
+    canonical.write_text(code, encoding="utf-8")
+    persisted.write_text(code, encoding="utf-8")
+    return canonical
 
 
 def _path(name: str) -> Path:
@@ -19,7 +93,28 @@ def _path(name: str) -> Path:
     path = (STRATEGY_DIR / f"{name}.py").resolve()
     if path.parent != STRATEGY_DIR.resolve():
         raise HTTPException(400, "非法策略文件路径")
+
+    # If missing in STRATEGY_DIR, check PERSISTENT_STRATEGY_DIR or worktrees
+    if not path.exists():
+        persisted = (PERSISTENT_STRATEGY_DIR / f"{name}.py").resolve()
+        if persisted.exists():
+            shutil.copy2(persisted, path)
+            return path
+
+        worktrees_root = settings.data_root / "agent" / "worktrees"
+        if worktrees_root.exists():
+            candidates = sorted(worktrees_root.glob(f"*/backend/app/strategies/{name}.py"), key=lambda x: x.stat().st_mtime, reverse=True)
+            if candidates:
+                try:
+                    content = candidates[0].read_text(encoding="utf-8")
+                    if content.strip():
+                        save_strategy_code(name, content)
+                        return path
+                except Exception:
+                    pass
+
     return path
+
 
 
 def _template(name: str, mode: str, description: str = "请填写策略说明", category: str = "自定义") -> str:
@@ -119,7 +214,7 @@ def _file_out(path: Path, include_content: bool = False) -> dict:
 
 @router.get("")
 def list_files():
-    STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_strategy_storage()
     return [_file_out(path) for path in sorted(STRATEGY_DIR.glob("*.py")) if path.name != "__init__.py"]
 
 
@@ -128,7 +223,8 @@ def create_file(data: StrategyFileCreate):
     path = _path(data.name)
     if path.exists():
         raise HTTPException(409, "策略文件已经存在")
-    path.write_text(_template(data.name, data.mode, data.description, data.category), encoding="utf-8")
+    code = _template(data.name, data.mode, data.description, data.category)
+    path = save_strategy_code(data.name, code)
     return _file_out(path, include_content=True)
 
 
@@ -149,7 +245,7 @@ def update_file(name: str, data: StrategyFileUpdate):
         compile(data.content, path.name, "exec")
     except SyntaxError as exc:
         raise HTTPException(400, f"第 {exc.lineno} 行语法错误：{exc.msg}") from exc
-    path.write_text(data.content, encoding="utf-8")
+    path = save_strategy_code(name, data.content)
     return _file_out(path, include_content=True)
 
 
@@ -163,13 +259,18 @@ def update_file_metadata(name: str, data: StrategyFileMetadataUpdate):
         pattern = rf"({field}\s*=\s*)(['\"])(.*?)(\2)"
         if re.search(pattern, source):
             source = re.sub(pattern, rf"\g<1>{value!r}", source, count=1)
-    path.write_text(source, encoding="utf-8")
+    path = save_strategy_code(name, source)
     return _file_out(path, include_content=True)
 
 
 @router.delete("/{name}", status_code=204)
 def delete_file(name: str):
     path = _path(name)
-    if not path.exists():
+    persisted = PERSISTENT_STRATEGY_DIR / f"{name}.py"
+    if not path.exists() and not persisted.exists():
         raise HTTPException(404, "策略文件不存在")
-    path.unlink()
+    if path.exists():
+        path.unlink(missing_ok=True)
+    if persisted.exists():
+        persisted.unlink(missing_ok=True)
+

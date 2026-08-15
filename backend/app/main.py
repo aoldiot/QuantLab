@@ -89,6 +89,8 @@ async def fail_interrupted_backtests():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.artifact_root.resolve().mkdir(parents=True, exist_ok=True)
+    from .strategy_files import ensure_strategy_storage
+    ensure_strategy_storage()
     await fail_interrupted_backtests()
     await seed()
     await repair_agent_session_paths()
