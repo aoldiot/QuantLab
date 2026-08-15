@@ -172,6 +172,7 @@ class ResearchDecisionResolve(BaseModel):
 class ResearchImplementationCreate(BaseModel):
     client_id: str = Field(min_length=8, max_length=100)
     permission_mode: PermissionMode = "acceptEdits"
+    force: bool = False
 
 
 class ResearchConclusionUpdate(BaseModel):

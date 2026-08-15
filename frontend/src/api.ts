@@ -47,7 +47,7 @@ export const api={
   generateSpecification:(id:string)=>request<ResearchProject>(`/research/${id}/specification/generate`,{method:'POST'}),
   updateSpecification:(id:string,specId:string,content:Record<string,any>)=>request<ResearchProject>(`/research/${id}/specification/${specId}`,{method:'PUT',body:JSON.stringify({content})}),
   approveSpecification:(id:string,specId:string)=>request<ResearchProject>(`/research/${id}/specification/${specId}/approve`,{method:'POST'}),
-  createResearchImplementation:(id:string,client_id:string)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/implementation`,{method:'POST',body:JSON.stringify({client_id,permission_mode:'acceptEdits'})}),
+  createResearchImplementation:(id:string,client_id:string,force:boolean=false)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/implementation`,{method:'POST',body:JSON.stringify({client_id,permission_mode:'acceptEdits',force})}),
   researchStrategyPreview:(id:string)=>request<{module:string;name:string;parameter_schema:Record<string,any>;data_requirements:Record<string,any>}>(`/research/${id}/strategy-preview`),
   publishResearchStrategy:(id:string)=>request<Strategy>(`/research/${id}/publish`,{method:'POST'}),
   researchRuns:(id:string)=>request<ResearchRun[]>(`/research/${id}/backtests`),

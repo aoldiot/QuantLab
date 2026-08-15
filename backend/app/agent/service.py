@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import difflib
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -33,6 +34,8 @@ from ..models import (
 )
 from ..schemas import AgentApplyRequest, AgentSessionCreate, BacktestCreate
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/agent", tags=["strategy-agent"])
 STRATEGY_RELATIVE = Path("backend/app/strategies")
 ALLOWED_MODES = {"plan", "default", "acceptEdits", "bypassPermissions"}
@@ -43,6 +46,66 @@ ACTIVE_CLIENTS: dict[str, ClaudeSDKClient] = {}
 ACTIVE_TASKS: dict[str, asyncio.Task[None]] = {}
 ACTIVE_WEBSOCKETS: dict[str, WebSocket] = {}
 APPROVALS: dict[str, asyncio.Future[bool]] = {}
+
+NAUTILUS_STRATEGY_CHEATSHEET = """
+【NautilusTrader 策略开发核心速查表与规范】
+1. 依赖与模块导入规范（按需复制，严禁臆造不存在的模块）：
+```python
+from decimal import Decimal
+import math
+from collections import deque
+import pandas as pd
+
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.model.enums import OrderSide, PositionSide
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.indicators import (
+    MovingAverageConvergenceDivergence, # MACD(fast_period, slow_period, signal_period)
+    AverageTrueRange,                   # ATR(period)
+    ExponentialMovingAverage,           # EMA(period)
+    SimpleMovingAverage,                # SMA(period)
+    RelativeStrengthIndex,              # RSI(period)
+    BollingerBands,                     # BollingerBands(period, std_dev)
+)
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+```
+
+2. 核心四大导出结构规范：
+- 结构 1：`StrategyConfig` 子类（`frozen=True`）：包含 `instrument_ids: list[InstrumentId]`、`bar_types: list[BarType]`、`trade_size: Decimal` 及策略参数。
+- 结构 2：`Strategy` 子类：
+  - `__init__(self, config)`：初始化指标与历史缓存。
+  - `on_start(self)`：
+      for bar_type in self.config.bar_types:
+          self.register_indicator_for_bars(self.indicator, bar_type)
+          self.subscribe_bars(bar_type)
+  - `on_bar(self, bar: Bar)`：
+      - 指标取值：`val = float(self.indicator.value)`
+      - 查当前持仓：`pos = self.cache.position(self._instrument_id)`
+      - 持仓方向：`pos.side == PositionSide.LONG` 或 `PositionSide.SHORT`
+      - 平仓：`self.close_all_positions(self._instrument_id)`
+      - 开仓下单：
+          instrument = self.cache.instrument(self._instrument_id)
+          quantity = instrument.make_qty(Decimal(str(qty_value)))
+          order = self.order_factory.market(
+              instrument_id=self._instrument_id,
+              order_side=OrderSide.BUY,
+              quantity=quantity,
+          )
+          self.submit_order(order)
+      - 净值查询：
+          account = self.portfolio.account(self._instrument_id.venue)
+          equity = float(account.equity(self._instrument_id.venue).as_double())
+- 结构 3：`calculate_indicators(dataframe: pd.DataFrame, parameters: dict) -> pd.DataFrame`：向量化计算所有 plot_config 中的指标列。
+- 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：声明元数据、parameters 规范字典及 plot_config。
+
+3. 行为准则（CRITICAL）：
+- 所有 API 和标准结构均已在上方完整给出。**严禁使用 Grep / Glob / Bash / Read 去遍历系统 site-packages 源码或全局目录**。
+- 收到任务后，**请直接使用 Write 工具将完整策略代码写入 `backend/app/strategies/{strategy_name}.py`**。
+- 编写完成后，仅需调用一次 `python3 -m py_compile backend/app/strategies/{strategy_name}.py` 验证语法即可。
+"""
 
 
 def _agent_root() -> Path:
@@ -137,6 +200,9 @@ def _safe_bash(command: str) -> bool:
         r"wc(?:\s+.*)?",
         r"curl(?:\s+.*)?",
     )
+    return any(re.match(p, cmd, re.IGNORECASE) for p in allowed_prefixes)
+
+
 def _is_strictly_forbidden(command: str) -> bool:
     cmd = command.strip()
     if not cmd:
@@ -255,9 +321,9 @@ async def update_status(session_id: str, status: AgentSessionStatus, error: str 
         if session:
             session.status = status
             session.error_message = error
-            if sdk_session_id:
-                session.sdk_session_id = sdk_session_id
-            await db.commit()
+        if sdk_session_id:
+            session.sdk_session_id = sdk_session_id
+        await db.commit()
 
 
 async def send_session_event(session_id: str, payload: dict[str, Any]) -> bool:
@@ -325,13 +391,8 @@ async def build_options(session: AgentSession) -> ClaudeAgentOptions:
 
         system_append = (
             "你是 QuantLab 的 NautilusTrader 策略开发 Agent。所有面向用户的分析、计划、进度、提问、错误说明和最终回答必须使用简体中文；代码、命令、文件名和 API 字段保持原格式。\n"
-            "不要用英文描述工具调用。你的核心任务是根据策略规格或需求，在 `backend/app/strategies/" + session.strategy_name + ".py` 中实现完整的策略代码。\n"
-            "策略代码规范（必须导出的4个部分）：\n"
-            "1. `StrategyConfig` 子类（`frozen=True`）：包含 `instrument_ids: list[InstrumentId]`、`bar_types: list[BarType]`、`trade_size: Decimal` 以及策略自定义参数字段。\n"
-            "2. `Strategy` 子类：`__init__` 中初始化指标（如 MACD, EMA, ATR 等）；`on_start` 中订阅 K 线并注册指标；`on_bar(self, bar: Bar)` 中获取指标值、进行交易信号与风控判断，并通过 `self.order_factory.market(...)` 和 `self.submit_order(...)` / `self.close_all_positions(...)` 进行仓位管理与下单。\n"
-            "3. `calculate_indicators(dataframe: pd.DataFrame, parameters: dict) -> pd.DataFrame`：使用 pandas 向量化计算并在返回的 dataframe 中添加图表指标列。\n"
-            "4. `STRATEGY_MANIFEST = StrategyManifest(...)`：声明策略元数据、可配置参数字典和图表配置 `plot_config`（字段名与指标计算函数对应）。\n"
-            "编写原则：请直接使用 Edit 或 Write 工具修改目标策略文件，无需在外部目录扫描全局文件。修改完成后通过 python 编译或运行验证脚本检查语法与导入。"
+            f"目标策略文件路径：`backend/app/strategies/{session.strategy_name}.py`。\n"
+            + NAUTILUS_STRATEGY_CHEATSHEET.replace("{strategy_name}", session.strategy_name)
             + specification_context
         )
 
@@ -359,7 +420,13 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
     backtest_requested = bool(re.search(r"回测|backtest", original_prompt, flags=re.IGNORECASE))
     if not prompt.startswith("/"):
         action_rule = "用户本轮明确要求回测。完成策略编写与验证后，可以在回复末尾输出 QUANTLAB_BACKTEST_REQUEST:{紧凑JSON} 请求平台回测；execution_model 只能是 FAST、STANDARD、CONSERVATIVE。" if backtest_requested else "用户本轮没有明确要求回测。严禁发起回测或输出 QUANTLAB_BACKTEST_REQUEST。请专注完成策略代码的编写与测试。"
-        prompt = f"请始终使用简体中文与用户交流，代码、命令、路径和字段名除外。\n{action_rule}\n目标策略代码文件路径：backend/app/strategies/{session.strategy_name}.py\n请直接使用 Edit 或 Write 工具编写或完善该策略代码文件，完成后通过 python 编译验证。\n\n{original_prompt}"
+        prompt = (
+            f"请始终使用简体中文与用户交流，代码、命令、路径和字段名除外。\n"
+            f"{action_rule}\n"
+            f"目标策略代码文件路径：backend/app/strategies/{session.strategy_name}.py\n"
+            f"请直接使用 Write 工具将完整的策略代码写入该文件，并使用 python3 -m py_compile 进行语法验证。无需在外部文件系统中做额外搜索。\n\n"
+            f"{original_prompt}"
+        )
 
     client_lock = CLIENT_LOCKS.setdefault(session.client_id, asyncio.Lock())
     strategy_lock = STRATEGY_LOCKS.setdefault(session.strategy_name, asyncio.Lock())
@@ -369,9 +436,11 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
         await update_status(session.id, AgentSessionStatus.RUNNING)
         await persist_event(session.id, "user", "message", {"text": original_prompt})
         await send_session_event(session.id, {"type": "status", "status": "RUNNING"})
-        client = ClaudeSDKClient(options=await build_options(session))
-        ACTIVE_CLIENTS[session.id] = client
+        client: ClaudeSDKClient | None = None
         try:
+            options = await build_options(session)
+            client = ClaudeSDKClient(options=options)
+            ACTIVE_CLIENTS[session.id] = client
             response_text: list[str] = []
             fallback_context: dict[str, Any] | None = None
             await client.connect()
@@ -403,6 +472,33 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
             changes = await asyncio.to_thread(_diff_summary, session)
             if changes["files"]:
                 await send_session_event(session.id, {"type": "changes_ready", **changes})
+            
+            # If Claude did not output trailing summary text after tool use, append a completion notification
+            has_summary_text = any(bool(t.strip()) for t in response_text)
+            if not has_summary_text:
+                completion_msg = f"策略 `{session.strategy_name}` 代码已生成并同步！您可以在代码区预览，或直接进入回测阶段进行验证。"
+                await persist_event(session.id, "assistant", "AssistantMessage", {
+                    "message_type": "AssistantMessage",
+                    "content": [{"text": completion_msg}]
+                })
+                await send_session_event(session.id, {
+                    "type": "sdk_event",
+                    "event": {
+                        "message_type": "AssistantMessage",
+                        "content": [{"text": completion_msg}]
+                    }
+                })
+
+            if session.research_project_id:
+                async with SessionLocal() as db:
+                    project = await db.get(ResearchProject, session.research_project_id)
+                    if project and project.status in {ResearchStatus.IMPLEMENTING, ResearchStatus.DISCUSSING, ResearchStatus.SPEC_REVIEW}:
+                        strat_file = settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
+                        worktree_file = Path(session.workspace_path) / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
+                        if strat_file.exists() or worktree_file.exists():
+                            project.status = ResearchStatus.CODE_REVIEW
+                            await db.commit()
+
             try:
                 usage = _jsonable(await client.get_context_usage())
                 if not usage.get("percentage") and fallback_context:
@@ -419,11 +515,16 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
             await update_status(session.id, AgentSessionStatus.FAILED, "Agent 后台任务被中断，请重新发送任务继续开发")
             raise
         except Exception as exc:
+            logger.exception("Agent execution failed for session %s", session.id)
             await update_status(session.id, AgentSessionStatus.FAILED, str(exc)[:2000])
             await send_session_event(session.id, {"type": "error", "message": str(exc)})
         finally:
             ACTIVE_CLIENTS.pop(session.id, None)
-            await client.disconnect()
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
 
 @router.post("/sessions")
@@ -460,16 +561,29 @@ async def list_messages(session_id: str, db: AsyncSession = Depends(get_db)):
     return [{"id": row.id, "role": row.role, "event_type": row.event_type, "content": row.content, "created_at": row.created_at} for row in rows]
 
 
+async def cancel_active_session(session_id: str) -> None:
+    client = ACTIVE_CLIENTS.get(session_id)
+    if client:
+        try:
+            await client.interrupt()
+        except Exception:
+            pass
+    task = ACTIVE_TASKS.get(session_id)
+    if task and not task.done():
+        task.cancel()
+    async with SessionLocal() as db:
+        session = await db.get(AgentSession, session_id)
+        if session and session.status in {AgentSessionStatus.RUNNING, AgentSessionStatus.QUEUED}:
+            session.status = AgentSessionStatus.CANCELED
+            await db.commit()
+
+
 @router.post("/sessions/{session_id}/cancel")
 async def cancel_session(session_id: str, db: AsyncSession = Depends(get_db)):
     session = await db.get(AgentSession, session_id)
     if not session:
         raise HTTPException(404, "Agent 会话不存在")
-    client = ACTIVE_CLIENTS.get(session_id)
-    if client:
-        await client.interrupt()
-    session.status = AgentSessionStatus.CANCELED
-    await db.commit()
+    await cancel_active_session(session_id)
     await db.refresh(session)
     return session_out(session)
 

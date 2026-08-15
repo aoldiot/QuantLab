@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pathlib import Path
 
-from .agent.service import create_worktree, session_out
+from .agent.service import cancel_active_session, create_worktree, session_out
 from .backtest_service import create_backtest_run
 from .config import settings
 from .db import get_db
@@ -505,9 +505,12 @@ async def create_implementation(project_id: str, data: ResearchImplementationCre
     if not spec or spec.status != SpecificationStatus.APPROVED:
         raise HTTPException(409, "请先确认策略规格")
     if project.implementation_session_id:
-        existing = await db.get(AgentSession, project.implementation_session_id)
-        if existing and existing.specification_id == spec.id:
-            raise HTTPException(409, "当前规格已经创建开发会话")
+        if not data.force:
+            existing = await db.get(AgentSession, project.implementation_session_id)
+            if existing and existing.specification_id == spec.id:
+                raise HTTPException(409, "当前规格已经创建开发会话")
+        else:
+            await cancel_active_session(project.implementation_session_id)
     name = str(spec.content["strategy_name"])
     path = _path(name)
     if not path.exists():
