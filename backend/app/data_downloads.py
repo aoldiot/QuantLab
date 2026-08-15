@@ -40,7 +40,7 @@ CATALOG_FORMAT_VERSION = 2
 
 class DownloadCreate(BaseModel):
     market_type: str = "um"
-    symbols: list[str] = Field(min_length=1, max_length=200)
+    symbols: list[str] = Field(min_length=1)
     intervals: list[str] = Field(min_length=1)
     start_date: date
     end_date: date
