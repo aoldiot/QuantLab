@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv
+venv
+.env
+.ruff_cache
+.pytest_cache
+data/backtests/*
+data/agent/*
+data/worktrees/*
+catalog/data/*
+*.parquet
+.DS_Store

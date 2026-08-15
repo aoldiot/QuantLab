@@ -116,8 +116,19 @@ def _agent_root() -> Path:
     return root
 
 
+def _canonical_strategy_file(strategy_name: str) -> Path:
+    direct = (Path(__file__).resolve().parent.parent / "strategies" / f"{strategy_name}.py").resolve()
+    if direct.exists():
+        return direct
+    repo_file = (settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{strategy_name}.py").resolve()
+    if repo_file.exists():
+        return repo_file
+    return direct
+
+
 def _run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(["git", "-C", str(settings.strategy_repo_path.resolve()), *args], text=True, capture_output=True, check=False)
+    repo = settings.strategy_repo_path.resolve()
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=False)
     if check and result.returncode:
         raise RuntimeError(result.stderr.strip() or "Git 操作失败")
     return result
@@ -125,8 +136,14 @@ def _run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]
 
 def create_worktree(session_id: str, strategy_name: str) -> Path:
     target = _agent_root() / "worktrees" / session_id
-    _run_git("worktree", "add", "--detach", str(target), "HEAD")
-    source = settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{strategy_name}.py"
+    target.mkdir(parents=True, exist_ok=True)
+    repo = settings.strategy_repo_path.resolve()
+    if (repo / ".git").exists():
+        try:
+            _run_git("worktree", "add", "--detach", str(target), "HEAD", check=False)
+        except Exception:
+            pass
+    source = _canonical_strategy_file(strategy_name)
     destination = target / STRATEGY_RELATIVE / f"{strategy_name}.py"
     if source.exists():
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -134,12 +151,20 @@ def create_worktree(session_id: str, strategy_name: str) -> Path:
         baseline = _agent_root() / "baselines" / session_id / f"{strategy_name}.py"
         baseline.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, baseline)
-    contract = settings.strategy_repo_path.resolve() / "backend/app/strategy_contract.py"
-    shutil.copy2(contract, target / "backend/app/strategy_contract.py")
-    tests = settings.strategy_repo_path.resolve() / "backend/tests"
+    contract = (Path(__file__).resolve().parent.parent / "strategy_contract.py").resolve()
+    if not contract.exists():
+        contract = settings.strategy_repo_path.resolve() / "backend/app/strategy_contract.py"
+    if contract.exists():
+        (target / "backend/app").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(contract, target / "backend/app/strategy_contract.py")
+    tests = (Path(__file__).resolve().parent.parent.parent / "tests").resolve()
+    if not tests.exists():
+        tests = settings.strategy_repo_path.resolve() / "backend/tests"
     if tests.exists():
         shutil.copytree(tests, target / "backend/tests", dirs_exist_ok=True)
-    skill = settings.strategy_repo_path.resolve() / ".claude/skills/nautilus-strategy-author"
+    skill = (Path(__file__).resolve().parents[3] / ".claude/skills/nautilus-strategy-author").resolve()
+    if not skill.exists():
+        skill = settings.strategy_repo_path.resolve() / ".claude/skills/nautilus-strategy-author"
     if skill.exists():
         shutil.copytree(skill, target / ".claude/skills/nautilus-strategy-author", dirs_exist_ok=True)
     return target
@@ -493,7 +518,7 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
                 async with SessionLocal() as db:
                     project = await db.get(ResearchProject, session.research_project_id)
                     if project and project.status in {ResearchStatus.IMPLEMENTING, ResearchStatus.DISCUSSING, ResearchStatus.SPEC_REVIEW}:
-                        strat_file = settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
+                        strat_file = _canonical_strategy_file(session.strategy_name)
                         worktree_file = Path(session.workspace_path) / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
                         if strat_file.exists() or worktree_file.exists():
                             project.status = ResearchStatus.CODE_REVIEW
@@ -530,7 +555,7 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
 @router.post("/sessions")
 async def create_session(data: AgentSessionCreate, db: AsyncSession = Depends(get_db)):
     await get_config(db)
-    canonical = settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{data.strategy_name}.py"
+    canonical = _canonical_strategy_file(data.strategy_name)
     if not canonical.exists():
         raise HTTPException(404, "策略文件不存在")
     session = AgentSession(client_id=data.client_id, strategy_name=data.strategy_name, permission_mode=data.permission_mode, workspace_path="pending")
@@ -615,7 +640,7 @@ async def apply_session(session_id: str, data: AgentApplyRequest, db: AsyncSessi
     if not session:
         raise HTTPException(404, "Agent 会话不存在")
     source = Path(session.workspace_path) / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
-    destination = settings.strategy_repo_path.resolve() / STRATEGY_RELATIVE / f"{session.strategy_name}.py"
+    destination = _canonical_strategy_file(session.strategy_name)
     try:
         code = source.read_text(encoding="utf-8")
         compile(code, destination.name, "exec")

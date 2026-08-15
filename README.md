@@ -2,13 +2,25 @@
 
 QuantLab 是一个基于 NautilusTrader 的策略研究与回测管理平台。当前版本包含标准策略契约、策略管理、真实 BacktestNode 回测、异步任务状态、ReportProvider 结果收集和深色量化终端 UI。
 
-## 启动中间件
+## 启动方式
+
+### 方式一：Docker Compose 全栈一键启动（推荐）
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-只会启动 PostgreSQL 和 Redis，不会启动前后端。PostgreSQL 使用 `5432`，为避免与本机常见 Redis 冲突，QuantLab Redis 默认使用 `6380`。
+该命令将一键构建并启动全部 4 个容器服务：
+- **前端工作台**：`http://localhost:5173`（Nginx 反向代理 + SPA）
+- **后端 API 与文档**：`http://localhost:8000/docs`
+- **PostgreSQL 16**：`localhost:5432`（持久化卷 `quantlab_postgres`）
+- **Redis 7**：`localhost:6380`（持久化卷 `quantlab_redis`）
+
+### 方式二：仅启动中间件（本地开发调试）
+
+```bash
+docker compose up -d postgres redis
+```
 
 ## 启动后端
 

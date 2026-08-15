@@ -2,6 +2,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: quantlab-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_DB: quantlab
       POSTGRES_USER: quantlab
@@ -19,6 +20,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: quantlab-redis
+    restart: unless-stopped
     command: redis-server --appendonly yes
     ports:
       - "${QUANTLAB_REDIS_PORT:-6380}:6379"
@@ -30,6 +32,60 @@ services:
       timeout: 3s
       retries: 10
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: quantlab-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://quantlab:quantlab@postgres:5432/quantlab
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://localhost:5173", "http://localhost:3000", "http://localhost:80", "http://localhost", "http://127.0.0.1:5173", "http://127.0.0.1:80"]'
+      DATA_ROOT: /app/data
+      ARTIFACT_ROOT: /app/data/backtests
+      CATALOG_PATH: /app/catalog
+      BACKTEST_TIMEOUT_SECONDS: 3600
+      INSTRUMENT_ID_TEMPLATE: "{symbol}-PERP.{venue}"
+      AGENT_MAX_CONCURRENCY: 5
+      AGENT_WORKSPACE_RETENTION_DAYS: 7
+      DATA_DOWNLOAD_CONCURRENCY: 8
+    ports:
+      - "8000:8000"
+    volumes:
+      - quantlab_data:/app/data
+      - quantlab_catalog:/app/catalog
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: quantlab-frontend
+    restart: unless-stopped
+    ports:
+      - "${QUANTLAB_FRONTEND_PORT:-5173}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
 volumes:
   quantlab_postgres:
   quantlab_redis:
+  quantlab_data:
+  quantlab_catalog:

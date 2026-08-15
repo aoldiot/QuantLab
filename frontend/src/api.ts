@@ -1,6 +1,6 @@
 import type {AgentSession,AgentStoredMessage,ChartData,GitConfiguration,LlmConfiguration,PermissionMode,ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile,StrategyGitStatus,StrategyVersion} from './types'
 const BASE=import.meta.env.VITE_API_URL??'http://localhost:8000/api'
-export const agentSocketUrl=(sessionId:string)=>`${BASE.replace(/^http/,'ws')}/agent/ws/${sessionId}`
+export const agentSocketUrl=(sessionId:string)=>{if(BASE.startsWith('http'))return `${BASE.replace(/^http/,'ws')}/agent/ws/${sessionId}`;const proto=window.location.protocol==='https:'?'wss:':'ws:';return `${proto}//${window.location.host}${BASE}/agent/ws/${sessionId}`}
 function errorText(detail:unknown):string{if(typeof detail==='string')return detail;if(Array.isArray(detail))return detail.map(x=>{if(typeof x==='object'&&x){const e=x as {loc?:unknown[];msg?:string};return `${e.loc?.slice(1).join('.')||'参数'}：${e.msg||'格式错误'}`}return String(x)}).join('；');if(detail&&typeof detail==='object')return JSON.stringify(detail);return '请求失败'}
 async function request<T>(path:string,init?:RequestInit):Promise<T>{const r=await fetch(BASE+path,{...init,headers:{'Content-Type':'application/json',...(init?.headers??{})}});if(!r.ok){let body:{detail?:unknown}={};try{body=await r.json()}catch{/**/}throw new Error(errorText(body.detail))}if(r.status===204)return undefined as T;return r.json()}
 export const api={

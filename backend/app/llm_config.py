@@ -29,13 +29,24 @@ def encrypt_api_key(value: str) -> str:
 
 
 def decrypt_api_key(value: str) -> str:
+    if not value:
+        return ""
     try:
         return _fernet().decrypt(value.encode()).decode()
-    except InvalidToken as exc:
-        raise RuntimeError("LLM API Key 无法解密，请检查 LLM_SECRET_ENCRYPTION_KEY") from exc
+    except InvalidToken:
+        # Fallback to default key if encryption key changed
+        default_digest = hashlib.sha256(b"change-me-in-production").digest()
+        try:
+            return Fernet(base64.urlsafe_b64encode(default_digest)).decrypt(value.encode()).decode()
+        except Exception:
+            return ""
+    except Exception:
+        return ""
 
 
 def mask_api_key(value: str) -> str:
+    if not value:
+        return ""
     if len(value) <= 8:
         return "••••••••"
     return f"{value[:4]}••••••••{value[-4:]}"
@@ -50,7 +61,7 @@ def config_out(config: LlmConfiguration | None) -> dict:
     key = decrypt_api_key(config.api_key_encrypted)
     hermes_key = decrypt_api_key(config.hermes_api_key_encrypted) if config.hermes_api_key_encrypted else ""
     return {
-        "configured": True,
+        "configured": bool(key and config.base_url and config.model),
         "base_url": config.base_url,
         "api_key_masked": mask_api_key(key),
         "auth_type": config.auth_type,
