@@ -159,7 +159,7 @@ def _publish(task_id: str, force_save: bool = False, **changes: Any) -> None:
         _save_task_to_disk(task, force=force_save)
 
 
-def _log(task_id: str, message: str, level: str = "info", force_save: bool = False) -> None:
+def _log(task_id: str, message: str, level: str = "info", force_save: bool = False, **_kwargs: Any) -> None:
     with _lock:
         task = _tasks.get(task_id)
         if not task:
@@ -167,7 +167,7 @@ def _log(task_id: str, message: str, level: str = "info", force_save: bool = Fal
         task["logs"].append({"time": datetime.now(UTC).strftime("%H:%M:%S"), "level": level, "message": message})
         task["logs"] = task["logs"][-1000:]
         task["updated_at"] = _now()
-        _save_task_to_disk(task, force=force_save)
+        _save_task_to_disk(task, force=force_save or bool(_kwargs.get("force_log")))
 
 
 def _json_get(url: str) -> dict[str, Any]:
