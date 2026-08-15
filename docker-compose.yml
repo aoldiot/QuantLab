@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: quantlab-postgres
+    environment:
+      POSTGRES_DB: quantlab
+      POSTGRES_USER: quantlab
+      POSTGRES_PASSWORD: quantlab
+    ports:
+      - "5432:5432"
+    volumes:
+      - quantlab_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantlab -d quantlab"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: quantlab-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "${QUANTLAB_REDIS_PORT:-6380}:6379"
+    volumes:
+      - quantlab_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  quantlab_postgres:
+  quantlab_redis:

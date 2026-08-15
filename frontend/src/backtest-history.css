@@ -1,0 +1,29 @@
+.clickable-run { cursor: pointer; outline: 0; transition: background 0.15s ease; }
+.clickable-run:hover, .clickable-run:focus { background: #122330; }
+.clickable-run:focus { box-shadow: inset 3px 0 var(--cyan); }
+.clickable-run td:first-child strong, .clickable-run td:first-child small { display: block; }
+.clickable-run td:first-child small { margin-top: 5px; }
+.detail-link { display: inline-flex; align-items: center; gap: 3px; color: var(--cyan); white-space: nowrap; font-weight: 600; }
+.detail-link svg { width: 15px; }
+.negative { color: var(--red); }
+.run-info code { color: #b7c5d4; font-size: 11px; }
+.run-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.delete-run { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 5px; background: #101822; color: #78899b; cursor: pointer; }
+.delete-run:hover { color: #ff858e; border-color: #713d46; background: #27161b; }
+.delete-run:disabled { cursor: not-allowed; opacity: 0.3; }
+.delete-run svg { width: 14px; }
+.analysis-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.analysis-grid .chart-wide { grid-column: span 2; }
+.monthly-return-card { align-self: start; padding-top: 16px; padding-bottom: 16px; }
+.monthly-return-card h3 { margin-bottom: 10px; }
+.returns-heatmap { display: grid; grid-template-columns: 62px repeat(12, minmax(55px, 1fr)); grid-auto-rows: 28px; gap: 4px; overflow-x: auto; font-size: 10px; align-content: start; }
+.returns-heatmap > b { color: var(--muted); text-align: center; padding: 3px 0; }
+.heat-row { display: contents; }
+.heat-row strong { display: grid; place-items: center; color: #b7c5d4; }
+.heat-row span { display: grid; place-items: center; min-height: 28px; border-radius: 4px; color: #dce6f1; }
+.heat-row .gain { background: #145b3e; }
+.heat-row .loss { background: #66313a; }
+.heat-row .empty { background: #172432; color: #62758a; }
+.report-summary p { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); padding: 10px 0; margin: 0; }
+.report-summary span { color: var(--muted); }
+.report-summary b { color: #bfe9ed; }
