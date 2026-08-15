@@ -231,6 +231,7 @@ def archive_plan(symbol: str, interval: str, start: date, end: date, market_type
     path = "spot" if market_type == "spot" else "futures/um"
     archives: list[Archive] = []
     cursor = start.replace(day=1)
+    current_month_first = datetime.now(UTC).date().replace(day=1)
     while cursor <= end:
         last = date(cursor.year, cursor.month, monthrange(cursor.year, cursor.month)[1])
         part_start, part_end = max(start, cursor), min(end, last)
@@ -239,18 +240,28 @@ def archive_plan(symbol: str, interval: str, start: date, end: date, market_type
         while day <= part_end:
             daily_period = day.isoformat()
             daily_name = f"{symbol}-{interval}-{daily_period}.zip"
-            daily.append(Archive(f"{market_type}/{symbol}/{interval}/daily/{daily_period}", f"{VISION_ROOT}/{path}/daily/klines/{symbol}/{interval}/{daily_name}"))
+            daily.append(
+                Archive(
+                    f"{market_type}/{symbol}/{interval}/daily/{daily_period}",
+                    f"{VISION_ROOT}/{path}/daily/klines/{symbol}/{interval}/{daily_name}",
+                )
+            )
             day += timedelta(days=1)
-        month_period = cursor.strftime("%Y-%m")
-        month_name = f"{symbol}-{interval}-{month_period}.zip"
-        # Include the selected slice in the manifest key. A partial-month
-        # import must not make a later request for other days look complete.
-        slice_key = f"{part_start.isoformat()}_{part_end.isoformat()}"
-        archives.append(Archive(
-            f"{market_type}/{symbol}/{interval}/monthly/{month_period}/{slice_key}",
-            f"{VISION_ROOT}/{path}/monthly/klines/{symbol}/{interval}/{month_name}",
-            tuple(daily),
-        ))
+
+        # Current ongoing month does not have monthly archives on Binance Vision yet
+        if cursor >= current_month_first:
+            archives.extend(daily)
+        else:
+            month_period = cursor.strftime("%Y-%m")
+            month_name = f"{symbol}-{interval}-{month_period}.zip"
+            slice_key = f"{part_start.isoformat()}_{part_end.isoformat()}"
+            archives.append(
+                Archive(
+                    f"{market_type}/{symbol}/{interval}/monthly/{month_period}/{slice_key}",
+                    f"{VISION_ROOT}/{path}/monthly/klines/{symbol}/{interval}/{month_name}",
+                    tuple(daily),
+                )
+            )
         cursor = (last + timedelta(days=1)).replace(day=1)
     return archives
 
@@ -388,82 +399,131 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
         catalog.write_data(list(instruments.values()))
         _log(task_id, f"已校准 {len(instruments)} 个 Instrument")
         manifest_path, manifest = _manifest(catalog_path)
-        plan = [(symbol, interval, archive) for symbol in symbols for interval in payload.intervals for archive in archive_plan(symbol, interval, payload.start_date, payload.end_date, payload.market_type)]
-        _publish(task_id, total_files=len(plan), stage="下载并转换 K 线")
+        plan = [
+            (symbol, interval, archive)
+            for symbol in symbols
+            for interval in payload.intervals
+            for archive in archive_plan(symbol, interval, payload.start_date, payload.end_date, payload.market_type)
+        ]
         concurrency = min(max(settings.data_download_concurrency, 1), 16)
-        _log(task_id, f"计划处理 {len(plan)} 个月归档候选，并发数 {concurrency}")
-        rows = downloaded = skipped = missing_files = 0
-        total = len(plan)
+        total_files = len(plan)
+        completed_files = 0
+        rows = 0
+        downloaded = 0
+        skipped = 0
+        missing_files = 0
 
-        monthly_results: dict[str, tuple[bytes | None, bytes | None]] = {}
-        pending_monthly = [item[2] for item in plan if not (payload.mode == "incremental" and item[2].key in manifest["archives"])]
-        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="binance-archive") as pool:
-            futures = {pool.submit(_fetch_archive, archive): archive for archive in pending_monthly}
-            for future in as_completed(futures):
-                archive = futures[future]
-                try:
-                    monthly_results[archive.key] = future.result()
-                except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
-                    monthly_results[archive.key] = (None, None)
+        _publish(task_id, total_files=total_files, stage="下载并转换 K 线", progress=0)
+        _log(task_id, f"计划处理 {total_files} 个归档候选，并发数 {concurrency}")
 
-        work: list[tuple[str, str, Archive, bool]] = []
-        for symbol, interval, monthly in plan:
-            if payload.mode == "incremental" and monthly.key in manifest["archives"]:
-                work.append((symbol, interval, monthly, True))
-            else:
-                monthly_content, _ = monthly_results.get(monthly.key, (None, None))
-                if monthly_content is not None:
-                    _log(task_id, f"月归档可用 {monthly.url}", "success")
-                    work.append((symbol, interval, monthly, False))
+        catalog_lock = threading.Lock()
+        state_lock = threading.Lock()
+
+        def update_progress(item_log: str | None = None, log_level: str = "info") -> None:
+            nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files
+            with state_lock:
+                pct = min(100, round(completed_files / max(1, total_files) * 100))
+                _publish(
+                    task_id,
+                    completed_files=completed_files,
+                    total_files=total_files,
+                    progress=pct,
+                    rows=rows,
+                    downloaded_files=downloaded,
+                    skipped_files=skipped,
+                    missing_files=missing_files,
+                )
+            if item_log:
+                _log(task_id, item_log, log_level)
+
+        def process_archive(symbol: str, interval: str, archive: Archive) -> bool:
+            nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files
+            if payload.mode == "incremental" and archive.key in manifest.get("archives", {}):
+                with state_lock:
+                    skipped += 1
+                    completed_files += 1
+                update_progress(f"已存在，跳过 {archive.key}", "muted")
+                return True
+
+            content, checksum = _fetch_archive(archive)
+            if content is None:
+                return False
+
+            try:
+                digest = hashlib.sha256(content).hexdigest()
+                if checksum:
+                    expected = checksum.decode("utf-8").strip().split()[0].lower()
+                    if expected != digest:
+                        with state_lock:
+                            missing_files += 1
+                            completed_files += 1
+                        update_progress(f"CHECKSUM 校验不一致，跳过归档: {archive.url}", "warning")
+                        return True
                 else:
-                    total += len(monthly.fallbacks) - 1
-                    _publish(task_id, total_files=total)
-                    _log(task_id, f"月归档不存在，拆分为 {len(monthly.fallbacks)} 个日归档", "warning")
-                    work.extend((symbol, interval, daily, False) for daily in monthly.fallbacks)
+                    _log(task_id, f"远端未提供 CHECKSUM ({archive.key})，继续处理 ZIP", "warning")
 
-        daily_results: dict[str, tuple[bytes | None, bytes | None]] = {}
-        pending_daily = [archive for _, _, archive, known in work if not archive.fallbacks and not known and not (payload.mode == "incremental" and archive.key in manifest["archives"])]
-        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="binance-archive") as pool:
-            futures = {pool.submit(_fetch_archive, archive): archive for archive in pending_daily}
-            for future in as_completed(futures):
-                archive = futures[future]
-                try:
-                    daily_results[archive.key] = future.result()
-                except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
-                    daily_results[archive.key] = (None, None)
+                bars = parse_archive(content, instruments[symbol], interval, payload.start_date, payload.end_date)
+                with catalog_lock:
+                    if bars:
+                        catalog.write_data(bars)
+                    manifest["archives"][archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
+                    _save_manifest(manifest_path, manifest)
 
-        for completed, (symbol, interval, archive, known_complete) in enumerate(work, 1):
-            if known_complete or (payload.mode == "incremental" and archive.key in manifest["archives"]):
-                skipped += 1
-                _log(task_id, f"已存在，跳过 {archive.key}", "muted")
-            else:
-                content, checksum = (monthly_results if archive.fallbacks else daily_results).get(archive.key, (None, None))
-                if content is None:
+                with state_lock:
+                    rows += len(bars)
+                    downloaded += 1
+                    completed_files += 1
+                update_progress(f"转换并写入 {len(bars):,} 根 K 线 ({symbol} {interval} {archive.key.split('/')[-1]})", "success")
+                return True
+            except Exception as e:  # noqa: BLE001
+                with state_lock:
                     missing_files += 1
-                    _log(task_id, f"远端归档不存在或下载失败，已跳过 {archive.url}", "warning")
-                else:
+                    completed_files += 1
+                update_progress(f"解析写入归档失败 ({archive.url}): {e}", "warning")
+                return True
+
+        monthly_items = [item for item in plan if item[2].fallbacks]
+        direct_daily_items = [item for item in plan if not item[2].fallbacks]
+        fallback_daily_items: list[tuple[str, str, Archive]] = []
+
+        if monthly_items:
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="binance-monthly") as pool:
+                futures = {
+                    pool.submit(process_archive, symbol, interval, archive): (symbol, interval, archive)
+                    for symbol, interval, archive in monthly_items
+                }
+                for future in as_completed(futures):
+                    symbol, interval, archive = futures[future]
                     try:
-                        digest = hashlib.sha256(content).hexdigest()
-                        if checksum:
-                            expected = checksum.decode("utf-8").strip().split()[0].lower()
-                            if expected != digest:
-                                _log(task_id, f"CHECKSUM 校验不一致，跳过归档: {archive.url}", "warning")
-                                missing_files += 1
-                                continue
-                        else:
-                            _log(task_id, "远端未提供 CHECKSUM，继续处理 ZIP", "warning")
-                        bars = parse_archive(content, instruments[symbol], interval, payload.start_date, payload.end_date)
-                        if bars:
-                            catalog.write_data(bars)
-                            rows += len(bars)
-                        manifest["archives"][archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
-                        _save_manifest(manifest_path, manifest)
-                        downloaded += 1
-                        _log(task_id, f"转换并写入 {len(bars):,} 根 K 线", "success")
-                    except Exception as e:  # noqa: BLE001
-                        missing_files += 1
-                        _log(task_id, f"解析写入归档失败 ({archive.url}): {e}", "warning")
-            _publish(task_id, completed_files=completed, progress=round(completed / max(1, total) * 100), rows=rows, downloaded_files=downloaded, skipped_files=skipped, missing_files=missing_files)
+                        success = future.result()
+                    except Exception:  # noqa: BLE001
+                        success = False
+                    if not success:
+                        with state_lock:
+                            total_files += len(archive.fallbacks) - 1
+                            _publish(task_id, total_files=total_files)
+                        _log(task_id, f"月归档不存在，拆分为 {len(archive.fallbacks)} 个日归档 ({symbol} {interval})", "warning")
+                        fallback_daily_items.extend((symbol, interval, daily) for daily in archive.fallbacks)
+
+        all_daily_items = direct_daily_items + fallback_daily_items
+        if all_daily_items:
+            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="binance-daily") as pool:
+                futures = {
+                    pool.submit(process_archive, symbol, interval, archive): (symbol, interval, archive)
+                    for symbol, interval, archive in all_daily_items
+                }
+                for future in as_completed(futures):
+                    symbol, interval, archive = futures[future]
+                    try:
+                        success = future.result()
+                    except Exception:  # noqa: BLE001
+                        success = False
+                    if not success:
+                        with state_lock:
+                            missing_files += 1
+                            completed_files += 1
+                        update_progress(f"远端归档不存在或下载失败，已跳过 {archive.url}", "warning")
+
         _publish(task_id, status="completed", stage="完成", progress=100, finished_at=_now())
         _log(task_id, f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个，缺失/跳过 {missing_files} 个", "success")
     except Exception as exc:  # noqa: BLE001 - task failures must be reflected in task state
