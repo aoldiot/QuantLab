@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import uuid
 from datetime import UTC, datetime
 
@@ -109,15 +110,21 @@ async def get_hermes_config(db: AsyncSession | None = None) -> tuple[str, str, s
 
 
 def sdk_env(config: LlmConfiguration) -> dict[str, str]:
+    timeout_ms = max((config.timeout_seconds or 120) * 1000, 300_000)
     env = {
         "ANTHROPIC_BASE_URL": config.base_url.rstrip("/"),
-        "API_TIMEOUT_MS": str(config.timeout_seconds * 1000),
-        "CLAUDE_CODE_MAX_RETRIES": "2",
+        "API_TIMEOUT_MS": str(timeout_ms),
+        "CLAUDE_CODE_MAX_RETRIES": "5",
     }
     key_name = "ANTHROPIC_API_KEY" if config.auth_type == "api_key" else "ANTHROPIC_AUTH_TOKEN"
     env[key_name] = decrypt_api_key(config.api_key_encrypted)
     if config.small_fast_model:
         env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.small_fast_model
+    # Forward proxy envs to the Claude SDK subprocess if present
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"):
+        val = os.environ.get(var)
+        if val:
+            env[var] = val
     return env
 
 

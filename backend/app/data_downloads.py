@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import ssl
 import threading
 import time
@@ -27,6 +28,8 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from pydantic import BaseModel, Field, field_validator
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 VISION_ROOT = "https://data.binance.vision/data"
@@ -90,23 +93,71 @@ _tasks: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
 
 
+def _tasks_dir() -> Path:
+    path = settings.data_root / "downloads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_task_to_disk(task: dict[str, Any]) -> None:
+    try:
+        task_id = task.get("id")
+        if not task_id:
+            return
+        file_path = _tasks_dir() / f"{task_id}.json"
+        tmp_path = _tasks_dir() / f"{task_id}.json.tmp"
+        tmp_path.write_text(json.dumps(task, ensure_ascii=False, indent=2))
+        tmp_path.replace(file_path)
+    except OSError as err:
+        logger.warning("保存下载任务到磁盘失败: %s", err)
+
+
+def _init_load_tasks() -> None:
+    """Load persisted tasks from disk."""
+    dir_path = _tasks_dir()
+    for file in dir_path.glob("*.json"):
+        try:
+            task = json.loads(file.read_text())
+            task_id = task.get("id")
+            if not task_id:
+                continue
+            if task.get("status") in {"queued", "running"}:
+                task["status"] = "failed"
+                task["stage"] = "已中断"
+                task["error"] = "服务重启导致任务中断（可使用增量模式继续下载）"
+                task["updated_at"] = _now()
+                _save_task_to_disk(task)
+            _tasks[task_id] = task
+        except (OSError, json.JSONDecodeError) as err:
+            logger.warning("读取历史下载任务失败 (%s): %s", file, err)
+
+
+_init_load_tasks()
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
 def _publish(task_id: str, **changes: Any) -> None:
     with _lock:
-        task = _tasks[task_id]
+        task = _tasks.get(task_id)
+        if not task:
+            return
         task.update(changes)
         task["updated_at"] = _now()
+        _save_task_to_disk(task)
 
 
 def _log(task_id: str, message: str, level: str = "info") -> None:
     with _lock:
-        task = _tasks[task_id]
+        task = _tasks.get(task_id)
+        if not task:
+            return
         task["logs"].append({"time": datetime.now(UTC).strftime("%H:%M:%S"), "level": level, "message": message})
         task["logs"] = task["logs"][-1000:]
         task["updated_at"] = _now()
+        _save_task_to_disk(task)
 
 
 def _json_get(url: str) -> dict[str, Any]:
@@ -431,12 +482,44 @@ def symbols(market_type: str = "um"):
     return [{"symbol": key, "base": value["baseAsset"], "quote": value["quoteAsset"]} for key, value in sorted(markets.items())]
 
 
+@router.get("/downloads")
+def list_downloads():
+    with _lock:
+        return sorted(_tasks.values(), key=lambda x: str(x.get("created_at", "")), reverse=True)
+
+
+@router.get("/downloads/latest")
+def get_latest_download():
+    with _lock:
+        tasks = sorted(_tasks.values(), key=lambda x: str(x.get("created_at", "")), reverse=True)
+        if not tasks:
+            return None
+        return dict(tasks[0])
+
+
 @router.post("/downloads", status_code=202)
 def create_download(payload: DownloadCreate):
     task_id = str(uuid.uuid4())
-    task = {"id": task_id, "status": "queued", "stage": "等待执行", "progress": 0, "logs": [], "rows": 0, "completed_files": 0, "total_files": 0, "downloaded_files": 0, "skipped_files": 0, "missing_files": 0, "error": None, "created_at": _now(), "updated_at": _now(), "request": payload.model_dump(mode="json")}
+    task = {
+        "id": task_id,
+        "status": "queued",
+        "stage": "等待执行",
+        "progress": 0,
+        "logs": [],
+        "rows": 0,
+        "completed_files": 0,
+        "total_files": 0,
+        "downloaded_files": 0,
+        "skipped_files": 0,
+        "missing_files": 0,
+        "error": None,
+        "created_at": _now(),
+        "updated_at": _now(),
+        "request": payload.model_dump(mode="json"),
+    }
     with _lock:
         _tasks[task_id] = task
+        _save_task_to_disk(task)
     threading.Thread(target=run_download, args=(task_id, payload), daemon=True, name=f"binance-download-{task_id[:8]}").start()
     return task
 
@@ -446,5 +529,23 @@ def get_download(task_id: str):
     with _lock:
         task = _tasks.get(task_id)
         if not task:
-            raise HTTPException(404, "下载任务不存在或服务已重启")
+            file_path = _tasks_dir() / f"{task_id}.json"
+            if file_path.exists():
+                try:
+                    task = json.loads(file_path.read_text())
+                    _tasks[task_id] = task
+                except (OSError, json.JSONDecodeError):
+                    logger.warning("读取任务文件失败: %s", file_path)
+        if not task:
+            raise HTTPException(404, "下载任务不存在")
         return dict(task)
+
+
+@router.delete("/downloads/{task_id}")
+def delete_download(task_id: str):
+    with _lock:
+        _tasks.pop(task_id, None)
+        file_path = _tasks_dir() / f"{task_id}.json"
+        if file_path.exists():
+            file_path.unlink(missing_ok=True)
+    return {"ok": True}

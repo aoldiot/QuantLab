@@ -59,7 +59,10 @@ export const api={
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),
   iterateResearch:(id:string,data:{target:'DISCUSSING'|'SPEC_REVIEW'|'READY_FOR_BACKTEST';reason:string})=>request<ResearchProject>(`/research/${id}/iterate`,{method:'POST',body:JSON.stringify(data)}),
   dataSymbols:(marketType:string)=>request<{symbol:string;base:string;quote:string}[]>(`/data/symbols?market_type=${marketType}`),
+  dataDownloads:()=>request<any[]>('/data/downloads'),
+  dataDownloadLatest:()=>request<any>('/data/downloads/latest'),
   createDataDownload:(data:unknown)=>request<any>('/data/downloads',{method:'POST',body:JSON.stringify(data)}),
   dataDownload:(id:string)=>request<any>('/data/downloads/'+id),
+  deleteDataDownload:(id:string)=>request<{ok:boolean}>('/data/downloads/'+id,{method:'DELETE'}),
   runs:()=>request<Run[]>('/backtests'),run:(id:string)=>request<Run>('/backtests/'+id),chart:(id:string,symbol?:string)=>request<ChartData>(`/backtests/${id}/chart${symbol?'?symbol='+encodeURIComponent(symbol):''}`),createRun:(data:unknown)=>request<Run>('/backtests',{method:'POST',body:JSON.stringify(data)}),deleteRun:(id:string)=>request<void>('/backtests/'+id,{method:'DELETE'})
 }
