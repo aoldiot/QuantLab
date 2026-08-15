@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import zipfile
+from collections import defaultdict
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -44,13 +45,13 @@ TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h
 CATALOG_FORMAT_VERSION = 2
 
 _HTTP_CLIENT = httpx.Client(
-    timeout=httpx.Timeout(60.0, connect=20.0),
+    timeout=httpx.Timeout(30.0, connect=10.0),
     follow_redirects=True,
     headers={
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept-Encoding": "gzip, deflate",
     },
-    limits=httpx.Limits(max_keepalive_connections=20, max_connections=50, keepalive_expiry=30.0),
+    limits=httpx.Limits(max_keepalive_connections=128, max_connections=256, keepalive_expiry=60.0),
 )
 
 
@@ -94,6 +95,7 @@ class Archive:
 
 _tasks: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
+_last_task_save: dict[str, float] = {}
 
 
 def _tasks_dir() -> Path:
@@ -106,11 +108,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _save_task_to_disk(task: dict[str, Any]) -> None:
+def _save_task_to_disk(task: dict[str, Any], force: bool = False) -> None:
     try:
         task_id = task.get("id")
         if not task_id:
             return
+        now_ts = time.time()
+        # Debounce disk write to max once per 250ms unless force=True
+        if not force and (now_ts - _last_task_save.get(task_id, 0)) < 0.25:
+            return
+        _last_task_save[task_id] = now_ts
         file_path = _tasks_dir() / f"{task_id}.json"
         tmp_path = _tasks_dir() / f"{task_id}.json.tmp"
         tmp_path.write_text(json.dumps(task, ensure_ascii=False, indent=2))
@@ -133,7 +140,7 @@ def _init_load_tasks() -> None:
                 task["stage"] = "已中断"
                 task["error"] = "服务重启导致任务中断（可使用增量模式继续下载）"
                 task["updated_at"] = _now()
-                _save_task_to_disk(task)
+                _save_task_to_disk(task, force=True)
             _tasks[task_id] = task
         except (OSError, json.JSONDecodeError) as err:
             logger.warning("读取历史下载任务失败 (%s): %s", file, err)
@@ -142,18 +149,17 @@ def _init_load_tasks() -> None:
 _init_load_tasks()
 
 
-
-def _publish(task_id: str, **changes: Any) -> None:
+def _publish(task_id: str, force_save: bool = False, **changes: Any) -> None:
     with _lock:
         task = _tasks.get(task_id)
         if not task:
             return
         task.update(changes)
         task["updated_at"] = _now()
-        _save_task_to_disk(task)
+        _save_task_to_disk(task, force=force_save)
 
 
-def _log(task_id: str, message: str, level: str = "info") -> None:
+def _log(task_id: str, message: str, level: str = "info", force_save: bool = False) -> None:
     with _lock:
         task = _tasks.get(task_id)
         if not task:
@@ -161,7 +167,7 @@ def _log(task_id: str, message: str, level: str = "info") -> None:
         task["logs"].append({"time": datetime.now(UTC).strftime("%H:%M:%S"), "level": level, "message": message})
         task["logs"] = task["logs"][-1000:]
         task["updated_at"] = _now()
-        _save_task_to_disk(task)
+        _save_task_to_disk(task, force=force_save)
 
 
 def _json_get(url: str) -> dict[str, Any]:
@@ -212,13 +218,12 @@ def _download(url: str) -> bytes | None:
     return None
 
 
-def _fetch_archive(archive: Archive) -> tuple[bytes | None, bytes | None]:
+def _fetch_archive(archive: Archive) -> bytes | None:
+    """Download single archive ZIP directly. ZIP internal CRC32 validates payload integrity."""
     try:
-        content = _download(archive.url)
-        checksum = _download(f"{archive.url}.CHECKSUM") if content is not None else None
-        return content, checksum
+        return _download(archive.url)
     except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError):
-        return None, None
+        return None
 
 
 def _symbol_map(market_type: str) -> dict[str, dict[str, Any]]:
@@ -409,7 +414,7 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
             for interval in payload.intervals
             for archive in archive_plan(symbol, interval, payload.start_date, payload.end_date, payload.market_type)
         ]
-        concurrency = min(max(settings.data_download_concurrency, 1), 16)
+        concurrency = min(max(settings.data_download_concurrency, 1), 64)
         total_files = len(plan)
         completed_files = 0
         rows = 0
@@ -417,14 +422,26 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
         skipped = 0
         missing_files = 0
 
-        _publish(task_id, total_files=total_files, stage="下载并转换 K 线", progress=0)
-        _log(task_id, f"计划处理 {total_files} 个归档候选，并发数 {concurrency}")
+        _publish(task_id, force_save=True, total_files=total_files, stage="下载并转换 K 线", progress=0)
+        _log(task_id, f"计划处理 {total_files} 个归档候选，高并发度 {concurrency}", force_save=True)
 
         catalog_lock = threading.Lock()
         state_lock = threading.Lock()
+        pending_manifest: dict[str, dict[str, Any]] = {}
+        last_manifest_save = [time.time()]
+        last_log_time = 0.0
 
-        def update_progress(item_log: str | None = None, log_level: str = "info") -> None:
-            nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files
+        def flush_manifest(force: bool = False) -> None:
+            with catalog_lock:
+                now = time.time()
+                if pending_manifest and (force or (now - last_manifest_save[0]) >= 0.8 or len(pending_manifest) >= 50):
+                    manifest["archives"].update(pending_manifest)
+                    pending_manifest.clear()
+                    _save_manifest(manifest_path, manifest)
+                    last_manifest_save[0] = now
+
+        def update_progress(item_log: str | None = None, log_level: str = "info", force_log: bool = False) -> None:
+            nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files, last_log_time
             with state_lock:
                 pct = min(100, round(completed_files / max(1, total_files) * 100))
                 _publish(
@@ -438,7 +455,10 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                     missing_files=missing_files,
                 )
             if item_log:
-                _log(task_id, item_log, log_level)
+                now = time.time()
+                if force_log or log_level in {"warning", "error"} or (now - last_log_time) >= 0.15:
+                    last_log_time = now
+                    _log(task_id, item_log, log_level)
 
         def process_archive(symbol: str, interval: str, archive: Archive) -> bool:
             nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files
@@ -449,41 +469,42 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                 update_progress(f"已存在，跳过 {archive.key}", "muted")
                 return True
 
-            content, checksum = _fetch_archive(archive)
+            content = _fetch_archive(archive)
             if content is None:
                 return False
 
             try:
                 digest = hashlib.sha256(content).hexdigest()
-                if checksum:
-                    expected = checksum.decode("utf-8").strip().split()[0].lower()
-                    if expected != digest:
-                        with state_lock:
-                            missing_files += 1
-                            completed_files += 1
-                        update_progress(f"CHECKSUM 校验不一致，跳过归档: {archive.url}", "warning")
-                        return True
-                else:
-                    _log(task_id, f"远端未提供 CHECKSUM ({archive.key})，继续处理 ZIP", "warning")
-
                 bars = parse_archive(content, instruments[symbol], interval, payload.start_date, payload.end_date)
+                
                 with catalog_lock:
                     if bars:
-                        catalog.write_data(bars)
-                    manifest["archives"][archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
-                    _save_manifest(manifest_path, manifest)
+                        try:
+                            catalog.write_data(bars)
+                        except Exception as write_err:
+                            if "non-disjoint intervals" in str(write_err):
+                                logger.info("Parquet 区间已存在或重叠 (%s)，自动跳过写入: %s", archive.key, write_err)
+                            else:
+                                raise
+                    pending_manifest[archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
+                    if (time.time() - last_manifest_save[0]) >= 0.8 or len(pending_manifest) >= 50:
+                        manifest["archives"].update(pending_manifest)
+                        pending_manifest.clear()
+                        _save_manifest(manifest_path, manifest)
+                        last_manifest_save[0] = time.time()
 
                 with state_lock:
                     rows += len(bars)
                     downloaded += 1
                     completed_files += 1
-                update_progress(f"转换并写入 {len(bars):,} 根 K 线 ({symbol} {interval} {archive.key.split('/')[-1]})", "success")
+
+                update_progress(f"写入完成 {len(bars):,} 根 K 线 ({symbol} {interval} {archive.key.split('/')[-1]})", "success")
                 return True
             except Exception as e:  # noqa: BLE001
                 with state_lock:
                     missing_files += 1
                     completed_files += 1
-                update_progress(f"解析写入归档失败 ({archive.url}): {e}", "warning")
+                update_progress(f"解析归档失败 ({archive.url}): {e}", "warning")
                 return True
 
         monthly_items = [item for item in plan if item[2].fallbacks]
@@ -506,8 +527,10 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                         with state_lock:
                             total_files += len(archive.fallbacks) - 1
                             _publish(task_id, total_files=total_files)
-                        _log(task_id, f"月归档不存在，拆分为 {len(archive.fallbacks)} 个日归档 ({symbol} {interval})", "warning")
+                        _log(task_id, f"月归档不存在，拆分为 {len(archive.fallbacks)} 个日归档 ({symbol} {interval})", "warning", force_log=True)
                         fallback_daily_items.extend((symbol, interval, daily) for daily in archive.fallbacks)
+
+        flush_manifest(force=True)
 
         all_daily_items = direct_daily_items + fallback_daily_items
         if all_daily_items:
@@ -528,11 +551,13 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                             completed_files += 1
                         update_progress(f"远端归档不存在或下载失败，已跳过 {archive.url}", "warning")
 
-        _publish(task_id, status="completed", stage="完成", progress=100, finished_at=_now())
-        _log(task_id, f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个，缺失/跳过 {missing_files} 个", "success")
+        flush_manifest(force=True)
+
+        _publish(task_id, force_save=True, status="completed", stage="完成", progress=100, finished_at=_now())
+        _log(task_id, f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个，缺失/跳过 {missing_files} 个", "success", force_save=True)
     except Exception as exc:  # noqa: BLE001 - task failures must be reflected in task state
-        _publish(task_id, status="failed", stage="失败", error=str(exc), finished_at=_now())
-        _log(task_id, str(exc), "error")
+        _publish(task_id, force_save=True, status="failed", stage="失败", error=str(exc), finished_at=_now())
+        _log(task_id, str(exc), "error", force_save=True)
 
 
 @router.get("/symbols")

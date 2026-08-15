@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     llm_secret_encryption_key: str = "change-me-in-production"
     agent_max_concurrency: int = 5
     agent_workspace_retention_days: int = 7
-    data_download_concurrency: int = 8
+    data_download_concurrency: int = 32
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("data_root", "artifact_root", "catalog_path", "strategy_git_repo_path", mode="after")

@@ -51,7 +51,7 @@ services:
       INSTRUMENT_ID_TEMPLATE: "{symbol}-PERP.{venue}"
       AGENT_MAX_CONCURRENCY: 5
       AGENT_WORKSPACE_RETENTION_DAYS: 7
-      DATA_DOWNLOAD_CONCURRENCY: 8
+      DATA_DOWNLOAD_CONCURRENCY: 32
     ports:
       - "8000:8000"
     volumes:
