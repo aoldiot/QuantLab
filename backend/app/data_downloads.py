@@ -717,11 +717,98 @@ def _get_registered_instruments(catalog_path: Path) -> dict[str, Any]:
     return registered_instruments
 
 
+COVERAGE_BUCKET_SPECS = [
+    {"key": "gte_3y", "label": "≥ 3 年", "min_days": 1095, "max_days": None, "desc": "1095天及以上"},
+    {"key": "1y_3y", "label": "1 - 3 年", "min_days": 365, "max_days": 1094, "desc": "365 ~ 1094天"},
+    {"key": "6m_1y", "label": "6 个月 - 1 年", "min_days": 180, "max_days": 364, "desc": "180 ~ 364天"},
+    {"key": "1m_6m", "label": "1 - 6 个月", "min_days": 30, "max_days": 179, "desc": "30 ~ 179天"},
+    {"key": "lt_1m", "label": "< 1 个月", "min_days": 0, "max_days": 29, "desc": "30天以内"},
+]
+
+
+def _calculate_days_span(start_date: str | None, end_date: str | None) -> int:
+    if not start_date or not end_date:
+        return 0
+    try:
+        d1 = datetime.strptime(start_date[:10], "%Y-%m-%d").date()
+        d2 = datetime.strptime(end_date[:10], "%Y-%m-%d").date()
+        return max(1, (d2 - d1).days + 1)
+    except Exception:
+        return 0
+
+
+def _get_coverage_bucket_key(days: int) -> str:
+    if days >= 1095:
+        return "gte_3y"
+    elif days >= 365:
+        return "1y_3y"
+    elif days >= 180:
+        return "6m_1y"
+    elif days >= 30:
+        return "1m_6m"
+    else:
+        return "lt_1m"
+
+
+def _compute_coverage_stats(symbols_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {
+        spec["key"]: {
+            "key": spec["key"],
+            "label": spec["label"],
+            "min_days": spec["min_days"],
+            "max_days": spec["max_days"],
+            "desc": spec["desc"],
+            "count": 0,
+            "percentage": 0.0,
+            "total_bars": 0,
+            "total_size_bytes": 0,
+            "symbols": [],
+            "symbol_details": [],
+        }
+        for spec in COVERAGE_BUCKET_SPECS
+    }
+
+    total_count = len(symbols_list)
+    for entry in symbols_list:
+        days = _calculate_days_span(entry.get("start_date"), entry.get("end_date"))
+        bkey = _get_coverage_bucket_key(days)
+        b = buckets[bkey]
+        b["count"] += 1
+        b["total_bars"] += entry.get("total_bars", 0)
+        b["total_size_bytes"] += entry.get("total_size_bytes", 0)
+        sym = entry.get("symbol", "")
+        if sym and sym not in b["symbols"]:
+            b["symbols"].append(sym)
+        b["symbol_details"].append({
+            "symbol": sym,
+            "instrument_id": entry.get("instrument_id", ""),
+            "market_type": entry.get("market_type", "um"),
+            "market_type_label": entry.get("market_type_label", ""),
+            "start_date": entry.get("start_date"),
+            "end_date": entry.get("end_date"),
+            "days_span": days,
+            "total_bars": entry.get("total_bars", 0),
+            "total_size_bytes": entry.get("total_size_bytes", 0),
+            "timeframes": [tf["interval"] for tf in entry.get("timeframes", [])],
+        })
+
+    result: list[dict[str, Any]] = []
+    for spec in COVERAGE_BUCKET_SPECS:
+        b = buckets[spec["key"]]
+        b["symbols"].sort()
+        b["symbol_details"].sort(key=lambda x: (-x["days_span"], x["symbol"]))
+        b["percentage"] = round((b["count"] / total_count * 100), 1) if total_count > 0 else 0.0
+        result.append(b)
+
+    return result
+
+
 def scan_catalog_summary(
     catalog_path: Path,
     query: str | None = None,
     market_type: str | None = None,
     interval: str | None = None,
+    duration_bucket: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
     page: int = 1,
@@ -795,6 +882,7 @@ def scan_catalog_summary(
                     "end_time": None,
                     "start_date": None,
                     "end_date": None,
+                    "days_span": 0,
                     "timeframes": [],
                 }
 
@@ -825,7 +913,6 @@ def scan_catalog_summary(
             })
 
     all_timeframes_set: set[str] = set()
-    filtered_items: list[dict[str, Any]] = []
 
     for inst_id, entry in symbols_map.items():
         min_ns = entry.pop("_min_ns", None)
@@ -839,11 +926,19 @@ def scan_catalog_summary(
             entry["end_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
             entry["end_date"] = dt.strftime("%Y-%m-%d")
 
+        entry["days_span"] = _calculate_days_span(entry["start_date"], entry["end_date"])
+
         # Sort timeframes
         entry["timeframes"].sort(key=lambda x: (x["interval"] not in TIMEFRAMES, x["interval"]))
         for tf in entry["timeframes"]:
             all_timeframes_set.add(tf["interval"])
 
+    # Compute coverage breakdown over all catalog symbols
+    coverage_stats = _compute_coverage_stats(list(symbols_map.values()))
+
+    filtered_items: list[dict[str, Any]] = []
+
+    for inst_id, entry in symbols_map.items():
         if query:
             q = query.strip().upper()
             if q not in entry["symbol"].upper() and q not in inst_id.upper() and q not in entry["base_currency"].upper():
@@ -855,6 +950,11 @@ def scan_catalog_summary(
 
         if interval and interval != "all":
             if not any(tf["interval"] == interval for tf in entry["timeframes"]):
+                continue
+
+        if duration_bucket and duration_bucket != "all":
+            entry_bucket = _get_coverage_bucket_key(entry["days_span"])
+            if entry_bucket != duration_bucket:
                 continue
 
         if start_date and entry["end_date"]:
@@ -906,6 +1006,7 @@ def scan_catalog_summary(
         "all_bars_count": total_catalog_bars,
         "all_size_bytes": total_catalog_size,
         "available_timeframes": sorted(all_timeframes_set),
+        "coverage_stats": coverage_stats,
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
@@ -966,6 +1067,7 @@ def catalog_summary(
     query: str | None = None,
     market_type: str | None = None,
     interval: str | None = None,
+    duration_bucket: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
     catalog_path: str | None = None,
@@ -980,6 +1082,7 @@ def catalog_summary(
         query=query,
         market_type=market_type,
         interval=interval,
+        duration_bucket=duration_bucket,
         start_date=start_date,
         end_date=end_date,
         page=page,

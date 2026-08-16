@@ -3,14 +3,21 @@ import {
   BarChart2,
   Calendar,
   CalendarDays,
+  CalendarRange,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
   Coins,
+  Copy,
   Database,
   Download,
+  ExternalLink,
+  Eye,
   FileSpreadsheet,
+  Filter,
+  FilterX,
   HardDrive,
   History,
   Info,
@@ -22,11 +29,18 @@ import {
   Sparkles,
   TerminalSquare,
   Trash2,
+  X,
   Zap,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import type { CatalogSummary, CatalogSymbolItem, CatalogTimeframeItem } from '../types'
+import type {
+  CatalogCoverageBucket,
+  CatalogCoverageSymbolDetail,
+  CatalogSummary,
+  CatalogSymbolItem,
+  CatalogTimeframeItem,
+} from '../types'
 
 const intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
 const yesterday = () => {
@@ -117,6 +131,7 @@ export default function DataDownloads() {
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [marketFilter, setMarketFilter] = useState<'all' | 'um' | 'spot'>('all')
   const [intervalFilter, setIntervalFilter] = useState<string>('all')
+  const [durationFilter, setDurationFilter] = useState<string>('all')
   const [sortBy, setSortBy] = useState<'symbol' | 'bars' | 'size' | 'start' | 'end'>('symbol')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [page, setPage] = useState(1)
@@ -124,6 +139,11 @@ export default function DataDownloads() {
   const [expandedSymbols, setExpandedSymbols] = useState<Set<string>>(new Set())
   const [deleteTarget, setDeleteTarget] = useState<{ symbol: string; instrument_id: string; interval?: string } | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  // Coverage Modal State
+  const [bucketModalTarget, setBucketModalTarget] = useState<CatalogCoverageBucket | null>(null)
+  const [bucketModalSearch, setBucketModalSearch] = useState('')
+  const [copiedSymbols, setCopiedSymbols] = useState(false)
 
   // Download Form State
   const [market, setMarket] = useState(savedForm?.market ?? 'um')
@@ -171,23 +191,31 @@ export default function DataDownloads() {
           query: debouncedSearch.trim() || undefined,
           market_type: marketFilter !== 'all' ? marketFilter : undefined,
           interval: intervalFilter !== 'all' ? intervalFilter : undefined,
+          duration_bucket: durationFilter !== 'all' ? durationFilter : undefined,
           sort_by: sortBy,
           sort_order: sortOrder,
           catalog_path: catalogPath.trim() || undefined,
         })
         setCatalogSummary(summary)
+        // If modal is open, keep its data synced with updated stats
+        if (bucketModalTarget && summary.coverage_stats) {
+          const updatedBucket = summary.coverage_stats.find((b) => b.key === bucketModalTarget.key)
+          if (updatedBucket) {
+            setBucketModalTarget(updatedBucket)
+          }
+        }
       } catch (err) {
         setCatalogError(err instanceof Error ? err.message : '读取 Catalog 数据资产失败')
       } finally {
         setCatalogLoading(false)
       }
     },
-    [page, pageSize, debouncedSearch, marketFilter, intervalFilter, sortBy, sortOrder, catalogPath],
+    [page, pageSize, debouncedSearch, marketFilter, intervalFilter, durationFilter, sortBy, sortOrder, catalogPath, bucketModalTarget?.key],
   )
 
   useEffect(() => {
     fetchCatalog(page, pageSize)
-  }, [page, pageSize, debouncedSearch, marketFilter, intervalFilter, sortBy, sortOrder, catalogPath])
+  }, [page, pageSize, debouncedSearch, marketFilter, intervalFilter, durationFilter, sortBy, sortOrder, catalogPath])
 
   // Save form settings to localStorage
   useEffect(() => {
@@ -359,6 +387,26 @@ export default function DataDownloads() {
     handleTabChange('download')
   }
 
+  const handleCopySymbols = (symbolsList: string[]) => {
+    if (!symbolsList || symbolsList.length === 0) return
+    const text = symbolsList.join(', ')
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedSymbols(true)
+      setTimeout(() => setCopiedSymbols(false), 2000)
+    }).catch(() => {
+      // Fallback
+    })
+  }
+
+  const handleBatchRefillDownload = (symbolsList: string[], marketType: string = 'um') => {
+    if (!symbolsList || symbolsList.length === 0) return
+    setMarket(marketType)
+    setSymbols(symbolsList.join(', '))
+    setMode('incremental')
+    setBucketModalTarget(null)
+    handleTabChange('download')
+  }
+
   const toggleExpandSymbol = (id: string) => {
     setExpandedSymbols((prev) => {
       const next = new Set(prev)
@@ -500,6 +548,115 @@ export default function DataDownloads() {
             </div>
           </div>
 
+          {/* Coverage Duration Statistics Panel */}
+          {catalogSummary && (
+            <div className="coverage-stats-section">
+              <div className="coverage-stats-header">
+                <div className="coverage-stats-title">
+                  <Clock size={16} />
+                  <span>标的历史覆盖时长统计</span>
+                  <small>
+                    (共统计 {catalogSummary.all_symbols_count} 个本地标的，点击卡片快速筛选或点击「查看币种」)
+                  </small>
+                </div>
+                {durationFilter !== 'all' && (
+                  <div className="coverage-filter-active-pill">
+                    <span>
+                      已筛选时长：
+                      <strong>
+                        {catalogSummary.coverage_stats?.find((b) => b.key === durationFilter)?.label ?? durationFilter}
+                      </strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDurationFilter('all')
+                        setPage(1)
+                      }}
+                      title="清除时长筛选"
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Multi-segment distribution progress bar */}
+              {catalogSummary.all_symbols_count > 0 && (
+                <div className="coverage-dist-bar-container">
+                  <div className="coverage-dist-bar">
+                    {catalogSummary.coverage_stats?.map((bucket) => {
+                      if (bucket.percentage <= 0) return null
+                      return (
+                        <div
+                          key={bucket.key}
+                          className={`dist-bar-seg bucket-${bucket.key}`}
+                          style={{ width: `${bucket.percentage}%` }}
+                          title={`${bucket.label} (${bucket.desc}): ${bucket.count} 个币种 (${bucket.percentage}%)`}
+                          onClick={() => {
+                            setDurationFilter((prev) => (prev === bucket.key ? 'all' : bucket.key))
+                            setPage(1)
+                          }}
+                        />
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* 5 Coverage Bucket Cards */}
+              <div className="coverage-cards-grid">
+                {(catalogSummary.coverage_stats ?? []).map((bucket) => {
+                  const isActive = durationFilter === bucket.key
+                  return (
+                    <div
+                      key={bucket.key}
+                      className={`coverage-card ${isActive ? 'active' : ''}`}
+                      onClick={() => {
+                        setDurationFilter((prev) => (prev === bucket.key ? 'all' : bucket.key))
+                        setPage(1)
+                      }}
+                    >
+                      <div className="coverage-card-head">
+                        <div className="bucket-dot-label">
+                          <span className={`bucket-dot bucket-${bucket.key}`} />
+                          <span>{bucket.label}</span>
+                        </div>
+                        <span className="bucket-desc-tag">{bucket.desc}</span>
+                      </div>
+
+                      <div className="coverage-card-body">
+                        <div className="bucket-count-wrapper">
+                          <strong>{bucket.count}</strong>
+                          <small>个币种</small>
+                        </div>
+                        <span className="bucket-pct-badge">{bucket.percentage}%</span>
+                      </div>
+
+                      <div className="coverage-card-foot">
+                        <span className="bucket-size-text">{formatBytes(bucket.total_size_bytes)}</span>
+                        <button
+                          type="button"
+                          className="bucket-inspect-btn"
+                          disabled={bucket.count === 0}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setBucketModalTarget(bucket)
+                            setBucketModalSearch('')
+                          }}
+                          title={`查看【${bucket.label}】覆盖的全部 ${bucket.count} 个币种`}
+                        >
+                          <Eye size={12} />
+                          <span>查看币种</span>
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Filter & Search Bar */}
           <div className="catalog-toolbar">
             <div className="toolbar-search">
@@ -548,6 +705,24 @@ export default function DataDownloads() {
                       {tf}
                     </option>
                   ))}
+                </select>
+              </label>
+
+              <label>
+                <span>覆盖时长</span>
+                <select
+                  value={durationFilter}
+                  onChange={(e) => {
+                    setDurationFilter(e.target.value)
+                    setPage(1)
+                  }}
+                >
+                  <option value="all">全部时长</option>
+                  <option value="gte_3y">≥ 3 年 (1095天+)</option>
+                  <option value="1y_3y">1 - 3 年 (365-1094天)</option>
+                  <option value="6m_1y">6 个月 - 1 年 (180-364天)</option>
+                  <option value="1m_6m">1 - 6 个月 (30-179天)</option>
+                  <option value="lt_1m">&lt; 1 个月 (&lt;30天)</option>
                 </select>
               </label>
 
@@ -944,6 +1119,185 @@ export default function DataDownloads() {
               )}
             </div>
           </section>
+        </div>
+      )}
+
+      {/* Coverage Symbols Detail Modal */}
+      {bucketModalTarget && (
+        <div className="modal-backdrop" onClick={() => setBucketModalTarget(null)}>
+          <div className="modal coverage-symbols-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="coverage-symbols-modal-head">
+              <div className="modal-head-title-row">
+                <span className={`bucket-dot bucket-${bucketModalTarget.key}`} style={{ width: 10, height: 10 }} />
+                <h3>
+                  覆盖时间段：{bucketModalTarget.label} ({bucketModalTarget.desc})
+                </h3>
+                <span className="data-tab-badge">{bucketModalTarget.count} 个币种</span>
+              </div>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setBucketModalTarget(null)}
+                aria-label="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="coverage-modal-summary-strip">
+              <div>
+                <span>时间段占比:</span>
+                <strong>{bucketModalTarget.percentage}%</strong>
+              </div>
+              <div>
+                <span>总 K 线条数:</span>
+                <strong>{bucketModalTarget.total_bars.toLocaleString()} 根</strong>
+              </div>
+              <div>
+                <span>数据存储占用:</span>
+                <strong>{formatBytes(bucketModalTarget.total_size_bytes)}</strong>
+              </div>
+            </div>
+
+            <div className="coverage-modal-toolbar">
+              <div className="modal-search-box">
+                <Search size={14} />
+                <input
+                  type="text"
+                  placeholder="在当前时间段搜索币种..."
+                  value={bucketModalSearch}
+                  onChange={(e) => setBucketModalSearch(e.target.value)}
+                  autoFocus
+                />
+                {bucketModalSearch && (
+                  <button type="button" className="clear-btn" onClick={() => setBucketModalSearch('')}>
+                    ×
+                  </button>
+                )}
+              </div>
+
+              <div className="modal-toolbar-actions">
+                <button
+                  type="button"
+                  className="modal-btn copy"
+                  onClick={() => handleCopySymbols(bucketModalTarget.symbols)}
+                  title="一键复制当前时间段内所有币种代码"
+                >
+                  {copiedSymbols ? <Check size={13} style={{ color: 'var(--green)' }} /> : <Copy size={13} />}
+                  <span>{copiedSymbols ? '已复制列表!' : '复制全部币种'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="modal-btn filter-action"
+                  onClick={() => {
+                    setDurationFilter(bucketModalTarget.key)
+                    setPage(1)
+                    setBucketModalTarget(null)
+                  }}
+                  title="在资产管理主表格中筛选展示这些币种"
+                >
+                  <Filter size={13} />
+                  <span>在表格中筛选</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="modal-btn refill-action"
+                  onClick={() => handleBatchRefillDownload(bucketModalTarget.symbols)}
+                  title="将这些币种一键填入采集下载表单"
+                >
+                  <Download size={13} />
+                  <span>批量增量补齐</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="coverage-symbols-scroll-list">
+              {bucketModalTarget.symbol_details.filter(
+                (s) =>
+                  !bucketModalSearch.trim() ||
+                  s.symbol.toLowerCase().includes(bucketModalSearch.trim().toLowerCase()) ||
+                  s.instrument_id.toLowerCase().includes(bucketModalSearch.trim().toLowerCase()),
+              ).length === 0 ? (
+                <div className="catalog-empty" style={{ padding: '30px 10px' }}>
+                  <Search size={24} />
+                  <p>未找到匹配 “{bucketModalSearch}” 的币种</p>
+                </div>
+              ) : (
+                bucketModalTarget.symbol_details
+                  .filter(
+                    (s) =>
+                      !bucketModalSearch.trim() ||
+                      s.symbol.toLowerCase().includes(bucketModalSearch.trim().toLowerCase()) ||
+                      s.instrument_id.toLowerCase().includes(bucketModalSearch.trim().toLowerCase()),
+                  )
+                  .map((sym) => (
+                    <div key={sym.instrument_id} className="symbol-detail-item">
+                      <div className="symbol-detail-left">
+                        <div>
+                          <div className="symbol-detail-name">{sym.symbol}</div>
+                          <div className="symbol-detail-inst">{sym.instrument_id}</div>
+                        </div>
+                        <span className={`market-type-badge ${sym.market_type}`}>
+                          {sym.market_type === 'um' ? '永续' : '现货'}
+                        </span>
+                      </div>
+
+                      <div className="symbol-detail-mid">
+                        <div className="symbol-date-span-row">
+                          <span>{sym.start_date || '—'}</span>
+                          <span className="arrow-sep">→</span>
+                          <span>{sym.end_date || '—'}</span>
+                          <span className="symbol-days-tag">共 {sym.days_span} 天</span>
+                        </div>
+                        <div className="symbol-meta-row">
+                          <span>K 线: {sym.total_bars.toLocaleString()} 根</span>
+                          <span>·</span>
+                          <span>体积: {formatBytes(sym.total_size_bytes)}</span>
+                          <span>·</span>
+                          <span>周期: {sym.timeframes.join(', ') || '无'}</span>
+                        </div>
+                      </div>
+
+                      <div className="symbol-detail-right">
+                        <button
+                          type="button"
+                          className="button"
+                          style={{ padding: '3px 8px', fontSize: 11 }}
+                          onClick={() => {
+                            setSearchQuery(sym.symbol)
+                            setDurationFilter('all')
+                            setPage(1)
+                            setBucketModalTarget(null)
+                          }}
+                          title="在主表格中查找此标的"
+                        >
+                          <Search size={11} />
+                          定位
+                        </button>
+                        <button
+                          type="button"
+                          className="button primary"
+                          style={{ padding: '3px 8px', fontSize: 11 }}
+                          onClick={() => {
+                            setMarket(sym.market_type)
+                            setSymbols(sym.symbol)
+                            setMode('incremental')
+                            setBucketModalTarget(null)
+                            handleTabChange('download')
+                          }}
+                          title="为该标的采集/增量补齐数据"
+                        >
+                          <Download size={11} />
+                          补齐
+                        </button>
+                      </div>
+                    </div>
+                  ))
+              )}
+            </div>
+          </div>
         </div>
       )}
 

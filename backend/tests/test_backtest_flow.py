@@ -121,7 +121,7 @@ def test_ensure_catalog_coverage_lenient(tmp_path):
 
 def test_scan_catalog_summary_pagination(tmp_path):
     from pathlib import Path
-    from app.data_downloads import scan_catalog_summary
+    from app.data_downloads import scan_catalog_summary, _calculate_days_span, _get_coverage_bucket_key, _compute_coverage_stats
     from app.config import settings
     import os
 
@@ -135,6 +135,26 @@ def test_scan_catalog_summary_pagination(tmp_path):
     assert res["page"] == 1
     assert res["total_pages"] == 1
     assert res["items"] == []
+    assert "coverage_stats" in res
+    assert len(res["coverage_stats"]) == 5
+
+    # Test helper functions
+    assert _calculate_days_span("2023-01-01", "2023-01-31") == 31
+    assert _get_coverage_bucket_key(1200) == "gte_3y"
+    assert _get_coverage_bucket_key(500) == "1y_3y"
+    assert _get_coverage_bucket_key(200) == "6m_1y"
+    assert _get_coverage_bucket_key(50) == "1m_6m"
+    assert _get_coverage_bucket_key(10) == "lt_1m"
+
+    mock_symbols = [
+        {"symbol": "BTCUSDT", "instrument_id": "BTCUSDT-PERP.BINANCE", "market_type": "um", "start_date": "2020-01-01", "end_date": "2024-01-01", "total_bars": 1000, "total_size_bytes": 5000, "timeframes": []},
+        {"symbol": "ETHUSDT", "instrument_id": "ETHUSDT-PERP.BINANCE", "market_type": "um", "start_date": "2023-01-01", "end_date": "2023-12-31", "total_bars": 500, "total_size_bytes": 2500, "timeframes": []},
+    ]
+    stats = _compute_coverage_stats(mock_symbols)
+    assert len(stats) == 5
+    gte_3y = next(s for s in stats if s["key"] == "gte_3y")
+    assert gte_3y["count"] == 1
+    assert "BTCUSDT" in gte_3y["symbols"]
 
     # Test on real local catalog if it exists
     real_cat = Path(settings.catalog_path).resolve()
@@ -142,9 +162,14 @@ def test_scan_catalog_summary_pagination(tmp_path):
         summary = scan_catalog_summary(real_cat, page=1, page_size=2)
         assert "total_symbols" in summary
         assert "items" in summary
+        assert "coverage_stats" in summary
         assert len(summary["items"]) <= 2
         assert summary["page"] == 1
         assert summary["page_size"] == 2
+
+        filtered_summary = scan_catalog_summary(real_cat, duration_bucket="gte_3y", page=1, page_size=10)
+        assert "items" in filtered_summary
+
 
 
 
