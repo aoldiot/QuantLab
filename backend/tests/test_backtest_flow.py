@@ -29,6 +29,7 @@ def test_backtest_schemas():
         leverage=3.0,
         check_data_integrity=True,
     )
+    assert data.ignore_missing_data is True
     assert data.check_data_integrity is True
 
     data2 = BacktestCreate(
@@ -44,8 +45,9 @@ def test_backtest_schemas():
         check_data_integrity=False,
     )
     assert data2.check_data_integrity is False
+    assert data2.ignore_missing_data is True
 
-    confirm_req = BacktestConfirmRequest(ignore_missing_data=True)
+    confirm_req = BacktestConfirmRequest()
     assert confirm_req.ignore_missing_data is True
 
     logs_out = BacktestLogsOut(
@@ -72,4 +74,48 @@ async def test_runner_update_function():
 
     # Test _update on non-existent run returns gracefully without error
     await _update("non-existent-run-id", progress=10, stage="测试")
+
+
+def test_ensure_catalog_coverage_lenient(tmp_path):
+    from nautilus_trader.config import BacktestDataConfig, BacktestRunConfig, BacktestVenueConfig, BacktestEngineConfig
+    from nautilus_trader.model.data import Bar
+    from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
+    from app.backtests.worker import ensure_catalog_coverage
+
+    cat_path = tmp_path / "catalog"
+    cat_path.mkdir()
+    catalog = ParquetDataCatalog(str(cat_path))
+
+    data = [
+        BacktestDataConfig(
+            catalog_path=str(cat_path),
+            data_cls=Bar,
+            instrument_ids=["NONEXISTENT-PERP.BINANCE"],
+            bar_spec="1-HOUR-LAST",
+            start_time="2026-01-01T00:00:00Z",
+            end_time="2026-06-30T23:59:59Z",
+        )
+    ]
+    venue = BacktestVenueConfig(
+        name="BINANCE",
+        oms_type="HEDGING",
+        account_type="MARGIN",
+        base_currency="USDT",
+        starting_balances=["10000 USDT"],
+    )
+    run_config = BacktestRunConfig(
+        venues=[venue],
+        data=data,
+        engine=BacktestEngineConfig(trader_id="TEST-001"),
+    )
+
+    # In lenient mode (ignore_missing=True), it should NOT raise ValueError
+    missing = ensure_catalog_coverage(run_config, ignore_missing=True)
+    assert len(missing) == 1
+    assert "NONEXISTENT-PERP.BINANCE" in missing[0]
+
+    # In strict mode (ignore_missing=False), it should raise ValueError
+    with pytest.raises(ValueError, match="Catalog 数据不覆盖请求范围"):
+        ensure_catalog_coverage(run_config, ignore_missing=False)
+
 

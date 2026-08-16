@@ -74,7 +74,7 @@ async def create_backtest_run(data: BacktestCreate, db: AsyncSession, research_p
     return run
 
 
-async def confirm_and_start_backtest(run_id: str, db: AsyncSession, ignore_missing_data: bool = False) -> BacktestRun:
+async def confirm_and_start_backtest(run_id: str, db: AsyncSession, ignore_missing_data: bool = True) -> BacktestRun:
     run = await db.get(BacktestRun, run_id)
     if not run:
         raise HTTPException(404, "回测不存在")

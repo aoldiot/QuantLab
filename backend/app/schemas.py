@@ -129,7 +129,7 @@ class BacktestCreate(BaseModel):
     funding: bool = True
     catalog_path: str | None = None
     chunk_size: int | None = Field(default=None, gt=0)
-    ignore_missing_data: bool = False
+    ignore_missing_data: bool = True
     check_data_integrity: bool = True
 
     def model_post_init(self, __context):
@@ -138,7 +138,7 @@ class BacktestCreate(BaseModel):
 
 
 class BacktestConfirmRequest(BaseModel):
-    ignore_missing_data: bool = False
+    ignore_missing_data: bool = True
 
 
 class BacktestLogsOut(BaseModel):

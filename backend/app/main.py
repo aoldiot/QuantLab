@@ -569,7 +569,7 @@ async def create_backtest(data: BacktestCreate, db: AsyncSession = Depends(get_d
 
 @app.post("/api/backtests/{run_id}/confirm", response_model=BacktestOut)
 async def confirm_backtest(run_id: str, req: BacktestConfirmRequest | None = None, db: AsyncSession = Depends(get_db)):
-    ignore_missing = req.ignore_missing_data if req else False
+    ignore_missing = req.ignore_missing_data if req is not None else True
     run = await confirm_and_start_backtest(run_id, db, ignore_missing_data=ignore_missing)
     return run_out(run)
 

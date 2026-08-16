@@ -147,7 +147,7 @@ export default function Research(){
         execution_model:f.get('model'),
         funding:Boolean(preview.data_requirements.funding),
         catalog_path:catalogPath,
-        ignore_missing_data:false,
+        ignore_missing_data:true,
         check_data_integrity:checkIntegrity,
       }
 

@@ -43,7 +43,7 @@ export default function NewBacktest(){
       execution_model:f.get('model'),
       funding:strategy.data_requirements.funding,
       catalog_path:(f.get('catalog_path') as string)||null,
-      ignore_missing_data:false,
+      ignore_missing_data:true,
       check_data_integrity:checkIntegrity,
     }
 

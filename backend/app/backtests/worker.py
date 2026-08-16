@@ -12,8 +12,8 @@ from .analytics import collect
 from .builder import build_run_config
 
 
-def ensure_catalog_coverage(run_config, ignore_missing: bool = False) -> None:
-    """Reject requests whose selected BarType has no data in the requested range, unless ignore_missing is True."""
+def ensure_catalog_coverage(run_config, ignore_missing: bool = True) -> list[str]:
+    """Scan catalog coverage for requested identifiers. In lenient mode, log warnings and continue without crashing."""
     missing_items = []
     for data_config in run_config.data:
         catalog = BacktestNode.load_catalog(data_config)
@@ -33,12 +33,16 @@ def ensure_catalog_coverage(run_config, ignore_missing: bool = False) -> None:
                 missing_items.append(f"{identifier} (范围: {query['start']} ~ {query['end']})")
 
     if missing_items:
-        if ignore_missing:
-            print(f"[WARN] 用户已确认忽略以下缺失的 Catalog 数据继续执行：\n  " + "\n  ".join(missing_items), flush=True)
-            return
-        raise ValueError(
-            f"Catalog 数据不覆盖请求范围：\n  " + "\n  ".join(missing_items) + "\n未找到匹配的 Parquet 文件"
+        print(
+            f"[WARN] 检测到以下 Catalog 数据未覆盖请求范围（宽松模式自动跳过并继续回测）：\n  "
+            + "\n  ".join(missing_items),
+            flush=True,
         )
+        if not ignore_missing:
+            raise ValueError(
+                f"Catalog 数据不覆盖请求范围：\n  " + "\n  ".join(missing_items) + "\n未找到匹配的 Parquet 文件"
+            )
+    return missing_items
 
 
 def json_safe(value):
@@ -56,7 +60,7 @@ def main(payload_path: Path, output_path: Path) -> None:
     try:
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
         run_config, _ = build_run_config(payload)
-        ignore_missing = bool(payload.get("config", {}).get("ignore_missing_data", False))
+        ignore_missing = bool(payload.get("config", {}).get("ignore_missing_data", True))
         ensure_catalog_coverage(run_config, ignore_missing=ignore_missing)
         node = BacktestNode(configs=[run_config])
 
