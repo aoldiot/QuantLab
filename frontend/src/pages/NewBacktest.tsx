@@ -7,14 +7,29 @@ import type {Strategy} from '../types'
 
 export default function NewBacktest(){
   const nav=useNavigate(),location=useLocation()
-  const copied=(location.state as {copiedConfig?:Record<string,any>;strategyId?:string}|null)?.copiedConfig
-  const copiedStrategy=(location.state as {strategyId?:string}|null)?.strategyId
+  const navState=location.state as {copiedConfig?:Record<string,any>;strategyId?:string;strategySlug?:string;researchProjectId?:string}|null
+  const copied=navState?.copiedConfig
+  const copiedStrategy=navState?.strategyId
+  const copiedSlug=navState?.strategySlug
+  const researchProjectId=navState?.researchProjectId||copied?.research_project_id||null
+
   const[strategies,setStrategies]=useState<Strategy[]>([])
   const[selected,setSelected]=useState('')
   const[busy,setBusy]=useState(false)
   const[error,setError]=useState('')
 
-  useEffect(()=>{api.strategies().then(x=>{setStrategies(x);setSelected(copiedStrategy&&x.some(s=>s.id===copiedStrategy)?copiedStrategy:x[0]?.id??'')})},[copiedStrategy])
+  useEffect(()=>{
+    api.strategies().then(x=>{
+      setStrategies(x)
+      let found=''
+      if(copiedStrategy&&x.some(s=>s.id===copiedStrategy)){
+        found=copiedStrategy
+      }else if(copiedSlug&&x.some(s=>s.slug===copiedSlug)){
+        found=x.find(s=>s.slug===copiedSlug)!.id
+      }
+      setSelected(found || x[0]?.id || '')
+    })
+  },[copiedStrategy,copiedSlug])
   const strategy=useMemo(()=>strategies.find(x=>x.id===selected),[strategies,selected])
 
   async function submit(e:React.FormEvent<HTMLFormElement>){
@@ -45,6 +60,7 @@ export default function NewBacktest(){
       catalog_path:(f.get('catalog_path') as string)||null,
       ignore_missing_data:true,
       check_data_integrity:checkIntegrity,
+      research_project_id:researchProjectId,
     }
 
     try{

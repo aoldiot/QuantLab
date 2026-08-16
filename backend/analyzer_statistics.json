@@ -1,0 +1,47 @@
+{
+  "pnls": {
+    "USDT": {
+      "PnL (total)": 0.0,
+      "PnL% (total)": 0.0,
+      "Max Winner": null,
+      "Avg Winner": null,
+      "Min Winner": null,
+      "Min Loser": null,
+      "Avg Loser": null,
+      "Max Loser": null,
+      "Expectancy": null,
+      "Win Rate": null
+    }
+  },
+  "returns": {
+    "Returns Volatility (252 days)": null,
+    "Average (Return)": null,
+    "Average Loss (Return)": null,
+    "Average Win (Return)": null,
+    "Sharpe Ratio (252 days)": null,
+    "Sortino Ratio (252 days)": null,
+    "Profit Factor": null,
+    "Risk Return Ratio": null
+  },
+  "position_returns": {
+    "Returns Volatility (252 days)": null,
+    "Average (Return)": null,
+    "Average Loss (Return)": null,
+    "Average Win (Return)": null,
+    "Sharpe Ratio (252 days)": null,
+    "Sortino Ratio (252 days)": null,
+    "Profit Factor": null,
+    "Risk Return Ratio": null
+  },
+  "portfolio_returns": {
+    "Returns Volatility (252 days)": null,
+    "Average (Return)": null,
+    "Average Loss (Return)": null,
+    "Average Win (Return)": null,
+    "Sharpe Ratio (252 days)": null,
+    "Sortino Ratio (252 days)": null,
+    "Profit Factor": null,
+    "Risk Return Ratio": null
+  },
+  "general": {}
+}

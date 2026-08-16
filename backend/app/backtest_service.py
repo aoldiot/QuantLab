@@ -44,7 +44,7 @@ async def create_backtest_run(data: BacktestCreate, db: AsyncSession, research_p
         name=data.name,
         strategy_version_id=data.strategy_version_id,
         config=data.model_dump(mode="json"),
-        research_project_id=research_project_id,
+        research_project_id=research_project_id or data.research_project_id,
     )
     run.config["strategy_parameters"] = resolved_parameters
     run.config["strategy_version"] = {

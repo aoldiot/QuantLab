@@ -50,60 +50,51 @@ APPROVALS: dict[str, asyncio.Future[bool]] = {}
 
 NAUTILUS_STRATEGY_CHEATSHEET = """
 【NautilusTrader 策略开发核心速查表与规范】
-1. 依赖与模块导入规范（按需复制，严禁臆造不存在的模块）：
+1. 依赖与模块导入规范：
 ```python
-from decimal import Decimal
-import math
-from collections import deque
 import pandas as pd
+import numpy as np
+from decimal import Decimal
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, PositionSide
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.trading.strategy import Strategy
-from nautilus_trader.indicators import (
-    MovingAverageConvergenceDivergence, # MACD(fast_period, slow_period, signal_period)
-    AverageTrueRange,                   # ATR(period)
-    ExponentialMovingAverage,           # EMA(period)
-    SimpleMovingAverage,                # SMA(period)
-    RelativeStrengthIndex,              # RSI(period)
-    BollingerBands,                     # BollingerBands(period, std_dev)
-)
-from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
 ```
 
-2. 核心四大导出结构规范：
-- 结构 1：`StrategyConfig` 子类（`frozen=True`）：包含 `instrument_ids: list[InstrumentId]`、`bar_types: list[BarType]`、`trade_size: Decimal` 及策略参数。
+2. 核心四大导出结构规范（严禁遗漏任何一项）：
+- 结构 1：`StrategyConfig` 子类：包含 `instrument_id: str`、`bar_type: str` 及策略参数定义。
 - 结构 2：`Strategy` 子类：
-  - `__init__(self, config)`：初始化指标与历史缓存。
-  - `on_start(self)`：
-      for bar_type in self.config.bar_types:
-          self.register_indicator_for_bars(self.indicator, bar_type)
-          self.subscribe_bars(bar_type)
-  - `on_bar(self, bar: Bar)`：
-      - 指标取值：`val = float(self.indicator.value)`
-      - 查当前持仓：`pos = self.cache.position(self._instrument_id)`
-      - 持仓方向：`pos.side == PositionSide.LONG` 或 `PositionSide.SHORT`
-      - 平仓：`self.close_all_positions(self._instrument_id)`
-      - 开仓下单：
-          instrument = self.cache.instrument(self._instrument_id)
-          quantity = instrument.make_qty(Decimal(str(qty_value)))
-          order = self.order_factory.market(
-              instrument_id=self._instrument_id,
-              order_side=OrderSide.BUY,
-              quantity=quantity,
-          )
-          self.submit_order(order)
-      - 净值查询：
-          account = self.portfolio.account(self._instrument_id.venue)
-          equity = float(account.equity(self._instrument_id.venue).as_double())
-- 结构 3：`calculate_indicators(dataframe: pd.DataFrame, parameters: dict) -> pd.DataFrame`：向量化计算所有 plot_config 中的指标列。
-- 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：声明元数据、parameters 规范字典及 plot_config。
+  - `__init__(self, config)`：保存属性与初始化状态。
+  - `on_start(self)`：获取 `self.instrument = self.cache.instrument(self.instrument_id)` 并执行 `self.subscribe_bars(self.bar_type)`。
+  - `on_bar(self, bar: Bar)`：基于历史 Bar 或指标执行入场、出场、止损止盈与持仓管理。
+  - `on_stop(self)`：执行 `self.unsubscribe_bars(self.bar_type)`。
+- 结构 3：`calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame`：
+  - 向量化计算所有指标。
+  - **CRITICAL：必须计算并在返回的 DataFrame 中包含 `plot_config` 中声明的所有指标列！**
+- 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：
+  - 声明元数据、`parameters` 规范字典（类型为 `ParameterSpec`）及 `plot_config`。
+  - **CRITICAL：`plot_config` 必须严格遵循双层嵌套字典规范：**
+    ```python
+    plot_config = {
+        "main_plot": {
+            "close": {"type": "line", "color": "#ffffff"},
+            "fast_ma": {"type": "line", "color": "#ffaa00"},
+            "slow_ma": {"type": "line", "color": "#00aaff"},
+        },
+        "subplots": {
+            # 必须是两层嵌套字典：第一层为面板名称，第二层为 DataFrame 指标列名
+            "ATR": {
+                "atr": {"type": "line", "color": "#ff55ff"}
+            }
+        }
+    }
+    ```
 
 3. 行为准则（CRITICAL）：
-- 所有 API 和标准结构均已在上方完整给出。**严禁使用 Grep / Glob / Bash / Read 去遍历系统 site-packages 源码或全局目录**。
 - 收到任务后，**必须分块写入 `backend/app/strategies/{strategy_name}.py`**，不要试图一次 Write 整个文件：
   1. 第一次 Write 只写文件骨架 —— 完整的 import 段、类声明、`STRATEGY_MANIFEST`，以及每个待填方法的占位行 `# __CHUNK_1__`、`# __CHUNK_2__`……
   2. 之后每次 Edit 只把一个 `# __CHUNK_N__` 替换成该方法的真实实现，一次一个，写完一个再写下一个。

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from importlib import import_module, reload
 from typing import Any
@@ -15,17 +15,17 @@ class StrategyMode(StrEnum):
 
 @dataclass(frozen=True)
 class ParameterSpec:
-    title: str
-    type: str
-    default: Any
+    title: str = ""
+    type: str = "number"
+    default: Any = 0
     minimum: float | None = None
     maximum: float | None = None
     description: str = ""
 
     def to_schema(self) -> dict[str, Any]:
         data = asdict(self)
-        data["min"] = data.pop("minimum")
-        data["max"] = data.pop("maximum")
+        data["min"] = data.pop("minimum", None)
+        data["max"] = data.pop("maximum", None)
         return {k: v for k, v in data.items() if v is not None}
 
 
@@ -33,18 +33,37 @@ class ParameterSpec:
 class StrategyManifest:
     slug: str
     name: str
-    version: str
-    description: str
-    category: str
-    strategy_path: str
-    config_path: str
-    parameters: dict[str, ParameterSpec]
-    timeframes: tuple[str, ...]
-    primary_timeframe: str
-    plot_config: dict[str, Any]
+    description: str = ""
+    version: str = "1.0.0"
+    category: str = "trend"
+    strategy_path: str = ""
+    config_path: str = ""
+    parameters: dict[str, ParameterSpec] = field(default_factory=dict)
+    timeframes: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d")
+    primary_timeframe: str = "15m"
+    plot_config: dict[str, Any] = field(
+        default_factory=lambda: {
+            "main_plot": {"close": {"type": "line", "color": "#ffffff"}},
+            "subplots": {},
+        }
+    )
     mode: StrategyMode = StrategyMode.SINGLE_INSTRUMENT
     supports_short: bool = True
-    requires_funding: bool = False
+    requires_funding: bool = True
+
+    def __post_init__(self):
+        if not self.strategy_path:
+            strat_class = "".join(w.capitalize() for w in self.slug.split("_")) + "Strategy"
+            object.__setattr__(self, "strategy_path", f"app.strategies.{self.slug}:{strat_class}")
+        if not self.config_path:
+            config_class = "".join(w.capitalize() for w in self.slug.split("_")) + "Config"
+            object.__setattr__(self, "config_path", f"app.strategies.{self.slug}:{config_class}")
+        if not self.plot_config:
+            object.__setattr__(
+                self,
+                "plot_config",
+                {"main_plot": {"close": {"type": "line", "color": "#ffffff"}}, "subplots": {}},
+            )
 
     def parameter_schema(self) -> dict[str, dict[str, Any]]:
         return {name: spec.to_schema() for name, spec in self.parameters.items()}
@@ -73,25 +92,23 @@ def load_manifest(module_path: str) -> StrategyManifest:
 
 
 def validate_plot_contract(module: Any, manifest: StrategyManifest) -> None:
-    config = manifest.plot_config
-    if not isinstance(config, dict) or not isinstance(config.get("main_plot", {}), dict) or not isinstance(config.get("subplots", {}), dict):
-        raise TypeError("plot_config 必须包含字典类型的 main_plot 和 subplots")
+    config = manifest.plot_config or {"main_plot": {}, "subplots": {}}
+    if not isinstance(config, dict):
+        raise TypeError("plot_config 必须是字典类型")
     calculate = getattr(module, "calculate_indicators", None)
-    if not callable(calculate):
-        raise TypeError(f"{module.__name__} 必须导出 calculate_indicators(dataframe, parameters)")
+    if calculate is not None and not callable(calculate):
+        raise TypeError(f"{module.__name__} calculate_indicators 必须是可调用的函数")
     supported = {"line", "histogram", "area", "baseline"}
-    series = list(config.get("main_plot", {}).items())
-    for pane, pane_series in config.get("subplots", {}).items():
-        if not isinstance(pane, str) or not isinstance(pane_series, dict):
-            raise TypeError("plot_config.subplots 必须是面板名称到序列配置的映射")
-        series.extend(pane_series.items())
-    if not series:
-        raise ValueError("plot_config 至少需要声明一个指标序列")
+    series = list(config.get("main_plot", {}).items()) if isinstance(config.get("main_plot"), dict) else []
+    subplots = config.get("subplots", {})
+    if isinstance(subplots, dict):
+        for pane, pane_series in subplots.items():
+            if isinstance(pane_series, dict):
+                series.extend(pane_series.items())
     for column, spec in series:
-        if not isinstance(column, str) or not isinstance(spec, dict):
-            raise TypeError("指标列名必须是字符串，序列配置必须是字典")
-        if spec.get("type", "line") not in supported:
-            raise ValueError(f"指标 {column} 使用了不支持的图形类型: {spec.get('type')}")
+        if isinstance(column, str) and isinstance(spec, dict):
+            if spec.get("type", "line") not in supported:
+                raise ValueError(f"指标 {column} 使用了不支持的图形类型: {spec.get('type')}")
 
 
 def calculate_plot_indicators(module_path: str, frame: pd.DataFrame, parameters: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:

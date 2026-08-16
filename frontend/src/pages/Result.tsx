@@ -19,7 +19,7 @@ export default function Result(){
   if(error)return <Card className="failure"><h2>回测详情加载失败</h2><p>{error}</p></Card>
   if(!run)return <div className="loading">加载回测任务…</div>
   const copyRun=()=>navigate('/backtests/new',{state:{copiedConfig:run.config,strategyId}})
-  const repair=async()=>{if(!run.research_project_id||repairing)return;setRepairing(true);setRepairError('');try{const client_id=getClientId();const created=await api.repairResearchRun(run.research_project_id,run.id,client_id);navigate('/research',{state:{repairProjectId:run.research_project_id,repairSessionId:created.session.id,repairPrompt:created.prompt}})}catch(reason){setRepairError((reason as Error).message);setRepairing(false)}}
+  const repair=()=>{if(!run.research_project_id)return;navigate('/research',{state:{projectId:run.research_project_id,autoPrompt:`回测任务「${run.name}」运行失败，错误日志：${run.error_message||'未知错误'}。请深入分析报错原因并进行1次策略代码修复（【系统安全限制】：只修改代码，禁止自动执行回测）。`}})}
   const confirmRun=async(ignoreMissing:boolean)=>{if(actionBusy)return;setActionBusy(true);setError('');try{const updated=await api.confirmRun(run.id,{ignore_missing_data:ignoreMissing});setRun(updated)}catch(e){setError((e as Error).message)}finally{setActionBusy(false)}}
   const cancelRun=async()=>{if(actionBusy)return;setActionBusy(true);setError('');try{const updated=await api.cancelRun(run.id);setRun(updated)}catch(e){setError((e as Error).message)}finally{setActionBusy(false)}}
   const value=(item:unknown)=>item==null||item===''?'—':Array.isArray(item)?item.join(' / '):typeof item==='object'?JSON.stringify(item,null,2):String(item)

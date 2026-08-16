@@ -571,7 +571,7 @@ async def get_backtest_logs_endpoint(run_id: str, db: AsyncSession = Depends(get
 
 @app.post("/api/backtests", response_model=BacktestOut)
 async def create_backtest(data: BacktestCreate, db: AsyncSession = Depends(get_db)):
-    return run_out(await create_backtest_run(data, db))
+    return run_out(await create_backtest_run(data, db, research_project_id=data.research_project_id))
 
 
 @app.post("/api/backtests/{run_id}/confirm", response_model=BacktestOut)

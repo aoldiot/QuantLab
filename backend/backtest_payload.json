@@ -1,0 +1,44 @@
+
+{
+  "config": {
+    "catalog_path": "/Users/sky/Desktop/code/Quantlab/backend/catalog",
+    "end_date": "2026-06-30",
+    "execution_model": "CONSERVATIVE",
+    "initial_balance": 10000.0,
+    "leverage": 1.0,
+    "start_date": "2026-01-01",
+    "strategy_parameters": {
+      "bb_period": 20,
+      "bb_std_dev": 2.0,
+      "chop_period": 14,
+      "chop_threshold": 0.4,
+      "position_size_pct": 0.1
+    },
+    "symbols": ["BTCUSDT"],
+    "timeframes": ["1h"],
+    "venue": "BINANCE"
+  },
+  "strategy": {
+    "module": "app.strategies.btc_bb_mean_reversion_1h",
+    "data_requirements": {
+      "timeframes": ["1h"],
+      "primary_timeframe": "1h",
+      "multi_symbol": true,
+      "funding": true,
+      "supports_short": true,
+      "config_path": "app.strategies.btc_bb_mean_reversion_1h:BbMeanReversionConfig",
+      "mode": "SINGLE_INSTRUMENT",
+      "plot_config": {
+        "main_plot": {
+          "close": {"type": "line", "color": "#ffffff"},
+          "bb_upper": {"type": "line", "color": "#ff5555"},
+          "bb_middle": {"type": "line", "color": "#aaaaaa"},
+          "bb_lower": {"type": "line", "color": "#55ff55"}
+        },
+        "subplots": {
+          "choppiness": {"type": "line", "color": "#00aaff"}
+        }
+      }
+    }
+  }
+}

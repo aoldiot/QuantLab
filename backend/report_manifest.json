@@ -1,0 +1,38 @@
+{
+  "orders": {
+    "rows": 0,
+    "columns": [],
+    "file": "orders.parquet"
+  },
+  "order_fills": {
+    "rows": 0,
+    "columns": [],
+    "file": "order_fills.parquet"
+  },
+  "fills": {
+    "rows": 0,
+    "columns": [],
+    "file": "fills.parquet"
+  },
+  "positions": {
+    "rows": 0,
+    "columns": [],
+    "file": "positions.parquet"
+  },
+  "account": {
+    "rows": 1,
+    "columns": [
+      "total",
+      "locked",
+      "free",
+      "currency",
+      "account_id",
+      "account_type",
+      "base_currency",
+      "margins",
+      "reported",
+      "info"
+    ],
+    "file": "account.parquet"
+  }
+}

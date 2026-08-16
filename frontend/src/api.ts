@@ -102,27 +102,20 @@ export const api={
     const qs=clientId?`?client_id=${encodeURIComponent(clientId)}`:''
     return request<ResearchProject[]>(`/research${qs}`)
   },
-  createResearch:(title:string,client_id?:string)=>request<ResearchProject>('/research',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',title})}),
+  createResearch:(title:string,original_idea?:string,client_id?:string)=>request<ResearchProject>('/research',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',title,original_idea:original_idea||''})}),
   researchProject:(id:string)=>request<ResearchProject>('/research/'+id),
   researchMessages:(id:string)=>request<ResearchMessage[]>(`/research/${id}/messages`),
-  sendResearchMessage:(id:string,content:string)=>request<{role:string;content:string;decisions:ResearchDecision[]}>(`/research/${id}/messages`,{method:'POST',body:JSON.stringify({content})}),
-  researchDecisions:(id:string)=>request<ResearchDecision[]>(`/research/${id}/decisions`),
-  resolveResearchDecision:(id:string,decisionId:string,answer:string)=>request<ResearchDecision>(`/research/${id}/decisions/${decisionId}/resolve`,{method:'POST',body:JSON.stringify({answer})}),
-  dismissResearchDecision:(id:string,decisionId:string)=>request<ResearchDecision>(`/research/${id}/decisions/${decisionId}/dismiss`,{method:'POST'}),
-  generateSpecification:(id:string)=>request<ResearchProject>(`/research/${id}/specification/generate`,{method:'POST'}),
-  updateSpecification:(id:string,specId:string,content:Record<string,any>)=>request<ResearchProject>(`/research/${id}/specification/${specId}`,{method:'PUT',body:JSON.stringify({content})}),
-  approveSpecification:(id:string,specId:string)=>request<ResearchProject>(`/research/${id}/specification/${specId}/approve`,{method:'POST'}),
-  createResearchImplementation:(id:string,client_id?:string,force:boolean=false)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/implementation`,{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',permission_mode:'acceptEdits',force})}),
-  researchStrategyPreview:(id:string)=>request<{module:string;name:string;parameter_schema:Record<string,any>;data_requirements:Record<string,any>}>(`/research/${id}/strategy-preview`),
-  publishResearchStrategy:(id:string)=>request<Strategy>(`/research/${id}/publish`,{method:'POST'}),
+  sendResearchMessage:(id:string,content:string)=>request<ResearchMessage[]>(`/research/${id}/messages`,{method:'POST',body:JSON.stringify({content})}),
+  researchStrategy:(id:string,strategyName?:string)=>{
+    const qs=strategyName?`?strategy_name=${encodeURIComponent(strategyName)}`:''
+    return request<{ok:boolean;strategy_name?:string;code?:string;error?:string}>(`/research/${id}/strategy${qs}`)
+  },
+  researchWritingLog:(id:string)=>request<import('./types').ResearchWritingLog>(`/research/${id}/writing-log`),
+  researchThinkingStatus:(id:string)=>request<import('./types').ResearchThinkingStatus>(`/research/${id}/thinking-status`),
   researchRuns:(id:string)=>request<ResearchRun[]>(`/research/${id}/backtests`),
-  createResearchRun:(id:string,data:unknown)=>request<{id:string;status:string;name:string}>(`/research/${id}/backtests`,{method:'POST',body:JSON.stringify(data)}),
-  analyzeResearchRun:(id:string,runId:string)=>request<{role:string;content:string;run_id:string}>(`/research/${id}/backtests/${runId}/analyze`,{method:'POST'}),
-  repairResearchRun:(id:string,runId:string,client_id?:string)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/backtests/${runId}/repair`,{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',permission_mode:'acceptEdits'})}),
-  saveResearchConclusion:(id:string,data:{verdict:'SUPPORTED'|'REJECTED'|'INCONCLUSIVE';summary:string;next_step:string})=>request<ResearchProject>(`/research/${id}/conclusion`,{method:'PUT',body:JSON.stringify(data)}),
   archiveResearch:(id:string)=>request<ResearchProject>(`/research/${id}/archive`,{method:'POST'}),
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),
-  iterateResearch:(id:string,data:{target:'DISCUSSING'|'SPEC_REVIEW'|'READY_FOR_BACKTEST';reason:string})=>request<ResearchProject>(`/research/${id}/iterate`,{method:'POST',body:JSON.stringify(data)}),
+  deleteResearch:(id:string)=>request<{ok:boolean}>(`/research/${id}`,{method:'DELETE'}),
   dataSymbols:(marketType:string)=>request<{symbol:string;base:string;quote:string}[]>(`/data/symbols?market_type=${marketType}`),
   dataCatalogSummary:(params?:Record<string,string|number|undefined|null>)=>{
     const qs=params?new URLSearchParams(Object.entries(params).filter(([_,v])=>v!==undefined&&v!==null&&v!=='').map(([k,v])=>[k,String(v)])).toString():''

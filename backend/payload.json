@@ -1,0 +1,26 @@
+{
+  "config": {
+    "symbols": ["BTCUSDT"],
+    "timeframes": ["1h"],
+    "start_date": "2026-07-15",
+    "end_date": "2026-07-31",
+    "initial_balance": 10000.0,
+    "leverage": 1.0,
+    "execution_model": "CONSERVATIVE",
+    "venue": "BINANCE",
+    "catalog_path": "/Users/sky/Desktop/code/Quantlab/backend/catalog",
+    "strategy_parameters": {
+      "bollinger_period": 20,
+      "bollinger_std": 2.0,
+      "chop_period": 14,
+      "chop_threshold": 0.4,
+      "position_pct": 0.1
+    }
+  },
+  "strategy": {
+    "module": "app.strategies.btc_usdt_1h_bollinger_mean_reversion",
+    "data_requirements": {
+      "primary_timeframe": "1h"
+    }
+  }
+}
