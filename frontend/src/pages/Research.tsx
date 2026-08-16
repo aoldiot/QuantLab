@@ -858,7 +858,7 @@ function ProcessToolStep({
 
   let titleText = `调用工具: ${toolName}`
   if (isWriting) {
-    titleText = `Claude 编写策略「${args.strategy_name || '策略'}」`
+    titleText = `编写策略「${args.strategy_name || '策略'}」`
   } else if (isBacktest) {
     titleText = `NautilusTrader 执行回测 (${args.strategy_name || '策略'})`
   } else if (isTerminal) {
@@ -956,7 +956,7 @@ function ProcessToolStep({
               <div className="tool-progress-info">
                 <div className="tool-progress-stage">
                   <Loader2 size={13} className={`spin ${item.isWritingActive ? 'text-cyan' : ''}`} />
-                  <span>{writingLog?.stage || (item.isWritingActive ? 'Claude 正在生成策略代码...' : '代码编写完成')}</span>
+                  <span>{writingLog?.stage || (item.isWritingActive ? '正在编写策略代码...' : '代码编写完成')}</span>
                 </div>
                 <span className="tool-progress-num">{writingLog?.progress ?? 100}%</span>
               </div>
@@ -1359,7 +1359,7 @@ function CodeApprovalCard({
       <div className="code-approval-footer">
         <div className="code-approval-tip">
           <AlertCircle size={13} />
-          <span>请核对上述策略设计逻辑。批准后 Hermes 将调度 Claude Code CLI 编写策略代码。</span>
+          <span>请核对上述策略设计逻辑。批准后 Hermes 将开始编写策略代码。</span>
         </div>
         <div className="code-approval-actions">
           <button
@@ -1523,7 +1523,7 @@ export default function Research(){
     const paramsSummary = data.parameter_specs && Object.keys(data.parameter_specs).length > 0 ? `\n预设参数配置：${JSON.stringify(data.parameter_specs, null, 2)}` : ''
     const approvePrompt=
       `已批准策略「${stratName}」的设计方案。`+
-      `请由 Hermes 调度 Claude Code CLI 编写策略代码文件 backend/app/strategies/${stratName}.py 并严格遵循 NautilusTrader 开发规范。`+
+      `请开始编写策略代码文件 backend/app/strategies/${stratName}.py 并严格遵循 NautilusTrader 开发规范。`+
       (data.strategy_summary ? `\n策略概要：${data.strategy_summary}` : '') +
       rulesSummary +
       paramsSummary
@@ -1577,7 +1577,7 @@ export default function Research(){
     const errText = errorMessage || '回测执行异常'
     const repairPrompt =
       `针对策略「${sName}」回测运行报错：\n${errText}\n\n`+
-      `请深入分析报错原因，由 Hermes 调度 Claude Code CLI 对策略「${sName}」进行1次代码修复并保存策略文件。\n\n`+
+      `请深入分析报错原因，对策略「${sName}」进行1次代码修复并保存策略文件。\n\n`+
       `【系统安全限制（强制）】：\n`+
       `1. 本次操作只修改并保存策略代码；\n`+
       `2. 严禁在修复后自动调用 execute_backtest 重新回测，严禁擅自生成回测参数卡片；\n`+
@@ -2122,7 +2122,7 @@ export default function Research(){
                   <div className="chat-welcome-card">
                     <div className="welcome-avatar"><Bot size={28}/></div>
                     <h3>你好，我是 QuantLab 首席量化研究员 Hermes</h3>
-                    <p>我将全流程协助你完成策略假设研讨、调度 Claude 编写代码、自动执行回测并进行深度归因。你可以从以下方向开始：</p>
+                    <p>我将全流程协助你完成策略假设研讨、编写策略代码、自动执行回测并进行深度归因。你可以从以下方向开始：</p>
                     <div className="suggestion-grid">
                       {SUGGESTIONS.map((s,i)=>(
                         <button
@@ -2275,7 +2275,7 @@ export default function Research(){
                       <div className="live-card-body">
                         <div className="live-card-head">
                           <div className="live-title-group">
-                            <b>Hermes 正在调度 Claude 编写策略代码</b>
+                            <b>Hermes 正在编写策略代码</b>
                             {writingLog.strategy_name && <span className="live-strat-name">{writingLog.strategy_name}.py</span>}
                           </div>
                           <span className="live-percent-badge writer">{writingLog.progress}%</span>
@@ -2290,7 +2290,7 @@ export default function Research(){
 
                         <div className="live-stage-desc">
                           <Loader2 size={13} className="spin text-cyan" />
-                          <span>当前阶段：<b>{writingLog.stage || 'Claude 正在编写代码与指标…'}</b></span>
+                          <span>当前阶段：<b>{writingLog.stage || '正在编写代码与指标…'}</b></span>
                         </div>
 
                         {writingLog.logs && (
@@ -2411,7 +2411,7 @@ export default function Research(){
                 <div className="quick-prompt-bar">
                   <button
                     className="quick-chip"
-                    onClick={()=>setInput('方案很清晰，请调用 Claude 编写策略代码。')}
+                    onClick={()=>setInput('方案很清晰，请开始编写策略代码。')}
                   >
                     🚀 编写策略代码
                   </button>
@@ -2517,7 +2517,7 @@ export default function Research(){
                   ):(
                     <div className="drawer-empty">
                       <Code2 size={32}/>
-                      <p>尚未生成代码，请在对话中让 Hermes 调度 Claude 编写策略。</p>
+                      <p>尚未生成代码，请在对话中让 Hermes 编写策略。</p>
                     </div>
                   )}
                 </div>
@@ -2529,7 +2529,7 @@ export default function Research(){
                     <div className="writer-log-head-left">
                       <Terminal size={14}/>
                       <span className="code-filename">
-                        Claude CLI 写码日志 {writingLog?.strategy_name ? `(${writingLog.strategy_name}.py)` : ''}
+                        写码日志 {writingLog?.strategy_name ? `(${writingLog.strategy_name}.py)` : ''}
                       </span>
                       {writingLog&&(
                         <span className={`badge ${writingLog.status==='RUNNING'?'running':writingLog.status==='COMPLETED'?'ok':writingLog.status==='FAILED'?'err':'pending'}`}>
@@ -2551,7 +2551,7 @@ export default function Research(){
                   </div>
                   <div className="writer-terminal-box">
                     <pre className="terminal-log-content">
-                      {writingLog?.logs || '暂无 Claude 写码日志，在对话中让 Hermes 编写策略时将在此实时流式输出。'}
+                      {writingLog?.logs || '暂无写码日志，在对话中让 Hermes 编写策略时将在此实时流式输出。'}
                     </pre>
                   </div>
                 </div>

@@ -538,7 +538,7 @@ async def test_code_approval_hermes_generates_and_syncs_strategy_code(monkeypatc
 
     async def mock_call_hermes_stream(project, prompt, instructions=None, tools=None, db=None):
         return (
-            "策略代码已由 Claude Code 编写完成：\n\n```python\nfrom nautilus_trader.config import StrategyConfig\nfrom app.strategy_contract import StrategyManifest\nSTRATEGY_MANIFEST = StrategyManifest(slug='btc_trend_test', name='BTC', description='', category='trend', strategy_path='', config_path='', parameters={}, timeframes=('1h',), primary_timeframe='1h')\n```",
+            "策略代码已编写完成：\n\n```python\nfrom nautilus_trader.config import StrategyConfig\nfrom app.strategy_contract import StrategyManifest\nSTRATEGY_MANIFEST = StrategyManifest(slug='btc_trend_test', name='BTC', description='', category='trend', strategy_path='', config_path='', parameters={}, timeframes=('1h',), primary_timeframe='1h')\n```",
             [],
             "思考写码逻辑",
         )
@@ -558,7 +558,7 @@ async def test_code_approval_hermes_generates_and_syncs_strategy_code(monkeypatc
 
         messages = await run_hermes_agent_cycle(
             project,
-            "已批准策略「btc_trend_test」的设计方案。请由 Hermes 调度 Claude Code CLI 编写策略代码。",
+            "已批准策略「btc_trend_test」的设计方案。请开始编写策略代码文件 backend/app/strategies/btc_trend_test.py 并严格遵循 NautilusTrader 开发规范。",
             db=db,
             max_turns=2,
             record_user_prompt=True,

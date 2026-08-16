@@ -194,7 +194,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "propose_code_approval",
-            "description": "【策略编码审批发起】：当策略讨论与逻辑设计完成、准备写码时，必须先调用此工具向用户发起编码审批请求。用户在前端界面批准后，由 Hermes 调度 Claude Code CLI 编写策略代码。",
+            "description": "【策略编码审批发起】：当策略讨论与逻辑设计完成、准备写码时，必须先调用此工具向用户发起编码审批请求。用户在前端界面批准后，Hermes 将开始编写策略代码。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -430,7 +430,7 @@ async def write_strategy_with_claude(
                 "updated_at": datetime.now(UTC).isoformat(),
             }
 
-    _update_status("正在构建策略开发规范与 Claude 指令上下文...", 10, log_line=f"开始为策略「{strategy_name}」构建开发规范与提示词...")
+    _update_status("正在构建策略开发规范与上下文...", 10, log_line=f"开始为策略「{strategy_name}」构建开发规范与提示词...")
 
     existing_code = ""
     if target_file.exists():
@@ -505,8 +505,8 @@ async def write_strategy_with_claude(
         "--dangerously-skip-permissions",
     ]
 
-    logger.info("正在调用 Claude CLI 编写策略：%s ...", strategy_name)
-    _update_status("已启动 Claude Code CLI 进程，正在分析并编写策略代码...", 30, log_line=f"启动 Claude CLI: claude -p ... (target: {strategy_name}.py)")
+    logger.info("正在调用代码编写进程：%s ...", strategy_name)
+    _update_status("已启动代码编写进程，正在分析并编写策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
 
     stdout_lines: list[str] = []
 
@@ -529,9 +529,9 @@ async def write_strategy_with_claude(
                 with log_file.open("a", encoding="utf-8") as f:
                     f.write(text)
                     f.flush()
-                # Dynamically increase progress while Claude is generating
+                # Dynamically increase progress while generating
                 cur_prog = min(85, 30 + len(stdout_lines) * 2)
-                _update_status("Claude 代码生成与文件修改中...", cur_prog)
+                _update_status("代码生成与文件修改中...", cur_prog)
 
         await asyncio.wait_for(
             asyncio.gather(process.wait(), _stream_claude_output()),
@@ -550,7 +550,7 @@ async def write_strategy_with_claude(
         _update_status("调用失败", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
         return {"ok": False, "error": err_msg}
 
-    _update_status("Claude 编写完成，正在执行 Python AST 语法与契约校验...", 90, log_line="Claude 退出执行，开始进行 AST 语法与 Manifest 契约校验...")
+    _update_status("代码编写完成，正在执行 Python AST 语法与契约校验...", 90, log_line="代码生成退出，开始进行 AST 语法与 Manifest 契约校验...")
 
     # Validate the generated file
     ok, msg = _validate_strategy_file(target_file)

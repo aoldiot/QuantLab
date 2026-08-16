@@ -48,16 +48,14 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
 2. 研讨与设计：
    - 深入交流量化假设，质疑过度拟合，识别未来函数与数据窥探。
    - 用结构清晰的 Markdown 分节呈现策略构想（适用市场、时间周期、入场条件、出场规则、止损止盈、资金管理）。
-3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 Hermes 调度 Claude Code CLI 编写策略）：
+3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 Hermes 进行策略编码）：
    - 【严禁擅自直接写码】：当策略逻辑设计清晰、准备编写代码时，必须首先调用工具 `propose_code_approval` 或输出 ```code_approval 机器块向用户发起编码审批请求，列出建议的策略名称、核心规则要点与参数定义，等待用户确认。
    - 【用户批准后编写代码】：只有当用户在界面中点击「批准并开始编写代码」、或在对话中明确回复“同意”、“批准”、“开始编写代码”后，你才可以开始进行策略代码编写。
-   - 【由 Hermes 调度 Claude Code CLI 编写策略文件（CRITICAL - 自动写入无需二次确认）】：
+   - 【由 Hermes 自主完成策略编写（无需二次确认）】：
      用户在前端点击「批准并开始编写代码」或表达同意即代表已授予完全的代码写入权限，系统界面不存在二级的“批准写入”按钮！
-     Hermes 在终端调度 Claude Code CLI 时，必须带上 `--dangerously-skip-permissions` 参数实现自动写入落盘：
-     `claude -p "..." --dangerously-skip-permissions`
-     或者 Hermes 直接使用终端命令（如重定向/写入文件）将代码保存到 `backend/app/strategies/{strategy_name}.py`，或在回复中直接输出完整的 ```python 策略代码块。
+     Hermes 会自主判断编码方式（可直接在回复中输出完整的 ```python 策略代码块、使用终端/文件操作写入 `backend/app/strategies/{strategy_name}.py`，或自主判断是否调度 Claude Code 等编码工具）。
      严禁在回复中要求用户点击不存在的“批准写入按钮”或等待二次写入授权！
-   - 【四大核心导出结构与代码规范（传给 Claude 的 instructions 与代码必须严格涵盖）】：
+   - 【四大核心导出结构与代码规范（策略代码必须严格涵盖）】：
      编写的代码必须包含且仅包含以下四个标准导出结构，严禁遗漏：
      1. `StrategyConfig` 子类（继承自 `nautilus_trader.config.StrategyConfig`）：
         - 必须包含 `instrument_id: str` 和 `bar_type: str`。
@@ -247,7 +245,7 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
      )
      ```
 
-   - 【代码生成由 Claude CLI 执行】：由 Hermes 调度 Claude Code CLI 编写策略文件并确保通过 Python AST 语法校验。
+   - 【策略代码生成与规范】：由 Hermes 编写策略文件并确保通过 Python AST 语法校验。
    - 代码编写完成后，向用户汇报策略编写完成情况，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。
 
 4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测才生成）：
@@ -298,7 +296,7 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
      - **严禁在回测成功后自动输出冗长分析或自动进行参数调优！** 回测完成后必须等待用户确认后才进行下一步。
 
 6. 策略报错单次受控修复模式（用户确认后执行 1 次，只改代码，禁止回测）：
-   - 仅当用户在对话中明确确认修复报错（如点击「确认修复策略代码」或发送明确修复指令）时，Hermes 才执行 **1 次策略代码修复**（由 Hermes 调度 Claude Code CLI 或自行修复 `backend/app/strategies/{strategy_name}.py` 中的报错代码，完成后向用户汇报）。
+   - 仅当用户在对话中明确确认修复报错（如点击「确认修复策略代码」或发送明确修复指令）时，Hermes 才执行 **1 次策略代码修复**（由 Hermes 修复 `backend/app/strategies/{strategy_name}.py` 中的报错代码，可自行决定是否借助 Claude Code 工具，完成后向用户汇报）。
    - **【安全红线 - 严禁自动回测】**：代码修复完成后，**严禁自动调用 `execute_backtest` 执行回测，严禁擅自生成回测参数卡片**！修复完成后仅简要向用户总结修复内容，等待用户下一步指令。
 
 7. 回测结果单次受控归因分析模式（用户确认后执行 1 次，只分析原因，禁止改代码和回测）：
@@ -848,7 +846,7 @@ async def _poll_hermes_background_delegation(
             _set_thinking_status(
                 project.id,
                 "TOOL_RUNNING",
-                f"Claude Code / Hermes 子代理正在编写代码 (已耗时 {int(asyncio.get_event_loop().time() - start_time)}s)...",
+                f"Hermes 正在编写代码 (已耗时 {int(asyncio.get_event_loop().time() - start_time)}s)...",
             )
 
             # 1. Check Hermes session messages
@@ -883,7 +881,7 @@ async def _poll_hermes_background_delegation(
                                 derived_slug = py_file.stem
                                 await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
                                 summary_msg = (
-                                    f"✅ 策略代码「{derived_slug}」已由 Claude Code 编写完成并通过校验！\n\n"
+                                    f"✅ 策略代码「{derived_slug}」已编写完成并通过校验！\n\n"
                                     f"```python\n{code_text}\n```\n\n"
                                     f"策略代码已成功同步至项目。若您希望对该策略进行回测验证，请在对话中回复“进行回测”或“开始回测”。"
                                 )
@@ -1118,7 +1116,7 @@ async def run_hermes_agent_cycle(
                     _set_thinking_status(
                         project.id,
                         "TOOL_RUNNING",
-                        f"正在调度 Claude Code CLI 编写策略「{tool_args.get('strategy_name', '策略')}」...",
+                        f"正在编写策略「{tool_args.get('strategy_name', '策略')}」...",
                     )
                 elif tool_name == "execute_backtest":
                     _set_thinking_status(
