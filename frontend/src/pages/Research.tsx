@@ -1,13 +1,13 @@
 import {useEffect,useMemo,useRef,useState} from 'react'
-import {ArrowRight,ArrowUp,Beaker,BrainCircuit,Check,CheckCircle2,ChevronDown,ChevronLeft,ChevronRight,ChevronUp,Clock3,Code2,ExternalLink,FileJson,FlaskConical,GitBranch,ListFilter,Loader2,MessageSquarePlus,Plus,RotateCcw,Target,X} from 'lucide-react'
+import {ArrowRight,ArrowUp,Beaker,BrainCircuit,Check,CheckCircle2,ChevronDown,ChevronLeft,ChevronRight,ChevronUp,Clock3,Code2,ExternalLink,FileJson,FlaskConical,GitBranch,ListFilter,Loader2,MessageSquarePlus,Plus,RotateCcw,ShieldCheck,Target,X} from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {Link,useLocation,useNavigate} from 'react-router-dom'
 import AgentPanel from '../AgentPanel'
 import CodeEditor from '../CodeEditor'
 import {api} from '../api'
-import {CatalogMissingDialog,Status} from '../components'
-import type {CatalogCheckResponse,ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile} from '../types'
+import {Status} from '../components'
+import type {ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile} from '../types'
 import {getClientId,generateUUID} from '../utils'
 
 const clientId=getClientId
@@ -45,8 +45,6 @@ export default function Research(){
   const repairRequest=location.state as {repairProjectId?:string;repairSessionId?:string;repairPrompt?:string}|null
   const[projects,setProjects]=useState<ResearchProject[]>([]),[project,setProject]=useState<ResearchProject|null>(null),[messages,setMessages]=useState<ResearchMessage[]>([]),[runs,setRuns]=useState<ResearchRun[]>([]),[strategies,setStrategies]=useState<Strategy[]>([]),[decisions,setDecisions]=useState<ResearchDecision[]>([])
   const[input,setInput]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState(''),[creating,setCreating]=useState(false),[specText,setSpecText]=useState(''),[editingSpec,setEditingSpec]=useState(false),[agentOpen,setAgentOpen]=useState(false),[backtestOpen,setBacktestOpen]=useState(false),[implementationPrompt,setImplementationPrompt]=useState('')
-  const[catalogCheck,setCatalogCheck]=useState<CatalogCheckResponse|null>(null)
-  const[pendingBacktestData,setPendingBacktestData]=useState<Record<string,any>|null>(null)
   const[preview,setPreview]=useState<{module:string;name:string;parameter_schema:Record<string,any>;data_requirements:Record<string,any>}|null>(null)
   const[runDetail,setRunDetail]=useState<Run|null>(null)
   const[runDetails,setRunDetails]=useState<Record<string,Run>>({})
@@ -114,7 +112,7 @@ export default function Research(){
 
   async function startBacktest(e:React.FormEvent<HTMLFormElement>){
     e.preventDefault()
-    if(!project||!preview)return
+    if(!project||!preview||busy)return
     const f=new FormData(e.currentTarget),params:Record<string,unknown>={}
     Object.entries(preview.parameter_schema).forEach(([key,spec])=>{
       const raw=f.get('param_'+key)
@@ -128,6 +126,7 @@ export default function Research(){
       const startDate=String(f.get('start'))
       const endDate=String(f.get('end'))
       const catalogPath=(f.get('catalog_path') as string)||null
+      const checkIntegrity=f.get('check_data_integrity')==='on'
       const published=await api.publishResearchStrategy(project.id)
       const payload={
         name:f.get('name'),
@@ -144,22 +143,7 @@ export default function Research(){
         funding:Boolean(preview.data_requirements.funding),
         catalog_path:catalogPath,
         ignore_missing_data:false,
-      }
-
-      const check=await api.checkBacktestCatalog({
-        symbols,
-        timeframes,
-        start_date:startDate,
-        end_date:endDate,
-        venue:'BINANCE',
-        catalog_path:catalogPath,
-      })
-
-      if(check.has_missing){
-        setCatalogCheck(check)
-        setPendingBacktestData(payload)
-        setBusy(false)
-        return
+        check_data_integrity:checkIntegrity,
       }
 
       await executeResearchBacktest(payload)
@@ -167,13 +151,6 @@ export default function Research(){
       setError((e as Error).message)
       setBusy(false)
     }
-  }
-
-  async function confirmProceedWithMissing(){
-    if(!pendingBacktestData)return
-    await executeResearchBacktest({...pendingBacktestData,ignore_missing_data:true})
-    setCatalogCheck(null)
-    setPendingBacktestData(null)
   }
 
   async function analyze(runId:string){if(!project)return;setBusy(true);setViewStage(4);setError('');try{await api.analyzeResearchRun(project.id,runId);await open(project);await reloadList();setViewStage(4)}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
@@ -399,14 +376,7 @@ export default function Research(){
         </div>}</main></div>
     {creating&&<div className="modal-backdrop"><section className="modal"><button className="modal-close" onClick={()=>setCreating(false)}><X/></button><h2>新建研究主题</h2><p className="muted">这里只创建会话，进入后再输入具体研究内容。</p><form className="stack-form" onSubmit={create}><label>主题名称<input name="title" required autoFocus placeholder="例如：MA + MACD 趋势策略"/></label><button className="button primary" disabled={busy}>{busy?'正在创建…':'下一步：创建会话'}</button></form></section></div>}
     {agentOpen&&project&&strategyName&&<div className="research-agent-overlay"><AgentPanel key={project.implementation_session_id??'agent'} strategyName={strategyName} sessionId={project.implementation_session_id??undefined} initialPrompt={implementationPrompt||undefined} onClose={()=>{setAgentOpen(false);setImplementationPrompt('')}} onApplied={async()=>{setAgentOpen(false);setImplementationPrompt('');await open(project)}}/></div>}
-    {backtestOpen&&preview&&<div className="modal-backdrop"><section className="modal research-backtest-modal"><button className="modal-close" onClick={()=>setBacktestOpen(false)}><X/></button><h2>策略回测配置</h2><p className="muted">确认后自动发布当前策略版本，并创建正式 NautilusTrader 回测。</p><form className="stack-form" onSubmit={startBacktest}><div className="form-grid"><label>任务名称<input name="name" defaultValue={`${project?.title} · 基准回测`} required/></label><label>交易标的<input name="symbols" defaultValue="BTCUSDT, ETHUSDT, SOLUSDT" required/></label><label>开始日期<input type="date" name="start" defaultValue="2024-01-01" required/></label><label>结束日期<input type="date" name="end" defaultValue="2025-12-31" required/></label><label>初始资金<input type="number" name="capital" defaultValue="10000" required/></label><label>杠杆<input type="number" name="leverage" defaultValue="4" required/></label><label className="wide">Catalog 路径<input name="catalog_path" placeholder="留空使用系统默认 CATALOG_PATH"/></label></div><h3>策略参数</h3><div className="form-grid">{Object.entries(preview.parameter_schema).map(([key,spec])=><label key={key}>{spec.title??key}{spec.type==='boolean'?<input name={'param_'+key} type="checkbox" defaultChecked={Boolean(spec.default)}/>:<input name={'param_'+key} type="number" step={spec.type==='integer'?'1':'any'} min={spec.min} max={spec.max} defaultValue={String(spec.default)} required/>}</label>)}</div><h3>执行模型</h3><div className="model-select">{[['FAST','快速'],['STANDARD','标准'],['CONSERVATIVE','保守']].map(([value,label])=><label key={value}><input type="radio" name="model" value={value} defaultChecked={value==='CONSERVATIVE'}/><span><b>{label}</b><small>{value}</small></span></label>)}</div><button className="button primary" disabled={busy}>{busy?'正在发布并创建…':'下一步：发布版本并开始回测'}</button></form></section></div>}{runDetail&&<div className="modal-backdrop"><section className="modal research-result-modal"><button className="modal-close" onClick={()=>setRunDetail(null)}><X/></button><div className="result-modal-head"><div><Status value={runDetail.status}/><h2>{runDetail.name}</h2><p>{runDetail.stage} · {runDetail.progress}%</p></div><Link className="button" to={`/backtests/${runDetail.id}?research=${project?.id}`}>打开完整详情 <ExternalLink/></Link></div><div className="research-run-progress large"><i style={{width:`${runDetail.progress}%`}}/></div>{runDetail.error_message&&<div className="form-error">{runDetail.error_message}</div>}<div className="result-metric-grid">{Object.entries(runDetail.metrics??{}).slice(0,12).map(([key,value])=><div key={key}><small>{key}</small><b>{String(value??'—')}</b></div>)}</div><h3>回测配置</h3><pre className="result-config">{JSON.stringify(runDetail.config,null,2)}</pre>{runDetail.status==='COMPLETED'&&<button className="button primary" disabled={busy} onClick={()=>{setRunDetail(null);analyze(runDetail.id)}}>下一步：交给 Hermes 分析结果</button>}</section></div>}
-    <CatalogMissingDialog
-      open={Boolean(catalogCheck)}
-      checkResult={catalogCheck}
-      busy={busy}
-      onCancel={()=>{setCatalogCheck(null);setPendingBacktestData(null)}}
-      onConfirm={confirmProceedWithMissing}
-    />
+    {backtestOpen&&preview&&<div className="modal-backdrop"><section className="modal research-backtest-modal"><button className="modal-close" onClick={()=>setBacktestOpen(false)}><X/></button><h2>策略回测配置</h2><p className="muted">确认后自动发布当前策略版本，并创建正式 NautilusTrader 回测。</p><form className="stack-form" onSubmit={startBacktest}><div className="form-grid"><label>任务名称<input name="name" defaultValue={`${project?.title} · 基准回测`} required/></label><label>交易标的<input name="symbols" defaultValue="BTCUSDT, ETHUSDT, SOLUSDT" required/></label><label>开始日期<input type="date" name="start" defaultValue="2024-01-01" required/></label><label>结束日期<input type="date" name="end" defaultValue="2025-12-31" required/></label><label>初始资金<input type="number" name="capital" defaultValue="10000" required/></label><label>杠杆<input type="number" name="leverage" defaultValue="4" required/></label><label className="wide">Catalog 路径<input name="catalog_path" placeholder="留空使用系统默认 CATALOG_PATH"/></label><label className="wide checkbox-field" style={{display:'flex',flexDirection:'row',alignItems:'center',gap:10,marginTop:4,cursor:'pointer'}}><input type="checkbox" name="check_data_integrity" defaultChecked={true} style={{width:16,height:16,accentColor:'var(--cyan)'}}/><span style={{fontWeight:500,color:'#e2ecf5'}}>检查数据完整性</span><small style={{color:'var(--muted)',fontSize:12}}>（在回测开始前验证 Parquet 行情覆盖度并显示进度）</small></label></div><h3>策略参数</h3><div className="form-grid">{Object.entries(preview.parameter_schema).map(([key,spec])=><label key={key}>{spec.title??key}{spec.type==='boolean'?<input name={'param_'+key} type="checkbox" defaultChecked={Boolean(spec.default)}/>:<input name={'param_'+key} type="number" step={spec.type==='integer'?'1':'any'} min={spec.min} max={spec.max} defaultValue={String(spec.default)} required/>}</label>)}</div><h3>执行模型</h3><div className="model-select">{[['FAST','快速'],['STANDARD','标准'],['CONSERVATIVE','保守']].map(([value,label])=><label key={value}><input type="radio" name="model" value={value} defaultChecked={value==='CONSERVATIVE'}/><span><b>{label}</b><small>{value}</small></span></label>)}</div><button className="button primary" disabled={busy}>{busy?'正在发布并创建…':'下一步：发布版本并开始回测'}</button></form></section></div>}{runDetail&&<div className="modal-backdrop"><section className="modal research-result-modal"><button className="modal-close" onClick={()=>setRunDetail(null)}><X/></button><div className="result-modal-head"><div><Status value={runDetail.status}/><h2>{runDetail.name}</h2><p>{runDetail.stage} · {runDetail.progress}%</p></div><Link className="button" to={`/backtests/${runDetail.id}?research=${project?.id}`}>打开完整详情与日志 <ExternalLink/></Link></div><div className="research-run-progress large"><i style={{width:`${runDetail.progress}%`}}/></div>{runDetail.error_message&&<div className="form-error">{runDetail.error_message}</div>}{(Boolean(runDetail.config?.waiting_confirmation)||runDetail.stage==='数据检查完成，等待确认')&&<div className="data-check-card" style={{margin:'14px 0'}}><div className="data-check-header"><div className="data-check-icon"><ShieldCheck/></div><div className="data-check-title"><h2>数据完整性检查已完成</h2><p>{runDetail.config?.catalog_check?.summary_text||'数据检查已完成，是否启动回测？'}</p></div></div><div className="data-check-actions"><button type="button" className="button" onClick={async()=>{try{await api.cancelRun(runDetail.id);setRunDetail(await api.run(runDetail.id))}catch(e){setError((e as Error).message)}}}>取消回测</button><button type="button" className="button primary" onClick={async()=>{try{await api.confirmRun(runDetail.id,{ignore_missing_data:Boolean(runDetail.config?.catalog_check?.has_missing)});setRunDetail(await api.run(runDetail.id))}catch(e){setError((e as Error).message)}}}>确认并启动回测</button></div></div>}<div className="result-metric-grid">{Object.entries(runDetail.metrics??{}).slice(0,12).map(([key,value])=><div key={key}><small>{key}</small><b>{String(value??'—')}</b></div>)}</div><h3>回测配置</h3><pre className="result-config">{JSON.stringify(runDetail.config,null,2)}</pre>{runDetail.status==='COMPLETED'&&<button className="button primary" disabled={busy} onClick={()=>{setRunDetail(null);analyze(runDetail.id)}}>下一步：交给 Hermes 分析结果</button>}</section></div>}
   </div>
 }
 

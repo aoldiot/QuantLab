@@ -76,6 +76,9 @@ export const api={
   dataDownload:(id:string)=>request<any>('/data/downloads/'+id),
   deleteDataDownload:(id:string)=>request<{ok:boolean}>('/data/downloads/'+id,{method:'DELETE'}),
   runs:()=>request<Run[]>('/backtests'),run:(id:string)=>request<Run>('/backtests/'+id),chart:(id:string,symbol?:string)=>request<ChartData>(`/backtests/${id}/chart${symbol?'?symbol='+encodeURIComponent(symbol):''}`),createRun:(data:unknown)=>request<Run>('/backtests',{method:'POST',body:JSON.stringify(data)}),deleteRun:(id:string)=>request<void>('/backtests/'+id,{method:'DELETE'}),
+  runLogs:(id:string)=>request<import('./types').BacktestLogsResponse>('/backtests/'+id+'/logs'),
+  confirmRun:(id:string,data?:{ignore_missing_data?:boolean})=>request<Run>('/backtests/'+id+'/confirm',{method:'POST',body:JSON.stringify(data??{})}),
+  cancelRun:(id:string)=>request<Run>('/backtests/'+id+'/cancel',{method:'POST'}),
   checkBacktestCatalog:(data:{symbols:string[];timeframes:string[];start_date:string;end_date:string;venue?:string;catalog_path?:string|null})=>request<import('./types').CatalogCheckResponse>('/backtests/check-catalog',{method:'POST',body:JSON.stringify(data)}),
 }
 

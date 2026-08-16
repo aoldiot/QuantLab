@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent.service import cleanup_expired_worktrees, repair_agent_session_paths
 from .agent.service import router as agent_router
-from .backtest_service import create_backtest_run
+from .backtest_service import confirm_and_start_backtest, create_backtest_run
 from .backtests.chart_data import load_chart
 from .config import settings
 from .data_downloads import router as data_downloads_router
@@ -24,8 +24,11 @@ from .git_versions import code_hash, manifest_hash
 from .llm_config import router as llm_config_router
 from .models import BacktestRun, ResearchProject, ResearchStatus, RunStatus, Strategy, StrategyStatus, StrategyVersion
 from .research import router as research_router
+from .runner import append_log, get_backtest_logs
 from .schemas import (
+    BacktestConfirmRequest,
     BacktestCreate,
+    BacktestLogsOut,
     BacktestOut,
     CatalogCheckRequest,
     CatalogCheckResponse,
@@ -539,10 +542,32 @@ async def check_backtest_catalog(req: CatalogCheckRequest):
     return check_catalog_coverage_batch(req)
 
 
+@app.get("/api/backtests/{run_id}/logs", response_model=BacktestLogsOut)
+async def get_backtest_logs_endpoint(run_id: str, db: AsyncSession = Depends(get_db)):
+    r = await db.get(BacktestRun, run_id)
+    if not r:
+        raise HTTPException(404, "回测不存在")
+    logs = get_backtest_logs(run_id)
+    return BacktestLogsOut(
+        id=r.id,
+        status=r.status.value,
+        stage=r.stage,
+        progress=r.progress,
+        logs=logs,
+        error_message=r.error_message,
+    )
+
+
 @app.post("/api/backtests", response_model=BacktestOut)
 async def create_backtest(data: BacktestCreate, db: AsyncSession = Depends(get_db)):
     return run_out(await create_backtest_run(data, db))
 
+
+@app.post("/api/backtests/{run_id}/confirm", response_model=BacktestOut)
+async def confirm_backtest(run_id: str, req: BacktestConfirmRequest | None = None, db: AsyncSession = Depends(get_db)):
+    ignore_missing = req.ignore_missing_data if req else False
+    run = await confirm_and_start_backtest(run_id, db, ignore_missing_data=ignore_missing)
+    return run_out(run)
 
 
 @app.post("/api/backtests/{run_id}/cancel", response_model=BacktestOut)
@@ -552,6 +577,7 @@ async def cancel_backtest(run_id: str, db: AsyncSession = Depends(get_db)):
     if r.status in {RunStatus.COMPLETED, RunStatus.FAILED}: raise HTTPException(409, "任务已结束")
     r.status, r.stage = RunStatus.CANCELED, "已取消"
     r.finished_at = datetime.now(UTC)
+    append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] 回测任务已被取消。")
     if r.research_project_id:
         project = await db.get(ResearchProject, r.research_project_id)
         if project and project.status != ResearchStatus.ARCHIVED:

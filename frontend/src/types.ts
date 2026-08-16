@@ -30,6 +30,5 @@ export interface CatalogSymbolItem{symbol:string;instrument_id:string;market_typ
 export interface CatalogSummary{catalog_path:string;total_symbols:number;total_bars:number;total_size_bytes:number;all_symbols_count:number;all_bars_count:number;all_size_bytes:number;available_timeframes:string[];items:CatalogSymbolItem[]}
 export interface CatalogMissingDetail{symbol:string;instrument_id:string;timeframe:string;status:'MISSING_INSTRUMENT'|'MISSING_DATA'|'PARTIAL_RANGE'|'OK';message:string}
 export interface CatalogCheckResponse{ok:boolean;has_missing:boolean;catalog_exists:boolean;catalog_path:string;missing_symbols:string[];details:CatalogMissingDetail[];summary_text:string}
-export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean}
-
-
+export interface BacktestLogsResponse{id:string;status:string;stage:string;progress:number;logs:string;error_message?:string|null}
+export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}

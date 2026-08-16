@@ -130,11 +130,24 @@ class BacktestCreate(BaseModel):
     catalog_path: str | None = None
     chunk_size: int | None = Field(default=None, gt=0)
     ignore_missing_data: bool = False
+    check_data_integrity: bool = True
 
     def model_post_init(self, __context):
         if self.end_date <= self.start_date:
             raise ValueError("结束日期必须晚于开始日期")
 
+
+class BacktestConfirmRequest(BaseModel):
+    ignore_missing_data: bool = False
+
+
+class BacktestLogsOut(BaseModel):
+    id: str
+    status: str
+    stage: str
+    progress: int
+    logs: str
+    error_message: str | None = None
 
 
 class BacktestOut(BaseModel):

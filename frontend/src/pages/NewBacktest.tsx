@@ -2,8 +2,8 @@ import {useEffect,useMemo,useState} from 'react'
 import {Check,Info,Play,Save,ShieldCheck} from 'lucide-react'
 import {useLocation,useNavigate} from 'react-router-dom'
 import {api} from '../api'
-import {Card,CatalogMissingDialog} from '../components'
-import type {CatalogCheckResponse,Strategy} from '../types'
+import {Card} from '../components'
+import type {Strategy} from '../types'
 
 export default function NewBacktest(){
   const nav=useNavigate(),location=useLocation()
@@ -13,27 +13,13 @@ export default function NewBacktest(){
   const[selected,setSelected]=useState('')
   const[busy,setBusy]=useState(false)
   const[error,setError]=useState('')
-  const[catalogCheck,setCatalogCheck]=useState<CatalogCheckResponse|null>(null)
-  const[pendingData,setPendingData]=useState<Record<string,any>|null>(null)
 
   useEffect(()=>{api.strategies().then(x=>{setStrategies(x);setSelected(copiedStrategy&&x.some(s=>s.id===copiedStrategy)?copiedStrategy:x[0]?.id??'')})},[copiedStrategy])
   const strategy=useMemo(()=>strategies.find(x=>x.id===selected),[strategies,selected])
 
-  async function executeCreate(data:Record<string,any>){
-    setBusy(true)
-    setError('')
-    try{
-      const run=await api.createRun(data)
-      nav('/backtests/'+run.id)
-    }catch(e){
-      setError(e instanceof Error?e.message:'创建失败')
-      setBusy(false)
-    }
-  }
-
   async function submit(e:React.FormEvent<HTMLFormElement>){
     e.preventDefault()
-    if(!strategy)return
+    if(!strategy||busy)return
     setBusy(true)
     setError('')
     const f=new FormData(e.currentTarget)
@@ -42,6 +28,7 @@ export default function NewBacktest(){
       const raw=f.get('param_'+key)
       params[key]=spec.type==='boolean'?raw==='on':spec.type==='integer'?Number(raw):spec.type==='number'?Number(raw):raw
     })
+    const checkIntegrity=f.get('check_data_integrity')==='on'
     const payload={
       name:f.get('name'),
       strategy_version_id:strategy.latest_version_id,
@@ -57,35 +44,16 @@ export default function NewBacktest(){
       funding:strategy.data_requirements.funding,
       catalog_path:(f.get('catalog_path') as string)||null,
       ignore_missing_data:false,
+      check_data_integrity:checkIntegrity,
     }
 
     try{
-      const check=await api.checkBacktestCatalog({
-        symbols:payload.symbols,
-        timeframes:payload.timeframes,
-        start_date:payload.start_date,
-        end_date:payload.end_date,
-        venue:payload.venue,
-        catalog_path:payload.catalog_path,
-      })
-      if(check.has_missing){
-        setCatalogCheck(check)
-        setPendingData(payload)
-        setBusy(false)
-        return
-      }
-      await executeCreate(payload)
+      const run=await api.createRun(payload)
+      nav('/backtests/'+run.id)
     }catch(e){
-      setError(e instanceof Error?e.message:'校验 Catalog 数据失败')
+      setError(e instanceof Error?e.message:'创建回测任务失败')
       setBusy(false)
     }
-  }
-
-  async function confirmProceedWithMissing(){
-    if(!pendingData)return
-    await executeCreate({...pendingData,ignore_missing_data:true})
-    setCatalogCheck(null)
-    setPendingData(null)
   }
 
   const oldParams=copied?.strategy_parameters??{}
@@ -112,6 +80,11 @@ export default function NewBacktest(){
             <label className="wide">交易品种<input name="symbols" defaultValue={copied?.symbols?.join(', ')??'BTCUSDT, ETHUSDT, SOLUSDT'}/><small>{strategy?.data_requirements.mode==='PORTFOLIO'?'整个币池交给同一个组合策略统一排序和调仓':'每个标的创建一个独立策略实例'}</small></label>
             <label>初始资金<input name="capital" type="number" defaultValue={copied?.initial_balance??10000}/><em>USDT</em></label>
             <label>杠杆<input name="leverage" type="number" defaultValue={copied?.leverage??4}/><em>x</em></label>
+            <label className="wide checkbox-field" style={{display:'flex',flexDirection:'row',alignItems:'center',gap:10,marginTop:6,cursor:'pointer'}}>
+              <input type="checkbox" name="check_data_integrity" defaultChecked={copied?.check_data_integrity??true} style={{width:16,height:16,accentColor:'var(--cyan)'}}/>
+              <span style={{fontWeight:500,color:'#e2ecf5'}}>检查数据完整性</span>
+              <small style={{color:'var(--muted)',fontSize:12}}>（勾选后将在回测开始前验证 Parquet 行情覆盖度并显示进度；不勾选则跳过检查直接开始回测）</small>
+            </label>
           </div>
         </Card>
         <Card title="执行模型">
@@ -123,7 +96,7 @@ export default function NewBacktest(){
         <div className="form-actions">
           <button type="button" className="button" onClick={()=>nav(-1)}>取消</button>
           <button type="button" className="button"><Save size={16}/>保存草稿</button>
-          <button disabled={busy||!strategy} className="button primary"><Play size={17}/>{busy?'正在创建…':'检查并开始回测'}</button>
+          <button disabled={busy||!strategy} className="button primary"><Play size={17}/>{busy?'正在创建…':'创建并启动回测'}</button>
         </div>
       </div>
       <aside className="summary">
@@ -138,20 +111,13 @@ export default function NewBacktest(){
           <ul className="checks">
             <li><Check/>策略契约已加载</li>
             <li><Check/>参数由 Manifest 动态生成</li>
-            <li><Check/>整个任务只使用一个回测进程</li>
+            <li><Check/>支持数据完整性自检与实时日志监控</li>
           </ul>
           <div className="notice"><ShieldCheck/>复制配置不会修改原回测，提交后会创建独立的新任务。</div>
         </Card>
         <div className="tip"><Info/>所有字段都可以在提交前调整。</div>
       </aside>
     </form>
-    <CatalogMissingDialog
-      open={Boolean(catalogCheck)}
-      checkResult={catalogCheck}
-      busy={busy}
-      onCancel={()=>{setCatalogCheck(null);setPendingData(null)}}
-      onConfirm={confirmProceedWithMissing}
-    />
   </>
 }
 
