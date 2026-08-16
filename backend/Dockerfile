@@ -12,6 +12,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
+# Configure PyPI mirror to speed up package downloads
+ENV UV_DEFAULT_INDEX="https://mirrors.aliyun.com/pypi/simple" \
+    UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+
 # Copy dependency specifications
 COPY pyproject.toml uv.lock ./
 
