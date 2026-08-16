@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent.service import cleanup_expired_worktrees, repair_agent_session_paths
 from .agent.service import router as agent_router
+from .auth import AuthMiddleware
+from .auth import router as auth_router
 from .backtest_service import confirm_and_start_backtest, create_backtest_run
 from .backtests.chart_data import load_chart
 from .config import settings
@@ -107,6 +109,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="QuantLab API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(AuthMiddleware)
+app.include_router(auth_router)
 app.include_router(strategy_files_router)
 app.include_router(llm_config_router)
 app.include_router(git_config_router)

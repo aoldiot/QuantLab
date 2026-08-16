@@ -57,3 +57,19 @@ def test_backtest_schemas():
     )
     assert logs_out.progress == 50
     assert logs_out.logs == "[INFO] 正在检查 BTCUSDT 1h"
+
+
+@pytest.mark.anyio
+async def test_runner_update_function():
+    from app.runner import _update, research_status_for_run
+    from app.models import RunStatus, ResearchStatus
+
+    assert research_status_for_run(RunStatus.QUEUED) == ResearchStatus.BACKTESTING
+    assert research_status_for_run(RunStatus.RUNNING) == ResearchStatus.BACKTESTING
+    assert research_status_for_run(RunStatus.ANALYZING) == ResearchStatus.BACKTESTING
+    assert research_status_for_run(RunStatus.COMPLETED) == ResearchStatus.READY_FOR_ANALYSIS
+    assert research_status_for_run(RunStatus.FAILED) == ResearchStatus.READY_FOR_BACKTEST
+
+    # Test _update on non-existent run returns gracefully without error
+    await _update("non-existent-run-id", progress=10, stage="测试")
+

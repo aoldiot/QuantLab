@@ -37,7 +37,44 @@ def get_backtest_logs(run_id: str) -> str:
     return ""
 
 
+def research_status_for_run(status: RunStatus) -> ResearchStatus:
+    if status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.ANALYZING}:
+        return ResearchStatus.BACKTESTING
+    if status == RunStatus.COMPLETED:
+        return ResearchStatus.READY_FOR_ANALYSIS
+    return ResearchStatus.READY_FOR_BACKTEST
+
+
+async def _update(run_id: str, **values) -> None:
+    async with SessionLocal() as db:
+        run = await db.get(BacktestRun, run_id)
+        if run is None:
+            return
+        for key, value in values.items():
+            setattr(run, key, value)
+        if run.research_project_id and "status" in values:
+            project = await db.get(ResearchProject, run.research_project_id)
+            if project and project.status != ResearchStatus.ARCHIVED:
+                project.status = research_status_for_run(values["status"])
+        await db.commit()
+
+
 async def check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
+    try:
+        await _check_data_integrity_and_wait(run_id, strategy)
+    except Exception as exc:
+        append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] 数据完整性检查异常: {type(exc).__name__}: {exc}")
+        await _update(
+            run_id,
+            status=RunStatus.FAILED,
+            stage="数据检查异常",
+            progress=100,
+            error_message=f"{type(exc).__name__}: {exc}",
+            finished_at=datetime.now(UTC),
+        )
+
+
+async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
     """Check catalog data coverage and update progress live. On completion, wait for user confirmation."""
     from nautilus_trader.model.data import Bar
     from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog

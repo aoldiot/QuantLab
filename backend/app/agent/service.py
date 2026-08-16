@@ -804,6 +804,14 @@ async def apply_session(session_id: str, data: AgentApplyRequest, db: AsyncSessi
 
 @router.websocket("/ws/{session_id}")
 async def agent_websocket(websocket: WebSocket, session_id: str):
+    from ..auth import verify_token
+    token = websocket.query_params.get("token")
+    if not token or not verify_token(token):
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "message": "未登录或登录凭据已过期"})
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
     previous = ACTIVE_WEBSOCKETS.get(session_id)
     ACTIVE_WEBSOCKETS[session_id] = websocket

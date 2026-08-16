@@ -1,9 +1,48 @@
 import type {AgentSession,AgentStoredMessage,ChartData,GitConfiguration,LlmConfiguration,PermissionMode,ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile,StrategyGitStatus,StrategyVersion} from './types'
+export const AUTH_TOKEN_KEY = 'quantlab_token'
+export const AUTH_USER_KEY = 'quantlab_user'
 const BASE=import.meta.env.VITE_API_URL??'http://localhost:8000/api'
-export const agentSocketUrl=(sessionId:string)=>{if(BASE.startsWith('http'))return `${BASE.replace(/^http/,'ws')}/agent/ws/${sessionId}`;const proto=window.location.protocol==='https:'?'wss:':'ws:';return `${proto}//${window.location.host}${BASE}/agent/ws/${sessionId}`}
+export const agentSocketUrl=(sessionId:string)=>{
+  const token = localStorage.getItem(AUTH_TOKEN_KEY)
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+  if(BASE.startsWith('http'))return `${BASE.replace(/^http/,'ws')}/agent/ws/${sessionId}${tokenParam}`
+  const proto=window.location.protocol==='https:'?'wss:':'ws:'
+  return `${proto}//${window.location.host}${BASE}/agent/ws/${sessionId}${tokenParam}`
+}
 function errorText(detail:unknown):string{if(typeof detail==='string')return detail;if(Array.isArray(detail))return detail.map(x=>{if(typeof x==='object'&&x){const e=x as {loc?:unknown[];msg?:string};return `${e.loc?.slice(1).join('.')||'参数'}：${e.msg||'格式错误'}`}return String(x)}).join('；');if(detail&&typeof detail==='object')return JSON.stringify(detail);return '请求失败'}
-async function request<T>(path:string,init?:RequestInit):Promise<T>{const r=await fetch(BASE+path,{...init,headers:{'Content-Type':'application/json',...(init?.headers??{})}});if(!r.ok){let body:{detail?:unknown}={};try{body=await r.json()}catch{/**/}throw new Error(errorText(body.detail))}if(r.status===204)return undefined as T;return r.json()}
+async function request<T>(path:string,init?:RequestInit):Promise<T>{
+  const token = localStorage.getItem(AUTH_TOKEN_KEY)
+  const authHeaders: Record<string, string> = {}
+  if (token) {
+    authHeaders['Authorization'] = `Bearer ${token}`
+  }
+  const r=await fetch(BASE+path,{
+    ...init,
+    headers:{
+      'Content-Type':'application/json',
+      ...authHeaders,
+      ...(init?.headers??{})
+    }
+  });
+  if(!r.ok){
+    let body:{detail?:unknown}={}
+    try{body=await r.json()}catch{/**/}
+    if (r.status === 401 && path !== '/auth/login') {
+      localStorage.removeItem(AUTH_TOKEN_KEY)
+      localStorage.removeItem(AUTH_USER_KEY)
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
+    throw new Error(errorText(body.detail) || (r.status === 401 ? '未登录或登录已过期' : '请求失败'))
+  }
+  if(r.status===204)return undefined as T;
+  return r.json()
+}
 export const api={
+  login:(username:string,password:string)=>request<{access_token:string;token_type:string;username:string}>('/auth/login',{method:'POST',body:JSON.stringify({username,password})}),
+  me:()=>request<{username:string;authenticated:boolean}>('/auth/me'),
+  logout:()=>request<{ok:boolean;message:string}>('/auth/logout',{method:'POST'}),
   strategies:()=>request<Strategy[]>('/strategies'),
   strategy:(id:string)=>request<Strategy>('/strategies/'+id),
   createStrategy:(module:string,versionDescription:string)=>request<Strategy>('/strategies',{method:'POST',body:JSON.stringify({module,version_description:versionDescription})}),
