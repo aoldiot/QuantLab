@@ -10,7 +10,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - quantlab_postgres:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U quantlab -d quantlab"]
       interval: 5s
@@ -25,7 +25,7 @@ services:
     ports:
       - "${QUANTLAB_REDIS_PORT:-6380}:6379"
     volumes:
-      - quantlab_redis:/data
+      - ./data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -55,8 +55,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - quantlab_data:/app/data
-      - quantlab_catalog:/app/catalog
+      - ./backend/data:/app/data
+      - ./backend/catalog:/app/catalog
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,8 +86,3 @@ services:
       timeout: 3s
       retries: 3
 
-volumes:
-  quantlab_postgres:
-  quantlab_redis:
-  quantlab_data:
-  quantlab_catalog:

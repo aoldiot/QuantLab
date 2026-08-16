@@ -13,8 +13,8 @@ docker compose up -d --build
 该命令将一键构建并启动全部 4 个容器服务：
 - **前端工作台**：`http://localhost:5173`（Nginx 反向代理 + SPA）
 - **后端 API 与文档**：`http://localhost:8000/docs`
-- **PostgreSQL 16**：`localhost:5432`（持久化卷 `quantlab_postgres`）
-- **Redis 7**：`localhost:6380`（持久化卷 `quantlab_redis`）
+- **PostgreSQL 16**：`localhost:5432`（本地持久化目录 `./data/postgres`）
+- **Redis 7**：`localhost:6380`（本地持久化目录 `./data/redis`）
 
 ### 方式二：仅启动中间件（本地开发调试）
 
