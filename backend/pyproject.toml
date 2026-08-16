@@ -26,3 +26,5 @@ dev = ["httpx>=0.28", "pytest>=8.4", "ruff>=0.12"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]
+norecursedirs = ["data", ".venv", "catalog"]

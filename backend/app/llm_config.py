@@ -172,10 +172,38 @@ async def save_llm_configuration(data: LlmConfigurationUpdate, db: AsyncSession 
     return config_out(config)
 
 
+def format_sdk_error(exc: Exception, stderr_lines: list[str] | None = None) -> str:
+    err_str = str(exc).strip()
+    raw_stderr = "\n".join(line.strip() for line in (stderr_lines or []) if line.strip())
+    combined = f"{err_str}\n{raw_stderr}".strip() if raw_stderr else err_str
+
+    hint = ""
+    if any(k in combined for k in ("401", "authentication_failed", "Invalid API key", "unauthorized")):
+        hint = "API Key 认证失败（401 Unauthorized）。请前往「系统设置 - LLM 配置」检查 API Key 与认证类型（api_key / auth_token）是否正确有效。"
+    elif any(k in combined for k in ("404", "not_found", "model_not_found", "does not exist")):
+        hint = "模型不存在或无权访问（404 Not Found）。请检查配置的模型名称与 Base URL 服务是否匹配。"
+    elif any(k in combined for k in ("429", "rate_limit", "overloaded", "insufficient_quota")):
+        hint = "上游接口请求超限或额度不足（429 Too Many Requests / Overloaded）。请稍后重试或检查账户额度/并发配置。"
+    elif "No conversation found with session ID" in combined:
+        hint = "Claude 历史会话在本地未找到或已过期。"
+    elif any(k in combined for k in ("ECONNREFUSED", "Connection refused", "Failed to connect", "getaddrinfo", "ETIMEDOUT")):
+        hint = "无法连接到 LLM Base URL 服务。请检查 Base URL 地址及本地网络/代理连接。"
+
+    if raw_stderr and "Check stderr output for details" in err_str:
+        err_str = err_str.replace("Error output: Check stderr output for details", f"Error output:\n{raw_stderr}")
+    elif raw_stderr and raw_stderr not in err_str:
+        err_str = f"{err_str}\nStderr: {raw_stderr}"
+
+    if hint:
+        return f"{hint}\n【底层错误】{err_str}"
+    return err_str
+
+
 @router.post("/test")
 async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(get_db)):
     config = await get_config(db)
     prompt = "使用 Bash 工具执行 printf quantlab-agent-ok，并只回复命令输出。" if deep else "只回复 quantlab-ok"
+    stderr_lines: list[str] = []
     options = ClaudeAgentOptions(
         model=config.model,
         env=sdk_env(config),
@@ -184,6 +212,7 @@ async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(
         permission_mode="dontAsk",
         setting_sources=[],
         max_turns=2,
+        stderr=lambda line: stderr_lines.append(line),
     )
     result_text = ""
     try:
@@ -196,7 +225,7 @@ async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(
         config.last_test_message = result_text[:500] or "连接成功"
     except Exception as exc:
         config.last_test_ok = False
-        config.last_test_message = str(exc)[:1000]
+        config.last_test_message = format_sdk_error(exc, stderr_lines)[:1000]
     config.last_tested_at = datetime.now(UTC)
     await db.commit()
     if not config.last_test_ok:

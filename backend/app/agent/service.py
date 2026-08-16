@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..backtest_service import create_backtest_run
 from ..config import settings
 from ..db import SessionLocal, get_db
-from ..llm_config import MAX_API_RETRIES, get_config, sdk_env
+from ..llm_config import MAX_API_RETRIES, format_sdk_error, get_config, sdk_env
 from ..models import (
     AgentMessage,
     AgentSession,
@@ -447,13 +447,32 @@ async def send_session_event(session_id: str, payload: dict[str, Any]) -> bool:
         return False
 
 
-async def build_options(session: AgentSession) -> ClaudeAgentOptions:
+async def build_options(
+    session: AgentSession,
+    stderr_collector: list[str] | None = None,
+    use_resume: bool = True,
+) -> ClaudeAgentOptions:
+    # Ensure worktree directory exists on disk
+    workspace_path = Path(session.workspace_path)
+    if not workspace_path.exists() or session.workspace_path == "pending":
+        workspace_path = create_worktree(session.id, session.strategy_name)
+        session.workspace_path = str(workspace_path)
+        async with SessionLocal() as db:
+            db_session = await db.get(AgentSession, session.id)
+            if db_session:
+                db_session.workspace_path = str(workspace_path)
+                await db.commit()
+
     async with SessionLocal() as db:
         config = await get_config(db)
         # The caller's AgentSession is detached and was loaded once when the
         # WebSocket opened, so its sdk_session_id is stale from turn 2 onward —
         # resuming with None makes Claude re-orient from scratch every turn.
-        resume_id = await db.scalar(select(AgentSession.sdk_session_id).where(AgentSession.id == session.id))
+        resume_id = (
+            await db.scalar(select(AgentSession.sdk_session_id).where(AgentSession.id == session.id))
+            if use_resume
+            else None
+        )
         specification = await db.get(StrategySpecification, session.specification_id) if session.specification_id else None
         specification_context = ""
         if specification:
@@ -526,6 +545,11 @@ async def build_options(session: AgentSession) -> ClaudeAgentOptions:
             + specification_context
         )
 
+        def _on_stderr(line: str) -> None:
+            if stderr_collector is not None:
+                stderr_collector.append(line)
+            logger.debug("Claude CLI stderr [%s]: %s", session.id, line)
+
         return ClaudeAgentOptions(
             cwd=Path(session.workspace_path),
             model=config.model,
@@ -542,6 +566,7 @@ async def build_options(session: AgentSession) -> ClaudeAgentOptions:
             system_prompt=system_append,
             hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[session_bash_guard])]},
             can_use_tool=request_approval if session.permission_mode == "default" else None,
+            stderr=_on_stderr,
         )
 
 
@@ -567,14 +592,33 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
         await persist_event(session.id, "user", "message", {"text": original_prompt})
         await send_session_event(session.id, {"type": "status", "status": "RUNNING"})
         client: ClaudeSDKClient | None = None
+        stderr_lines: list[str] = []
         try:
-            options = await build_options(session)
+            options = await build_options(session, stderr_collector=stderr_lines)
             client = ClaudeSDKClient(options=options)
             ACTIVE_CLIENTS[session.id] = client
             response_text: list[str] = []
             fallback_context: dict[str, Any] | None = None
             retry_attempt = 0
-            await client.connect()
+            try:
+                await client.connect()
+            except Exception as connect_exc:
+                conn_err_text = f"{connect_exc}\n" + "\n".join(stderr_lines)
+                if options.resume and ("No conversation found" in conn_err_text or "session ID" in conn_err_text):
+                    logger.warning("Session %s resume_id %s invalid, retrying as a fresh session...", session.id, options.resume)
+                    async with SessionLocal() as db:
+                        db_session = await db.get(AgentSession, session.id)
+                        if db_session:
+                            db_session.sdk_session_id = None
+                            await db.commit()
+                    stderr_lines.clear()
+                    options = await build_options(session, stderr_collector=stderr_lines, use_resume=False)
+                    client = ClaudeSDKClient(options=options)
+                    ACTIVE_CLIENTS[session.id] = client
+                    await client.connect()
+                else:
+                    raise
+
             await client.query(prompt)
             async for message in client.receive_response():
                 event = _jsonable(message)
@@ -681,8 +725,9 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
             raise
         except Exception as exc:
             logger.exception("Agent execution failed for session %s", session.id)
-            await update_status(session.id, AgentSessionStatus.FAILED, str(exc)[:2000])
-            await send_session_event(session.id, {"type": "error", "message": str(exc)})
+            formatted_error = format_sdk_error(exc, stderr_lines)
+            await update_status(session.id, AgentSessionStatus.FAILED, formatted_error[:2000])
+            await send_session_event(session.id, {"type": "error", "message": formatted_error})
         finally:
             ACTIVE_CLIENTS.pop(session.id, None)
             if client is not None:
