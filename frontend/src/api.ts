@@ -1,13 +1,29 @@
 import type {AgentSession,AgentStoredMessage,ChartData,GitConfiguration,LlmConfiguration,PermissionMode,ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile,StrategyGitStatus,StrategyVersion} from './types'
 export const AUTH_TOKEN_KEY = 'quantlab_token'
 export const AUTH_USER_KEY = 'quantlab_user'
-const BASE=import.meta.env.VITE_API_URL??'http://localhost:8000/api'
-export const agentSocketUrl=(sessionId:string)=>{
+export function getApiBaseUrl(): string {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL
+  }
+  if (typeof window !== 'undefined' && window.location.hostname) {
+    return `${window.location.protocol}//${window.location.hostname}:8000/api`
+  }
+  return 'http://localhost:8000/api'
+}
+
+export const agentSocketUrl = (sessionId: string) => {
   const token = localStorage.getItem(AUTH_TOKEN_KEY)
   const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-  if(BASE.startsWith('http'))return `${BASE.replace(/^http/,'ws')}/agent/ws/${sessionId}${tokenParam}`
-  const proto=window.location.protocol==='https:'?'wss:':'ws:'
-  return `${proto}//${window.location.host}${BASE}/agent/ws/${sessionId}${tokenParam}`
+  const base = getApiBaseUrl()
+  if (base.startsWith('http://')) {
+    return `${base.replace(/^http:\/\//, 'ws://')}/agent/ws/${sessionId}${tokenParam}`
+  }
+  if (base.startsWith('https://')) {
+    return `${base.replace(/^https:\/\//, 'wss://')}/agent/ws/${sessionId}${tokenParam}`
+  }
+  const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = typeof window !== 'undefined' ? window.location.host : 'localhost:8000'
+  return `${proto}//${host}${base}/agent/ws/${sessionId}${tokenParam}`
 }
 function errorText(detail:unknown):string{if(typeof detail==='string')return detail;if(Array.isArray(detail))return detail.map(x=>{if(typeof x==='object'&&x){const e=x as {loc?:unknown[];msg?:string};return `${e.loc?.slice(1).join('.')||'参数'}：${e.msg||'格式错误'}`}return String(x)}).join('；');if(detail&&typeof detail==='object')return JSON.stringify(detail);return '请求失败'}
 async function request<T>(path:string,init?:RequestInit):Promise<T>{
@@ -16,7 +32,8 @@ async function request<T>(path:string,init?:RequestInit):Promise<T>{
   if (token) {
     authHeaders['Authorization'] = `Bearer ${token}`
   }
-  const r=await fetch(BASE+path,{
+  const base = getApiBaseUrl()
+  const r=await fetch(base+path,{
     ...init,
     headers:{
       'Content-Type':'application/json',
