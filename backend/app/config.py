@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://quantlab:quantlab@localhost:5432/quantlab"
     redis_url: str = "redis://localhost:6380/0"
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173", "http://0.0.0.0:5173", "*"]
     data_root: Path = BACKEND_DIR / "data"
     artifact_root: Path = BACKEND_DIR / "data" / "backtests"
     catalog_path: Path = BACKEND_DIR / "catalog"
