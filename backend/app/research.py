@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from datetime import UTC, datetime
@@ -48,6 +49,8 @@ from .strategy_contract import load_manifest
 from .strategy_files import _path, _template
 
 router = APIRouter(prefix="/api/research", tags=["strategy-research"])
+
+logger = logging.getLogger(__name__)
 
 RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。你的职责是与用户深入研讨金融量化策略、质疑假设、识别数据偏差和未来函数、设计可证伪实验，并在回测后依据客观数据分析结果。使用简体中文。你不编写或修改正式策略代码，不直接启动正式回测；需要实现时形成清晰策略规格，交由 QuantLab 和 Claude Code 执行。不要把高 Sharpe 直接等同于有效策略。
 
@@ -138,6 +141,24 @@ def _extract_text(payload: dict[str, Any]) -> str:
     return "\n".join(texts).strip()
 
 
+def _extract_tool_trace(payload: dict[str, Any]) -> list[str]:
+    """Summarize Hermes' server-side tool loop.
+
+    Hermes runs its own tool loop and returns `function_call` /
+    `function_call_output` items alongside the `message` item. Those items are
+    not part of the human-facing reply, but dropping them entirely makes every
+    file read, shell command and web search Hermes performs invisible.
+    """
+    trace: list[str] = []
+    for item in payload.get("output", []):
+        kind = item.get("type")
+        if kind == "function_call":
+            trace.append(f"call {item.get('name') or '?'} {str(item.get('arguments') or '')[:200]}")
+        elif kind == "function_call_output":
+            trace.append(f"  -> {str(item.get('output') or '')[:200]}")
+    return trace
+
+
 async def call_hermes(
     project: ResearchProject,
     prompt: str,
@@ -162,9 +183,16 @@ async def call_hermes(
             response.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Hermes 调用失败：{exc}") from exc
-    text = _extract_text(response.json())
+    payload = response.json()
+    trace = _extract_tool_trace(payload)
+    if trace:
+        logger.info("Hermes 工具调用 (conversation=%s):\n%s", project.hermes_conversation, "\n".join(trace))
+    text = _extract_text(payload)
     if not text:
-        raise HTTPException(502, "Hermes 未返回可显示的研究内容")
+        detail = "Hermes 未返回可显示的研究内容"
+        if trace:
+            detail += f"（本轮只有工具调用，共 {len(trace)} 条，详见后端日志）"
+        raise HTTPException(502, detail)
     return text
 
 
@@ -241,6 +269,44 @@ def _resolved_decision_brief(decisions: list[ResearchDecision]) -> str:
 
 async def _latest_spec(project_id: str, db: AsyncSession) -> StrategySpecification | None:
     return await db.scalar(select(StrategySpecification).where(StrategySpecification.project_id == project_id).order_by(StrategySpecification.version.desc()).limit(1))
+
+
+MAX_CODE_CHARS = 40_000
+
+
+async def _executed_code_brief(run: BacktestRun, db: AsyncSession) -> str:
+    """The exact strategy source this run executed, for Hermes to review.
+
+    Read from `StrategyVersion.code` rather than the working file: the file may
+    have moved on since the run, and attribution is only sound against the code
+    that actually produced these metrics.
+    """
+    version_id = str((run.config or {}).get("strategy_version_id") or "")
+    if not version_id:
+        return ""
+    version = await db.get(StrategyVersion, version_id)
+    if not version or not version.code:
+        return ""
+    code = version.code
+    suffix = "" if len(code) <= MAX_CODE_CHARS else f"\n（源码过长，已截断，完整长度 {len(code)} 字符）"
+    return f"\n实际运行的策略源码（{version.entrypoint} v{version.version}）：\n```python\n{code[:MAX_CODE_CHARS]}\n```{suffix}"
+
+
+async def _implementation_report(project: ResearchProject, db: AsyncSession) -> dict[str, Any] | None:
+    """Claude's self-reported deviations from the spec, if it filed one."""
+    if not project.implementation_session_id:
+        return None
+    content = await db.scalar(select(AgentMessage.content).where(
+        AgentMessage.session_id == project.implementation_session_id,
+        AgentMessage.event_type == "spec_deviation",
+    ).order_by(AgentMessage.created_at.desc()).limit(1))
+    return content if isinstance(content, dict) else None
+
+
+def _implementation_report_brief(report: dict[str, Any] | None) -> str:
+    if not report:
+        return "\n实现偏差报告：Claude 未提交（无法确认代码与规格是否一致，请直接以源码为准核对）。"
+    return "\nClaude 提交的实现偏差报告：\n" + json.dumps(report, ensure_ascii=False, indent=2)
 
 
 def _next_version(version: str) -> str:
@@ -525,7 +591,11 @@ async def create_implementation(project_id: str, data: ResearchImplementationCre
     except Exception as exc:
         await db.rollback()
         raise HTTPException(500, f"创建策略开发工作区失败：{exc}") from exc
-    prompt = "请严格按照已确认的QuantLab策略规格实现和测试当前策略。规格如下：\n" + json.dumps(spec.content, ensure_ascii=False, indent=2)
+    prompt = (
+        "请严格按照已确认的QuantLab策略规格实现和测试当前策略。规格如下：\n"
+        + json.dumps(spec.content, ensure_ascii=False, indent=2)
+        + _resolved_decision_brief(await _decisions(project.id, db))
+    )
     db.add(AgentMessage(session_id=session.id, role="system", event_type="research_handoff", content={"text": prompt, "specification_id": spec.id}))
     project.implementation_session_id = session.id
     project.status = ResearchStatus.IMPLEMENTING
@@ -559,6 +629,7 @@ async def repair_failed_backtest(project_id: str, run_id: str, data: ResearchImp
     except Exception as exc:
         await db.rollback()
         raise HTTPException(500, f"创建策略修复工作区失败：{exc}") from exc
+    settled = _resolved_decision_brief(await _decisions(project.id, db))
     prompt = f"""请处理这次失败的 QuantLab 回测。第一步必须先根据堆栈、回测配置和策略代码判断责任类型：
 
 1. 只有错误根因位于当前策略 Python 文件的字段、参数、指标、订单或交易逻辑时，才归类为 STRATEGY，并修改策略、执行语法和相关测试验证。
@@ -574,7 +645,7 @@ async def repair_failed_backtest(project_id: str, run_id: str, data: ResearchImp
 {run.error_message or '未记录错误日志'}
 
 已确认策略规格：
-{json.dumps(spec.content, ensure_ascii=False, indent=2)}"""
+{json.dumps(spec.content, ensure_ascii=False, indent=2)}{settled}"""
     db.add(AgentMessage(session_id=session.id, role="system", event_type="backtest_repair_handoff",
                         content={"text": prompt, "specification_id": spec.id, "run_id": run.id}))
     project.implementation_session_id = session.id
@@ -726,7 +797,17 @@ async def analyze_backtest(project_id: str, run_id: str, db: AsyncSession = Depe
     spec = await _latest_spec(project.id, db)
     project.status = ResearchStatus.ANALYZING
     await db.commit()
-    prompt = "请分析本次正式回测。必须区分客观事实与推断，判断是否支持原始假设，并提出最有信息价值的下一步实验。\n策略规格：\n" + json.dumps(spec.content if spec else {}, ensure_ascii=False) + "\n回测配置：\n" + json.dumps(run.config, ensure_ascii=False) + "\n指标：\n" + json.dumps(run.metrics, ensure_ascii=False) + "\n结果摘要：\n" + json.dumps(run.result, ensure_ascii=False)[:60000]
+    prompt = (
+        "请分析本次正式回测。必须区分客观事实与推断，判断是否支持原始假设，并提出最有信息价值的下一步实验。\n"
+        "本次附带了实际运行的策略源码和 Claude 的实现偏差报告。归因时必须先判断问题出在策略假设还是实现："
+        "若代码与规格存在偏差，或代码里有规格未描述的行为，先指出这一点，不要把实现缺陷归因为假设失效。\n"
+        "策略规格：\n" + json.dumps(spec.content if spec else {}, ensure_ascii=False)
+        + _implementation_report_brief(await _implementation_report(project, db))
+        + await _executed_code_brief(run, db)
+        + "\n回测配置：\n" + json.dumps(run.config, ensure_ascii=False)
+        + "\n指标：\n" + json.dumps(run.metrics, ensure_ascii=False)
+        + "\n结果摘要：\n" + json.dumps(run.result, ensure_ascii=False)[:60000]
+    )
     try:
         answer = await call_hermes(project, prompt, db=db)
     except Exception:

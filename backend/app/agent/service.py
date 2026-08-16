@@ -6,6 +6,7 @@ import difflib
 import json
 import logging
 import re
+import shlex
 import shutil
 import subprocess
 import uuid
@@ -103,9 +104,19 @@ from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
 
 3. 行为准则（CRITICAL）：
 - 所有 API 和标准结构均已在上方完整给出。**严禁使用 Grep / Glob / Bash / Read 去遍历系统 site-packages 源码或全局目录**。
-- 收到任务后，**请直接使用 Write 工具将完整策略代码写入 `backend/app/strategies/{strategy_name}.py`**。
+- 收到任务后，**必须分块写入 `backend/app/strategies/{strategy_name}.py`**，不要试图一次 Write 整个文件：
+  1. 第一次 Write 只写文件骨架 —— 完整的 import 段、类声明、`STRATEGY_MANIFEST`，以及每个待填方法的占位行 `# __CHUNK_1__`、`# __CHUNK_2__`……
+  2. 之后每次 Edit 只把一个 `# __CHUNK_N__` 替换成该方法的真实实现，一次一个，写完一个再写下一个。
+  这不是风格偏好：上游网关会在单次响应过长时截断连接，导致工具入参 JSON 不完整、Write 静默失败并重试，实测一次失败会浪费十几分钟。每次回复保持简短是最有效的规避手段。
 - 编写完成后，仅需调用一次 `python3 -m py_compile backend/app/strategies/{strategy_name}.py` 验证语法即可。
 """
+
+SPEC_DEVIATION_CONTRACT = """
+
+实现偏差报告（强制）：本轮如果你修改了策略文件，回复末尾必须追加一行
+QUANTLAB_SPEC_DEVIATION:{紧凑JSON}
+字段：conforms（布尔，代码是否完全落实规格）、deviations（数组，每项含 spec_field/what/why）、assumptions（数组，规格未明确而你自行假定的取值或口径）、unimplemented（数组，规格要求但本轮未实现的部分）。
+这份报告会交给研究员 Hermes 用于回测归因，所以必须诚实：完全一致就填 conforms=true 且三个数组为空，不要为了显得完整而编造偏差；反之凡是你自己做过的取舍、猜测的阈值、简化的规则，都必须写进来，漏报会导致把实现缺陷误判为策略假设失效。这一行不会展示给用户，不要在正文里重复它的内容。"""
 
 
 def _agent_root() -> Path:
@@ -192,48 +203,105 @@ async def repair_agent_session_paths() -> None:
             await db.commit()
 
 
-def _safe_bash(command: str) -> bool:
-    cmd = command.strip()
-    if not cmd or "\n" in cmd:
-        return False
-    dangerous = (
-        r"(?:^|\s|;)(?:sudo|rm|mkfs|dd|shutdown|reboot|kill|pkill|ssh|scp|ftp|sftp)(?:\s|$|;)",
-        r"(?:^|\s)git\s+(?:push|reset\s+--hard|clean\s+-fdx)",
-    )
-    if any(re.search(p, cmd, re.IGNORECASE) for p in dangerous):
-        return False
+def _bash_segments(command: str) -> list[list[str]] | None:
+    """Split a compound command into per-segment token lists, respecting quoting.
 
-    allowed_prefixes = (
-        r"python(?:3)?(?:\s+.*)?",
-        r"pytest(?:\s+.*)?",
-        r"ruff(?:\s+.*)?",
-        r"git\s+(?:status|diff|log|branch|show|rev-parse)(?:\s+.*)?",
-        r"uv(?:\s+.*)?",
-        r"pip(?:\s+.*)?",
-        r"ls(?:\s+.*)?",
-        r"find(?:\s+.*)?",
-        r"which(?:\s+.*)?",
-        r"whereis(?:\s+.*)?",
-        r"echo(?:\s+.*)?",
-        r"cat(?:\s+.*)?",
-        r"head(?:\s+.*)?",
-        r"tail(?:\s+.*)?",
-        r"grep(?:\s+.*)?",
-        r"wc(?:\s+.*)?",
-        r"curl(?:\s+.*)?",
-    )
-    return any(re.match(p, cmd, re.IGNORECASE) for p in allowed_prefixes)
+    Returns None when the command cannot be tokenized, so the caller falls back
+    to requiring approval rather than guessing at the intent.
+    """
+    segments: list[list[str]] = []
+    for line in command.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            lexer = shlex.shlex(line, punctuation_chars=True, posix=True)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            return None
+        current: list[str] = []
+        for token in tokens:
+            if token and all(char in ";|&" for char in token):
+                if current:
+                    segments.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(current)
+    return segments
+
+
+# Command substitution lets an allowed command smuggle an arbitrary one, e.g.
+# `ls "$(rm -rf /)"`, so any segment containing it must go to approval.
+_SUBSTITUTION = re.compile(r"\$\(|\$\{|`|<\(")
+
+_ALLOWED_COMMANDS = frozenset({
+    "python", "python3", "pytest", "ruff", "uv", "pip", "pip3",
+    "ls", "find", "which", "whereis", "echo", "cat", "head", "tail",
+    "grep", "wc", "curl", "git",
+})
+_ALLOWED_GIT_SUBCOMMANDS = frozenset({"status", "diff", "log", "branch", "show", "rev-parse"})
+# `find` can execute arbitrary commands or delete files through these flags.
+_FORBIDDEN_FIND_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf"})
+
+
+def _safe_bash(command: str) -> bool:
+    """Whitelist check applied to every segment of a compound command.
+
+    Previously any command containing a newline was rejected outright, which
+    pushed routine multi-line shell into the approval path and stalled the turn
+    until the 300s approval timeout.
+    """
+    if not command.strip():
+        return False
+    segments = _bash_segments(command)
+    if not segments:
+        return False
+    return all(_safe_bash_segment(tokens) for tokens in segments)
+
+
+def _safe_bash_segment(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    if any(_SUBSTITUTION.search(token) for token in tokens):
+        return False
+    name = Path(tokens[0]).name.lower()
+    if name not in _ALLOWED_COMMANDS:
+        return False
+    if name == "git":
+        return len(tokens) > 1 and tokens[1].lower() in _ALLOWED_GIT_SUBCOMMANDS
+    if name == "find":
+        return not any(token.lower() in _FORBIDDEN_FIND_FLAGS for token in tokens[1:])
+    return True
 
 
 def _is_strictly_forbidden(command: str) -> bool:
+    """Commands to reject outright rather than offer for approval.
+
+    Matched against a token stream so that `(`, quotes and command substitution
+    cannot hide the verb, e.g. `ls "$(rm -rf /)"`.
+    """
     cmd = command.strip()
     if not cmd:
         return True
-    dangerous = (
-        r"(?:^|\s|;)(?:sudo|rm\s+-rf|mkfs|dd\s+if=|shutdown|reboot)(?:\s|$|;)",
+    if any(re.search(p, cmd, re.IGNORECASE) for p in (
         r"(?:^|\s)git\s+(?:push|reset\s+--hard|clean\s+-fdx)",
-    )
-    return any(re.search(p, cmd, re.IGNORECASE) for p in dangerous)
+    )):
+        return True
+    verbs = {"sudo", "mkfs", "shutdown", "reboot", "halt", "poweroff"}
+    for tokens in _bash_segments(cmd) or []:
+        for index, token in enumerate(tokens):
+            bare = Path(token.strip("\"'`$(){}")).name.lower()
+            if bare in verbs:
+                return True
+            rest = tokens[index + 1:]
+            if bare == "rm" and any(flag.startswith("-") and "r" in flag.lower() for flag in rest):
+                return True
+            if bare == "dd" and any(flag.startswith("if=") for flag in rest):
+                return True
+    return False
 
 
 async def bash_guard(input_data: dict[str, Any], _tool_use_id: str | None, _context: Any) -> dict[str, Any]:
@@ -283,8 +351,24 @@ def _strip_control_markers(value: Any) -> Any:
     if isinstance(value, list):
         return [_strip_control_markers(item) for item in value]
     if isinstance(value, str):
-        return re.sub(r"\s*QUANTLAB_BACKTEST_REQUEST:\{.*\}\s*", "", value, flags=re.DOTALL)
+        return re.sub(r"\s*(?:QUANTLAB_BACKTEST_REQUEST|QUANTLAB_SPEC_DEVIATION):\{.*\}\s*", "", value, flags=re.DOTALL)
     return value
+
+
+def _marker_payload(text: str, marker: str) -> dict[str, Any] | None:
+    """Read the JSON object following `marker:`.
+
+    Uses raw_decode rather than a regex so that nested braces parse correctly
+    and a second marker later in the reply is not swallowed.
+    """
+    index = text.find(f"{marker}:{{")
+    if index < 0:
+        return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(text[index + len(marker) + 1:])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 async def _resolve_backtest_version(payload: dict[str, Any], session: AgentSession) -> dict[str, Any]:
@@ -340,9 +424,10 @@ async def persist_event(session_id: str, role: str, event_type: str, content: di
 async def update_status(session_id: str, status: AgentSessionStatus, error: str | None = None, sdk_session_id: str | None = None) -> None:
     async with SessionLocal() as db:
         session = await db.get(AgentSession, session_id)
-        if session:
-            session.status = status
-            session.error_message = error
+        if not session:
+            return
+        session.status = status
+        session.error_message = error
         if sdk_session_id:
             session.sdk_session_id = sdk_session_id
         await db.commit()
@@ -365,10 +450,23 @@ async def send_session_event(session_id: str, payload: dict[str, Any]) -> bool:
 async def build_options(session: AgentSession) -> ClaudeAgentOptions:
     async with SessionLocal() as db:
         config = await get_config(db)
+        # The caller's AgentSession is detached and was loaded once when the
+        # WebSocket opened, so its sdk_session_id is stale from turn 2 onward —
+        # resuming with None makes Claude re-orient from scratch every turn.
+        resume_id = await db.scalar(select(AgentSession.sdk_session_id).where(AgentSession.id == session.id))
         specification = await db.get(StrategySpecification, session.specification_id) if session.specification_id else None
         specification_context = ""
         if specification:
-            specification_context = "\n当前任务绑定了用户已确认的策略规格。必须严格实现，发现歧义时停止猜测并明确指出：\n" + json.dumps(specification.content, ensure_ascii=False, indent=2)
+            # Late import: research.py imports this module, so a top-level
+            # import here would be circular.
+            from ..research import _decisions, _resolved_decision_brief
+            settled = _resolved_decision_brief(await _decisions(session.research_project_id, db)) if session.research_project_id else ""
+            specification_context = (
+                "\n当前任务绑定了用户已确认的策略规格。必须严格实现，发现歧义时停止猜测并明确指出：\n"
+                + json.dumps(specification.content, ensure_ascii=False, indent=2)
+                + settled
+                + SPEC_DEVIATION_CONTRACT
+            )
         tools = ["Read", "Glob", "Grep"] if session.permission_mode == "plan" else ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill"]
         approved_tools = ["Read", "Glob", "Grep", "Skill(nautilus-strategy-author)"] if session.permission_mode == "plan" else (["Read", "Glob", "Grep", "Edit", "Write", "Skill(nautilus-strategy-author)"] if session.permission_mode == "default" else tools)
         async def request_approval(tool_name: str, tool_input: dict[str, Any], _context: Any = None):
@@ -380,7 +478,10 @@ async def build_options(session: AgentSession) -> ClaudeAgentOptions:
                 APPROVALS.pop(request_id, None)
                 return PermissionResultDeny(behavior="deny", message="Agent 面板连接已断开，无法完成敏感操作审批", interrupt=False)
             try:
-                approved = await asyncio.wait_for(future, timeout=300)
+                # 300s meant one unattended approval could burn an entire turn
+                # (observed: 304s / 1 turn / 0 tokens). 120s is still ample for
+                # a user who is watching the panel.
+                approved = await asyncio.wait_for(future, timeout=120)
             except TimeoutError:
                 approved = False
             finally:
@@ -412,8 +513,15 @@ async def build_options(session: AgentSession) -> ClaudeAgentOptions:
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}
 
         system_append = (
-            "你是 QuantLab 的 NautilusTrader 策略开发 Agent。所有面向用户的分析、计划、进度、提问、错误说明和最终回答必须使用简体中文；代码、命令、文件名和 API 字段保持原格式。\n"
+            "你是 QuantLab 的 NautilusTrader 策略开发 Agent，在一个已隔离的 git worktree 中工作，只负责编写和验证单个策略文件。\n"
+            "所有面向用户的分析、计划、进度、提问、错误说明和最终回答必须使用简体中文；代码、命令、文件名和 API 字段保持原格式。\n"
             f"目标策略文件路径：`backend/app/strategies/{session.strategy_name}.py`。\n"
+            "工作约定：\n"
+            "- 直接动手，不要复述任务或征求许可。回复保持简短，不要在正文里重复代码内容。\n"
+            "- 修改文件用 Edit（先 Read 再 Edit），新建文件用 Write。不要用 Bash 的重定向或 sed 改文件。\n"
+            "- 只在必要时使用 Bash，且限于 py_compile、pytest、ruff、git status/diff 这类只读或验证命令。\n"
+            "- 不要提交、推送或改动 git 状态：diff 审批和版本管理由平台完成。\n"
+            "- 不要新建 README、说明文档或计划文档，除非用户明确要求。\n"
             + NAUTILUS_STRATEGY_CHEATSHEET.replace("{strategy_name}", session.strategy_name)
             + specification_context
         )
@@ -427,11 +535,11 @@ async def build_options(session: AgentSession) -> ClaudeAgentOptions:
             permission_mode=session.permission_mode,
             setting_sources=["project"],
             skills=["nautilus-strategy-author"],
-            max_turns=max(config.max_turns or 60, 60),
-            resume=session.sdk_session_id,
+            max_turns=config.max_turns or 60,
+            resume=resume_id,
             enable_file_checkpointing=True,
             sandbox={"enabled": True, "autoAllowBashIfSandboxed": False},
-            system_prompt={"type": "preset", "preset": "claude_code", "append": system_append},
+            system_prompt=system_append,
             hooks={"PreToolUse": [HookMatcher(matcher="Bash", hooks=[session_bash_guard])]},
             can_use_tool=request_approval if session.permission_mode == "default" else None,
         )
@@ -446,7 +554,7 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
             f"请始终使用简体中文与用户交流，代码、命令、路径和字段名除外。\n"
             f"{action_rule}\n"
             f"目标策略代码文件路径：backend/app/strategies/{session.strategy_name}.py\n"
-            f"请直接使用 Write 工具将完整的策略代码写入该文件，并使用 python3 -m py_compile 进行语法验证。无需在外部文件系统中做额外搜索。\n\n"
+            f"请先 Write 骨架（import、类声明、STRATEGY_MANIFEST 和 # __CHUNK_N__ 占位行），再逐个用 Edit 把占位行替换成方法实现，一次只写一个；不要一次 Write 整个文件，否则响应过长会被上游网关截断。最后用 python3 -m py_compile 验证语法。无需在外部文件系统中做额外搜索。\n\n"
             f"{original_prompt}"
         )
 
@@ -479,13 +587,19 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
                 if event_type == "init" and event.get("data", {}).get("session_id"):
                     await update_status(session.id, AgentSessionStatus.RUNNING, sdk_session_id=event["data"]["session_id"])
                 visible_event = _strip_control_markers(event)
-                await persist_event(session.id, "assistant", str(event_type), visible_event)
+                # Thinking deltas arrive back-to-back and carry no replay value;
+                # persisting each one cost ~186s of serialized DB writes per run.
+                if event_type != "thinking_tokens":
+                    await persist_event(session.id, "assistant", str(event_type), visible_event)
                 await send_session_event(session.id, {"type": "sdk_event", "event": visible_event})
             joined = "\n".join(response_text)
-            match = re.search(r"QUANTLAB_BACKTEST_REQUEST:(\{.*\})", joined)
-            if backtest_requested and match:
+            deviation = _marker_payload(joined, "QUANTLAB_SPEC_DEVIATION")
+            if deviation is not None:
+                await persist_event(session.id, "assistant", "spec_deviation", deviation)
+            backtest_payload = _marker_payload(joined, "QUANTLAB_BACKTEST_REQUEST")
+            if backtest_requested and backtest_payload is not None:
                 try:
-                    request = BacktestCreate.model_validate(await _resolve_backtest_version(json.loads(match.group(1)), session))
+                    request = BacktestCreate.model_validate(await _resolve_backtest_version(backtest_payload, session))
                     async with SessionLocal() as db:
                         run = await create_backtest_run(request, db)
                     await send_session_event(session.id, {"type": "backtest_created", "run_id": run.id, "status": run.status.value, "name": run.name})
