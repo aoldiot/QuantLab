@@ -109,11 +109,14 @@ async def get_hermes_config(db: AsyncSession | None = None) -> tuple[str, str, s
     )
 
 
+MAX_API_RETRIES = 5
+
+
 def sdk_env(config: LlmConfiguration) -> dict[str, str]:
     env = {
         "ANTHROPIC_BASE_URL": config.base_url.rstrip("/"),
         "API_TIMEOUT_MS": str((config.timeout_seconds or 120) * 1000),
-        "CLAUDE_CODE_MAX_RETRIES": "5",
+        "CLAUDE_CODE_MAX_RETRIES": str(MAX_API_RETRIES),
     }
     key_name = "ANTHROPIC_API_KEY" if config.auth_type == "api_key" else "ANTHROPIC_AUTH_TOKEN"
     env[key_name] = decrypt_api_key(config.api_key_encrypted)

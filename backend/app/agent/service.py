@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..backtest_service import create_backtest_run
 from ..config import settings
 from ..db import SessionLocal, get_db
-from ..llm_config import get_config, sdk_env
+from ..llm_config import MAX_API_RETRIES, get_config, sdk_env
 from ..models import (
     AgentMessage,
     AgentSession,
@@ -573,6 +573,7 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
             ACTIVE_CLIENTS[session.id] = client
             response_text: list[str] = []
             fallback_context: dict[str, Any] | None = None
+            retry_attempt = 0
             await client.connect()
             await client.query(prompt)
             async for message in client.receive_response():
@@ -592,6 +593,20 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
                 if event_type != "thinking_tokens":
                     await persist_event(session.id, "assistant", str(event_type), visible_event)
                 await send_session_event(session.id, {"type": "sdk_event", "event": visible_event})
+                if event_type == "api_retry":
+                    retry_data = event.get("data") or {}
+                    retry_attempt = int(retry_data.get("attempt") or retry_attempt + 1)
+                    await send_session_event(session.id, {
+                        "type": "api_retry",
+                        "attempt": retry_attempt,
+                        "max_retries": MAX_API_RETRIES,
+                        "reason": retry_data.get("error_status") or retry_data.get("error") or "unknown",
+                    })
+                    if retry_attempt >= MAX_API_RETRIES:
+                        raise RuntimeError(
+                            f"上游模型接口连续 {MAX_API_RETRIES} 次调用失败，已停止重试。"
+                            "请前往「系统设置 - LLM 配置」检查 Base URL、模型和超时时间，然后重新发送任务。"
+                        )
             joined = "\n".join(response_text)
             deviation = _marker_payload(joined, "QUANTLAB_SPEC_DEVIATION")
             if deviation is not None:
