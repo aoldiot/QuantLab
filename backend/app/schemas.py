@@ -183,7 +183,7 @@ class LlmConfigurationUpdate(BaseModel):
 
 
 class AgentSessionCreate(BaseModel):
-    client_id: str = Field(min_length=8, max_length=100)
+    client_id: str = Field(default="default_client", max_length=100)
     strategy_name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
     permission_mode: PermissionMode = "default"
 
@@ -194,7 +194,7 @@ class AgentApplyRequest(BaseModel):
 
 
 class ResearchProjectCreate(BaseModel):
-    client_id: str = Field(min_length=8, max_length=100)
+    client_id: str = Field(default="default_client", max_length=100)
     title: str = Field(min_length=1, max_length=200)
     original_idea: str = Field(default="", max_length=20_000)
 
@@ -212,7 +212,7 @@ class ResearchDecisionResolve(BaseModel):
 
 
 class ResearchImplementationCreate(BaseModel):
-    client_id: str = Field(min_length=8, max_length=100)
+    client_id: str = Field(default="default_client", max_length=100)
     permission_mode: PermissionMode = "acceptEdits"
     force: bool = False
 

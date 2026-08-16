@@ -23,14 +23,19 @@ const journeyStages=[
 ]
 const stageByStatus:Record<string,number>={DISCUSSING:0,SPEC_REVIEW:1,IMPLEMENTING:2,CODE_REVIEW:2,READY_FOR_BACKTEST:3,BACKTESTING:3,READY_FOR_ANALYSIS:3,ANALYZING:4,RESULT_REVIEW:4,ARCHIVED:4}
 
-function jsonAsMarkdown(value:unknown,depth=2):string{
-  if(Array.isArray(value))return value.map(item=>typeof item==='object'?jsonAsMarkdown(item,depth+1):`- ${String(item)}`).join('\n')
-  if(value&&typeof value==='object')return Object.entries(value as Record<string,unknown>).map(([key,item])=>{
+function jsonAsMarkdown(value:unknown,depth=2,seen=new WeakSet()):string{
+  if(depth>6)return typeof value==='object'&&value!==null?JSON.stringify(value):String(value??'')
+  if(!value||typeof value!=='object')return String(value??'')
+  if(typeof value==='object'&&value!==null){
+    if(seen.has(value))return '[循环引用]'
+    seen.add(value)
+  }
+  if(Array.isArray(value))return value.map(item=>(item&&typeof item==='object')?jsonAsMarkdown(item,depth+1,seen):`- ${String(item??'')}`).join('\n')
+  return Object.entries(value as Record<string,unknown>).map(([key,item])=>{
     const heading='#'.repeat(Math.min(depth,4))
-    if(item&&typeof item==='object')return `${heading} ${key}\n\n${jsonAsMarkdown(item,depth+1)}`
-    return `**${key}：** ${String(item)}`
+    if(item&&typeof item==='object')return `${heading} ${key}\n\n${jsonAsMarkdown(item,depth+1,seen)}`
+    return `**${key}：** ${String(item??'')}`
   }).join('\n\n')
-  return String(value??'')
 }
 
 function readableMessage(message:ResearchMessage){
@@ -65,7 +70,7 @@ export default function Research(){
   const settledDecisions=useMemo(()=>decisions.filter(item=>item.status!=='PENDING'),[decisions])
   const activeDecision=pendingDecisions[Math.min(decisionIndex,Math.max(0,pendingDecisions.length-1))]
   const decisionsRef=useRef<HTMLDivElement|null>(null)
-  async function reloadList(){const value=await api.researchProjects(clientId());setProjects(value);return value}
+  async function reloadList(){const value=await api.researchProjects();setProjects(value);return value}
   async function open(item:ResearchProject){setError('');const[m,r,s,fresh,d]=await Promise.all([api.researchMessages(item.id),api.researchRuns(item.id),api.strategies(),api.researchProject(item.id),api.researchDecisions(item.id)]);setMessages(m);setRuns(r);setStrategies(s);setProject(fresh);setDecisions(d);setSpecText(fresh.specification?JSON.stringify(fresh.specification.content,null,2):'')}
   useEffect(()=>{reloadList().then(async value=>{const target=value.find(item=>item.id===repairRequest?.repairProjectId)??value[0];if(!target)return;await open(target);if(repairRequest?.repairProjectId===target.id&&repairRequest.repairSessionId&&repairRequest.repairPrompt){setViewStage(2);setImplementationPrompt(repairRequest.repairPrompt);setAgentOpen(true);navigate('/research',{replace:true,state:null})}}).catch(e=>setError(e.message))},[])
   useEffect(()=>{timeline.current?.scrollTo({top:timeline.current.scrollHeight,behavior:'smooth'})},[messages,busy])
@@ -83,7 +88,7 @@ export default function Research(){
     }
   }
 
-  async function create(e:React.FormEvent<HTMLFormElement>){e.preventDefault();setBusy(true);setError('');const f=new FormData(e.currentTarget);try{const item=await api.createResearch(clientId(),String(f.get('title')));setCreating(false);await reloadList();await open(item)}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
+  async function create(e:React.FormEvent<HTMLFormElement>){e.preventDefault();setBusy(true);setError('');const f=new FormData(e.currentTarget);try{const item=await api.createResearch(String(f.get('title')));setCreating(false);await reloadList();await open(item)}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
   async function send(e:React.FormEvent){e.preventDefault();const text=input.trim();if(!project||!text||busy)return;setMessages(old=>[...old,{id:generateUUID(),role:'user',content:text,message_type:'message',metadata:{},created_at:new Date().toISOString()}]);setInput('');setBusy(true);setError('');try{await api.sendResearchMessage(project.id,text);await open(project);await reloadList()}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
   async function generateSpec(){if(!project)return;setBusy(true);setError('');try{const fresh=await api.generateSpecification(project.id);setProject(fresh);setSpecText(JSON.stringify(fresh.specification?.content??{},null,2));await Promise.all([reloadList(),open(fresh)])}catch(e){setError((e as Error).message)}finally{setBusy(false)}}
   async function resolveDecision(decision:ResearchDecision,answer:string){if(!project||!answer.trim()||decisionBusy)return;setDecisionBusy(decision.id);setError('');try{await api.resolveResearchDecision(project.id,decision.id,answer.trim());setDecisionDrafts(old=>{const next={...old};delete next[decision.id];return next});const[d,m]=await Promise.all([api.researchDecisions(project.id),api.researchMessages(project.id)]);setDecisions(d);setMessages(m)}catch(e){setError((e as Error).message)}finally{setDecisionBusy('')}}

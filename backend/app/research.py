@@ -352,8 +352,11 @@ def _project_out(project: ResearchProject, spec: StrategySpecification | None = 
 
 
 @router.get("")
-async def list_projects(client_id: str, db: AsyncSession = Depends(get_db)):
-    rows = (await db.scalars(select(ResearchProject).where(ResearchProject.client_id == client_id).order_by(ResearchProject.updated_at.desc()))).all()
+async def list_projects(client_id: str | None = None, db: AsyncSession = Depends(get_db)):
+    stmt = select(ResearchProject)
+    if client_id:
+        stmt = stmt.where(ResearchProject.client_id == client_id)
+    rows = (await db.scalars(stmt.order_by(ResearchProject.updated_at.desc()))).all()
     return [_project_out(row, await _latest_spec(row.id, db)) for row in rows]
 
 

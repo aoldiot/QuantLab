@@ -1,18 +1,37 @@
-export function generateUUID(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
+function fallbackUUID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    return ('10000000-1000-4000-8000-100000000000').replace(/[018]/g, (c: string) => {
-      const n = Number(c);
-      return (n ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (n / 4)))).toString(16);
-    });
+    try {
+      const buf = new Uint8Array(16);
+      crypto.getRandomValues(buf);
+      buf[6] = (buf[6] & 0x0f) | 0x40; // RFC4122 version 4
+      buf[8] = (buf[8] & 0x3f) | 0x80; // RFC4122 variant
+      const hex = Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    } catch {
+      // Fall through to Math.random
+    }
   }
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+// Preserve reference to native randomUUID if available before polyfilling
+const nativeRandomUUID = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+  ? crypto.randomUUID.bind(crypto)
+  : null;
+
+export function generateUUID(): string {
+  if (nativeRandomUUID) {
+    try {
+      return nativeRandomUUID();
+    } catch {
+      // Fallback if native call fails
+    }
+  }
+  return fallbackUUID();
 }
 
 // Polyfill window.crypto.randomUUID if in insecure context (e.g. HTTP non-localhost)
@@ -22,7 +41,7 @@ if (typeof window !== 'undefined') {
       (window as unknown as { crypto: unknown }).crypto = {};
     }
     if (!window.crypto.randomUUID) {
-      window.crypto.randomUUID = generateUUID as () => `${string}-${string}-${string}-${string}-${string}`;
+      window.crypto.randomUUID = () => fallbackUUID() as `${string}-${string}-${string}-${string}-${string}`;
     }
   } catch {
     // Ignore if property is non-configurable

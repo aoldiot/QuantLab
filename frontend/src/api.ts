@@ -29,15 +29,24 @@ export const api={
   saveGitConfig:(data:unknown)=>request<GitConfiguration>('/settings/git',{method:'PUT',body:JSON.stringify(data)}),
   testGitConfig:()=>request<{ok:boolean;message:string}>('/settings/git/test',{method:'POST'}),
   backupGit:()=>request<{ok:boolean;message:string;files_count:number;commit?:string}>('/settings/git/backup',{method:'POST'}),
-  createAgentSession:(client_id:string,strategy_name:string,permission_mode:PermissionMode)=>request<AgentSession>('/agent/sessions',{method:'POST',body:JSON.stringify({client_id,strategy_name,permission_mode})}),
-  agentSessions:(clientId:string,strategyName:string)=>request<AgentSession[]>(`/agent/sessions?client_id=${encodeURIComponent(clientId)}&strategy_name=${encodeURIComponent(strategyName)}`),
+  createAgentSession:(client_id:string,strategy_name:string,permission_mode:PermissionMode)=>request<AgentSession>('/agent/sessions',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',strategy_name,permission_mode})}),
+  agentSessions:(clientId?:string,strategyName?:string)=>{
+    const qs=new URLSearchParams()
+    if(clientId)qs.set('client_id',clientId)
+    if(strategyName)qs.set('strategy_name',strategyName)
+    const qStr=qs.toString()
+    return request<AgentSession[]>(`/agent/sessions${qStr?'?'+qStr:''}`)
+  },
   agentMessages:(sessionId:string)=>request<AgentStoredMessage[]>(`/agent/sessions/${sessionId}/messages`),
   agentDiff:(sessionId:string)=>request<{diff:string;files:{path:string;additions:number;deletions:number}[];additions:number;deletions:number}>(`/agent/sessions/${sessionId}/diff`),
   applyAgent:(sessionId:string)=>request<{applied:boolean;requires_publish_confirmation:boolean}>(`/agent/sessions/${sessionId}/apply`,{method:'POST',body:JSON.stringify({create_version:false})}),
   rejectAgent:(sessionId:string)=>request<{rejected:boolean}>(`/agent/sessions/${sessionId}/reject`,{method:'POST'}),
   cancelAgent:(sessionId:string)=>request<AgentSession>(`/agent/sessions/${sessionId}/cancel`,{method:'POST'}),
-  researchProjects:(clientId:string)=>request<ResearchProject[]>(`/research?client_id=${encodeURIComponent(clientId)}`),
-  createResearch:(client_id:string,title:string)=>request<ResearchProject>('/research',{method:'POST',body:JSON.stringify({client_id,title})}),
+  researchProjects:(clientId?:string)=>{
+    const qs=clientId?`?client_id=${encodeURIComponent(clientId)}`:''
+    return request<ResearchProject[]>(`/research${qs}`)
+  },
+  createResearch:(title:string,client_id?:string)=>request<ResearchProject>('/research',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',title})}),
   researchProject:(id:string)=>request<ResearchProject>('/research/'+id),
   researchMessages:(id:string)=>request<ResearchMessage[]>(`/research/${id}/messages`),
   sendResearchMessage:(id:string,content:string)=>request<{role:string;content:string;decisions:ResearchDecision[]}>(`/research/${id}/messages`,{method:'POST',body:JSON.stringify({content})}),
@@ -47,13 +56,13 @@ export const api={
   generateSpecification:(id:string)=>request<ResearchProject>(`/research/${id}/specification/generate`,{method:'POST'}),
   updateSpecification:(id:string,specId:string,content:Record<string,any>)=>request<ResearchProject>(`/research/${id}/specification/${specId}`,{method:'PUT',body:JSON.stringify({content})}),
   approveSpecification:(id:string,specId:string)=>request<ResearchProject>(`/research/${id}/specification/${specId}/approve`,{method:'POST'}),
-  createResearchImplementation:(id:string,client_id:string,force:boolean=false)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/implementation`,{method:'POST',body:JSON.stringify({client_id,permission_mode:'acceptEdits',force})}),
+  createResearchImplementation:(id:string,client_id?:string,force:boolean=false)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/implementation`,{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',permission_mode:'acceptEdits',force})}),
   researchStrategyPreview:(id:string)=>request<{module:string;name:string;parameter_schema:Record<string,any>;data_requirements:Record<string,any>}>(`/research/${id}/strategy-preview`),
   publishResearchStrategy:(id:string)=>request<Strategy>(`/research/${id}/publish`,{method:'POST'}),
   researchRuns:(id:string)=>request<ResearchRun[]>(`/research/${id}/backtests`),
   createResearchRun:(id:string,data:unknown)=>request<{id:string;status:string;name:string}>(`/research/${id}/backtests`,{method:'POST',body:JSON.stringify(data)}),
   analyzeResearchRun:(id:string,runId:string)=>request<{role:string;content:string;run_id:string}>(`/research/${id}/backtests/${runId}/analyze`,{method:'POST'}),
-  repairResearchRun:(id:string,runId:string,client_id:string)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/backtests/${runId}/repair`,{method:'POST',body:JSON.stringify({client_id,permission_mode:'acceptEdits'})}),
+  repairResearchRun:(id:string,runId:string,client_id?:string)=>request<{session:AgentSession;strategy_name:string;prompt:string}>(`/research/${id}/backtests/${runId}/repair`,{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',permission_mode:'acceptEdits'})}),
   saveResearchConclusion:(id:string,data:{verdict:'SUPPORTED'|'REJECTED'|'INCONCLUSIVE';summary:string;next_step:string})=>request<ResearchProject>(`/research/${id}/conclusion`,{method:'PUT',body:JSON.stringify(data)}),
   archiveResearch:(id:string)=>request<ResearchProject>(`/research/${id}/archive`,{method:'POST'}),
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),

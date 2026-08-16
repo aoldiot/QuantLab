@@ -697,8 +697,10 @@ async def create_session(data: AgentSessionCreate, db: AsyncSession = Depends(ge
 
 
 @router.get("/sessions")
-async def list_sessions(client_id: str, strategy_name: str | None = None, db: AsyncSession = Depends(get_db)):
-    query_stmt = select(AgentSession).where(AgentSession.client_id == client_id)
+async def list_sessions(client_id: str | None = None, strategy_name: str | None = None, db: AsyncSession = Depends(get_db)):
+    query_stmt = select(AgentSession)
+    if client_id:
+        query_stmt = query_stmt.where(AgentSession.client_id == client_id)
     if strategy_name:
         query_stmt = query_stmt.where(AgentSession.strategy_name == strategy_name)
     rows = (await db.scalars(query_stmt.order_by(AgentSession.updated_at.desc()))).all()
