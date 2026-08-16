@@ -119,3 +119,32 @@ def test_ensure_catalog_coverage_lenient(tmp_path):
         ensure_catalog_coverage(run_config, ignore_missing=False)
 
 
+def test_scan_catalog_summary_pagination(tmp_path):
+    from pathlib import Path
+    from app.data_downloads import scan_catalog_summary
+    from app.config import settings
+    import os
+
+    cat_path = tmp_path / "catalog"
+    bar_dir = cat_path / "data" / "bar"
+    bar_dir.mkdir(parents=True)
+
+    # Test on empty catalog
+    res = scan_catalog_summary(cat_path, page=1, page_size=20)
+    assert res["total_symbols"] == 0
+    assert res["page"] == 1
+    assert res["total_pages"] == 1
+    assert res["items"] == []
+
+    # Test on real local catalog if it exists
+    real_cat = Path(settings.catalog_path).resolve()
+    if real_cat.exists():
+        summary = scan_catalog_summary(real_cat, page=1, page_size=2)
+        assert "total_symbols" in summary
+        assert "items" in summary
+        assert len(summary["items"]) <= 2
+        assert summary["page"] == 1
+        assert summary["page_size"] == 2
+
+
+

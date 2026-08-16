@@ -24,9 +24,9 @@ import {
   Trash2,
   Zap,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import type { CatalogSummary, CatalogSymbolItem } from '../types'
+import type { CatalogSummary, CatalogSymbolItem, CatalogTimeframeItem } from '../types'
 
 const intervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
 const yesterday = () => {
@@ -114,10 +114,13 @@ export default function DataDownloads() {
   const [catalogSummary, setCatalogSummary] = useState<CatalogSummary | null>(null)
   const [catalogError, setCatalogError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [marketFilter, setMarketFilter] = useState<'all' | 'um' | 'spot'>('all')
   const [intervalFilter, setIntervalFilter] = useState<string>('all')
   const [sortBy, setSortBy] = useState<'symbol' | 'bars' | 'size' | 'start' | 'end'>('symbol')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
   const [expandedSymbols, setExpandedSymbols] = useState<Set<string>>(new Set())
   const [deleteTarget, setDeleteTarget] = useState<{ symbol: string; instrument_id: string; interval?: string } | null>(null)
   const [deleting, setDeleting] = useState(false)
@@ -137,6 +140,15 @@ export default function DataDownloads() {
   const [error, setError] = useState('')
   const logStreamRef = useRef<HTMLDivElement | null>(null)
 
+  // Debounce search query
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery)
+      setPage(1)
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [searchQuery])
+
   // Switch Tab helper
   const handleTabChange = (tab: 'catalog' | 'download') => {
     setActiveTab(tab)
@@ -147,23 +159,35 @@ export default function DataDownloads() {
     }
   }
 
-  // Load Catalog Summary
-  const fetchCatalog = async () => {
-    setCatalogLoading(true)
-    setCatalogError('')
-    try {
-      const summary = await api.dataCatalogSummary()
-      setCatalogSummary(summary)
-    } catch (err) {
-      setCatalogError(err instanceof Error ? err.message : '读取 Catalog 数据资产失败')
-    } finally {
-      setCatalogLoading(false)
-    }
-  }
+  // Load Catalog Summary with pagination
+  const fetchCatalog = useCallback(
+    async (targetPage = page, targetPageSize = pageSize) => {
+      setCatalogLoading(true)
+      setCatalogError('')
+      try {
+        const summary = await api.dataCatalogSummary({
+          page: targetPage,
+          page_size: targetPageSize,
+          query: debouncedSearch.trim() || undefined,
+          market_type: marketFilter !== 'all' ? marketFilter : undefined,
+          interval: intervalFilter !== 'all' ? intervalFilter : undefined,
+          sort_by: sortBy,
+          sort_order: sortOrder,
+          catalog_path: catalogPath.trim() || undefined,
+        })
+        setCatalogSummary(summary)
+      } catch (err) {
+        setCatalogError(err instanceof Error ? err.message : '读取 Catalog 数据资产失败')
+      } finally {
+        setCatalogLoading(false)
+      }
+    },
+    [page, pageSize, debouncedSearch, marketFilter, intervalFilter, sortBy, sortOrder, catalogPath],
+  )
 
   useEffect(() => {
-    fetchCatalog()
-  }, [])
+    fetchCatalog(page, pageSize)
+  }, [page, pageSize, debouncedSearch, marketFilter, intervalFilter, sortBy, sortOrder, catalogPath])
 
   // Save form settings to localStorage
   useEffect(() => {
@@ -349,8 +373,8 @@ export default function DataDownloads() {
     if (!deleteTarget) return
     setDeleting(true)
     try {
-      await api.deleteCatalogSymbol(deleteTarget.instrument_id, deleteTarget.interval)
-      await fetchCatalog()
+      await api.deleteCatalogSymbol(deleteTarget.instrument_id, deleteTarget.interval, catalogPath.trim() || undefined)
+      await fetchCatalog(page, pageSize)
       setDeleteTarget(null)
     } catch (err) {
       setCatalogError(err instanceof Error ? err.message : '删除数据失败')
@@ -359,36 +383,7 @@ export default function DataDownloads() {
     }
   }
 
-  // Filtered & Sorted Catalog Items
-  const filteredCatalogItems = useMemo(() => {
-    if (!catalogSummary) return []
-    let list = [...catalogSummary.items]
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.trim().toUpperCase()
-      list = list.filter((x) => x.symbol.toUpperCase().includes(q) || x.instrument_id.toUpperCase().includes(q))
-    }
-
-    if (marketFilter !== 'all') {
-      list = list.filter((x) => x.market_type === marketFilter)
-    }
-
-    if (intervalFilter !== 'all') {
-      list = list.filter((x) => x.timeframes.some((tf) => tf.interval === intervalFilter))
-    }
-
-    list.sort((a, b) => {
-      let cmp = 0
-      if (sortBy === 'symbol') cmp = a.symbol.localeCompare(b.symbol)
-      else if (sortBy === 'bars') cmp = a.total_bars - b.total_bars
-      else if (sortBy === 'size') cmp = a.total_size_bytes - b.total_size_bytes
-      else if (sortBy === 'start') cmp = (a.start_date || '').localeCompare(b.start_date || '')
-      else if (sortBy === 'end') cmp = (a.end_date || '').localeCompare(b.end_date || '')
-      return sortOrder === 'asc' ? cmp : -cmp
-    })
-
-    return list
-  }, [catalogSummary, searchQuery, marketFilter, intervalFilter, sortBy, sortOrder])
+  const catalogItems = catalogSummary?.items ?? []
 
   return (
     <>
@@ -399,7 +394,7 @@ export default function DataDownloads() {
         </div>
         <div className="actions">
           {activeTab === 'catalog' && (
-            <button className="button" onClick={fetchCatalog} disabled={catalogLoading}>
+            <button className="button" onClick={() => fetchCatalog(page, pageSize)} disabled={catalogLoading}>
               <RefreshCw className={catalogLoading ? 'spin' : ''} size={14} />
               刷新资产
             </button>
@@ -453,8 +448,7 @@ export default function DataDownloads() {
                 <span>标的总数</span>
                 <strong>{catalogSummary?.total_symbols ?? 0} 个</strong>
                 <small>
-                  {catalogSummary?.items.filter((x) => x.market_type === 'um').length ?? 0} 永续 ·{' '}
-                  {catalogSummary?.items.filter((x) => x.market_type === 'spot').length ?? 0} 现货
+                  全量 Catalog 包含 {catalogSummary?.all_symbols_count ?? 0} 个标的
                 </small>
               </div>
             </div>
@@ -526,7 +520,13 @@ export default function DataDownloads() {
             <div className="toolbar-filters">
               <label>
                 <span>交易类型</span>
-                <select value={marketFilter} onChange={(e) => setMarketFilter(e.target.value as any)}>
+                <select
+                  value={marketFilter}
+                  onChange={(e) => {
+                    setMarketFilter(e.target.value as any)
+                    setPage(1)
+                  }}
+                >
                   <option value="all">全部类型</option>
                   <option value="um">U 本位永续 (UM)</option>
                   <option value="spot">现货 (Spot)</option>
@@ -535,7 +535,13 @@ export default function DataDownloads() {
 
               <label>
                 <span>K 线周期</span>
-                <select value={intervalFilter} onChange={(e) => setIntervalFilter(e.target.value)}>
+                <select
+                  value={intervalFilter}
+                  onChange={(e) => {
+                    setIntervalFilter(e.target.value)
+                    setPage(1)
+                  }}
+                >
                   <option value="all">全部周期</option>
                   {intervals.map((tf) => (
                     <option key={tf} value={tf}>
@@ -547,7 +553,13 @@ export default function DataDownloads() {
 
               <label>
                 <span>排序方式</span>
-                <select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)}>
+                <select
+                  value={sortBy}
+                  onChange={(e) => {
+                    setSortBy(e.target.value as any)
+                    setPage(1)
+                  }}
+                >
                   <option value="symbol">按标的名称</option>
                   <option value="bars">按 K 线总数</option>
                   <option value="size">按占用体积</option>
@@ -560,7 +572,10 @@ export default function DataDownloads() {
                 type="button"
                 className="sort-direction-btn"
                 title={sortOrder === 'asc' ? '当前：升序 (点击切换降序)' : '当前：降序 (点击切换升序)'}
-                onClick={() => setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))}
+                onClick={() => {
+                  setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+                  setPage(1)
+                }}
               >
                 <ArrowDownUp size={14} />
                 <span>{sortOrder === 'asc' ? '升序' : '降序'}</span>
@@ -575,9 +590,9 @@ export default function DataDownloads() {
             {catalogLoading && !catalogSummary ? (
               <div className="catalog-empty">
                 <LoaderCircle className="spin" size={32} />
-                <span>正在扫描 Catalog 数据资产...</span>
+                <span>正在快速检索 Catalog 数据资产...</span>
               </div>
-            ) : filteredCatalogItems.length === 0 ? (
+            ) : catalogItems.length === 0 ? (
               <div className="catalog-empty">
                 <Database size={40} />
                 <h3>未找到匹配的行情数据</h3>
@@ -597,44 +612,116 @@ export default function DataDownloads() {
                 </button>
               </div>
             ) : (
-              <table className="catalog-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: 36 }}></th>
-                    <th>标的名称 / 编号</th>
-                    <th>类型</th>
-                    <th>覆盖时间范围 (UTC)</th>
-                    <th>K 线周期</th>
-                    <th style={{ textAlign: 'right' }}>总 K 线条数</th>
-                    <th style={{ textAlign: 'right' }}>存储体积</th>
-                    <th style={{ textAlign: 'center', width: 140 }}>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredCatalogItems.map((item) => {
-                    const isExpanded = expandedSymbols.has(item.instrument_id)
-                    const daysSpan = calculateDaysSpan(item.start_date, item.end_date)
-                    return (
-                      <SymbolRows
-                        key={item.instrument_id}
-                        item={item}
-                        isExpanded={isExpanded}
-                        daysSpan={daysSpan}
-                        onToggleExpand={() => toggleExpandSymbol(item.instrument_id)}
-                        onRefillDownload={(interval) => handleRefillDownload(item, interval)}
-                        onDeleteSymbol={() => setDeleteTarget({ symbol: item.symbol, instrument_id: item.instrument_id })}
-                        onDeleteInterval={(interval) =>
-                          setDeleteTarget({
-                            symbol: item.symbol,
-                            instrument_id: item.instrument_id,
-                            interval,
-                          })
-                        }
-                      />
-                    )
-                  })}
-                </tbody>
-              </table>
+              <>
+                <table className="catalog-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 36 }}></th>
+                      <th>标的名称 / 编号</th>
+                      <th>类型</th>
+                      <th>覆盖时间范围 (UTC)</th>
+                      <th>K 线周期</th>
+                      <th style={{ textAlign: 'right' }}>总 K 线条数</th>
+                      <th style={{ textAlign: 'right' }}>存储体积</th>
+                      <th style={{ textAlign: 'center', width: 140 }}>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {catalogItems.map((item) => {
+                      const isExpanded = expandedSymbols.has(item.instrument_id)
+                      const daysSpan = calculateDaysSpan(item.start_date, item.end_date)
+                      return (
+                        <SymbolRows
+                          key={item.instrument_id}
+                          item={item}
+                          isExpanded={isExpanded}
+                          daysSpan={daysSpan}
+                          onToggleExpand={() => toggleExpandSymbol(item.instrument_id)}
+                          onRefillDownload={(interval) => handleRefillDownload(item, interval)}
+                          onDeleteSymbol={() => setDeleteTarget({ symbol: item.symbol, instrument_id: item.instrument_id })}
+                          onDeleteInterval={(interval) =>
+                            setDeleteTarget({
+                              symbol: item.symbol,
+                              instrument_id: item.instrument_id,
+                              interval,
+                            })
+                          }
+                        />
+                      )
+                    })}
+                  </tbody>
+                </table>
+
+                {/* Pagination Controls */}
+                {catalogSummary && catalogSummary.total_symbols > 0 && (
+                  <div className="catalog-pagination">
+                    <div className="pagination-info">
+                      <span>
+                        显示第 <strong>{(catalogSummary.page - 1) * catalogSummary.page_size + 1}</strong> -{' '}
+                        <strong>{Math.min(catalogSummary.page * catalogSummary.page_size, catalogSummary.total_symbols)}</strong> 条，共{' '}
+                        <strong>{catalogSummary.total_symbols}</strong> 条标的
+                      </span>
+                      <div className="page-size-selector">
+                        <span>每页条数：</span>
+                        <select
+                          value={pageSize}
+                          onChange={(e) => {
+                            setPageSize(Number(e.target.value))
+                            setPage(1)
+                          }}
+                        >
+                          <option value={10}>10 条 / 页</option>
+                          <option value={20}>20 条 / 页</option>
+                          <option value={50}>50 条 / 页</option>
+                          <option value={100}>100 条 / 页</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {catalogSummary.total_pages > 1 && (
+                      <div className="pagination-controls">
+                        <button
+                          type="button"
+                          className="page-btn"
+                          disabled={catalogSummary.page <= 1 || catalogLoading}
+                          onClick={() => setPage(1)}
+                          title="首页"
+                        >
+                          首页
+                        </button>
+                        <button
+                          type="button"
+                          className="page-btn"
+                          disabled={catalogSummary.page <= 1 || catalogLoading}
+                          onClick={() => setPage((p) => Math.max(1, p - 1))}
+                          title="上一页"
+                        >
+                          上一页
+                        </button>
+                        {renderPaginationButtons(catalogSummary.page, catalogSummary.total_pages, (p) => setPage(p))}
+                        <button
+                          type="button"
+                          className="page-btn"
+                          disabled={catalogSummary.page >= catalogSummary.total_pages || catalogLoading}
+                          onClick={() => setPage((p) => Math.min(catalogSummary.total_pages, p + 1))}
+                          title="下一页"
+                        >
+                          下一页
+                        </button>
+                        <button
+                          type="button"
+                          className="page-btn"
+                          disabled={catalogSummary.page >= catalogSummary.total_pages || catalogLoading}
+                          onClick={() => setPage(catalogSummary.total_pages)}
+                          title="尾页"
+                        >
+                          尾页
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -1047,3 +1134,38 @@ function SymbolRows({
     </>
   )
 }
+
+function renderPaginationButtons(current: number, total: number, onSelect: (page: number) => void) {
+  if (total <= 1) return null
+  const pages: (number | string)[] = []
+  if (total <= 7) {
+    for (let i = 1; i <= total; i++) pages.push(i)
+  } else {
+    pages.push(1)
+    if (current > 3) pages.push('ellipsis-start')
+    const start = Math.max(2, current - 1)
+    const end = Math.min(total - 1, current + 1)
+    for (let i = start; i <= end; i++) {
+      pages.push(i)
+    }
+    if (current < total - 2) pages.push('ellipsis-end')
+    pages.push(total)
+  }
+
+  return pages.map((p, idx) => {
+    if (typeof p === 'string') {
+      return <span key={`ell-${idx}`} className="page-ellipsis">…</span>
+    }
+    return (
+      <button
+        key={`page-${p}`}
+        type="button"
+        className={`page-btn ${p === current ? 'active' : ''}`}
+        onClick={() => onSelect(p as number)}
+      >
+        {p}
+      </button>
+    )
+  })
+}
+

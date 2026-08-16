@@ -107,8 +107,8 @@ export const api={
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),
   iterateResearch:(id:string,data:{target:'DISCUSSING'|'SPEC_REVIEW'|'READY_FOR_BACKTEST';reason:string})=>request<ResearchProject>(`/research/${id}/iterate`,{method:'POST',body:JSON.stringify(data)}),
   dataSymbols:(marketType:string)=>request<{symbol:string;base:string;quote:string}[]>(`/data/symbols?market_type=${marketType}`),
-  dataCatalogSummary:(params?:Record<string,string>)=>{
-    const qs=params?new URLSearchParams(Object.entries(params).filter(([_,v])=>Boolean(v))).toString():''
+  dataCatalogSummary:(params?:Record<string,string|number|undefined|null>)=>{
+    const qs=params?new URLSearchParams(Object.entries(params).filter(([_,v])=>v!==undefined&&v!==null&&v!=='').map(([k,v])=>[k,String(v)])).toString():''
     return request<import('./types').CatalogSummary>(`/data/catalog/summary${qs?'?'+qs:''}`)
   },
   deleteCatalogSymbol:(instrumentId:string,interval?:string,catalogPath?:string)=>{

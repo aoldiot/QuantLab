@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import re
 import shutil
 import ssl
@@ -23,7 +24,7 @@ from typing import Any
 
 import httpx
 import pyarrow.parquet as pq
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
 from nautilus_trader.model.instruments import CryptoPerpetual, CurrencyPair
@@ -650,18 +651,58 @@ def parse_spec_to_interval(spec: str) -> str:
     return f"{num}{u_map.get(unit, unit.lower())}"
 
 
-def scan_catalog_summary(
-    catalog_path: Path,
-    query: str | None = None,
-    market_type: str | None = None,
-    interval: str | None = None,
-    start_date: date | None = None,
-    end_date: date | None = None,
-) -> dict[str, Any]:
-    """Scan and aggregate statistics for all instruments in the Parquet Data Catalog."""
-    catalog_path = catalog_path.expanduser().resolve()
-    bar_dir = catalog_path / "data" / "bar"
-    manifest_path, manifest = _manifest(catalog_path)
+# In-memory file cache: {file_path: (st_mtime_ns, st_size, num_rows, min_ts, max_ts)}
+_PARQUET_FILE_CACHE: dict[str, tuple[int, int, int, int | None, int | None]] = {}
+_CATALOG_INSTRUMENTS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _get_parquet_file_stats(file_path: str, st_mtime_ns: int, st_size: int) -> tuple[int, int | None, int | None]:
+    """Get row count, min timestamp (ns), max timestamp (ns) for a Parquet file using stat cache & footer column stats."""
+    cached = _PARQUET_FILE_CACHE.get(file_path)
+    if cached and cached[0] == st_mtime_ns and cached[1] == st_size:
+        return cached[2], cached[3], cached[4]
+
+    num_rows = 0
+    min_ts = None
+    max_ts = None
+    try:
+        meta = pq.read_metadata(file_path)
+        num_rows = meta.num_rows
+        # Extract timestamp min/max directly from footer column statistics without reading table data
+        for rg_idx in range(meta.num_row_groups):
+            rg = meta.row_group(rg_idx)
+            for col_idx in range(rg.num_columns):
+                col = rg.column(col_idx)
+                if col.path_in_schema in ("ts_init", "ts_event") and col.is_stats_set:
+                    c_min, c_max = col.statistics.min, col.statistics.max
+                    if c_min is not None:
+                        min_ts = c_min if min_ts is None else min(min_ts, c_min)
+                    if c_max is not None:
+                        max_ts = c_max if max_ts is None else max(max_ts, c_max)
+                    break
+    except Exception:
+        pass
+
+    # Fallback to reading ts_init column only if footer stats are missing
+    if (min_ts is None or max_ts is None) and num_rows > 0:
+        try:
+            t = pq.read_table(file_path, columns=["ts_init"])
+            ts_list = t["ts_init"].to_pylist()
+            if ts_list:
+                min_ts, max_ts = min(ts_list), max(ts_list)
+        except Exception:
+            pass
+
+    _PARQUET_FILE_CACHE[file_path] = (st_mtime_ns, st_size, num_rows, min_ts, max_ts)
+    return num_rows, min_ts, max_ts
+
+
+def _get_registered_instruments(catalog_path: Path) -> dict[str, Any]:
+    cat_key = str(catalog_path)
+    now = time.monotonic()
+    cached = _CATALOG_INSTRUMENTS_CACHE.get(cat_key)
+    if cached and (now - cached[0] < 60.0):
+        return cached[1]
 
     registered_instruments: dict[str, Any] = {}
     try:
@@ -671,6 +712,28 @@ def scan_catalog_summary(
                 registered_instruments[inst.id.value] = inst
     except Exception as err:
         logger.warning("读取 Catalog Instruments 失败: %s", err)
+
+    _CATALOG_INSTRUMENTS_CACHE[cat_key] = (now, registered_instruments)
+    return registered_instruments
+
+
+def scan_catalog_summary(
+    catalog_path: Path,
+    query: str | None = None,
+    market_type: str | None = None,
+    interval: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: str = "symbol",
+    sort_order: str = "asc",
+) -> dict[str, Any]:
+    """Scan and aggregate statistics for all instruments in the Parquet Data Catalog with high performance caching & pagination."""
+    catalog_path = catalog_path.expanduser().resolve()
+    bar_dir = catalog_path / "data" / "bar"
+
+    registered_instruments = _get_registered_instruments(catalog_path)
 
     symbols_map: dict[str, dict[str, Any]] = {}
     total_catalog_bars = 0
@@ -696,20 +759,14 @@ def scan_catalog_summary(
             parquet_files = sorted(d.glob("*.parquet"))
 
             for f in parquet_files:
-                st = f.stat()
-                tf_size += st.st_size
                 try:
-                    meta = pq.read_metadata(f)
-                    tf_bars += meta.num_rows
-                except Exception:
-                    pass
-
-                try:
-                    t = pq.read_table(f, columns=["ts_init"])
-                    ts_list = t["ts_init"].to_pylist()
-                    if ts_list:
-                        f_min, f_max = min(ts_list), max(ts_list)
+                    st = f.stat()
+                    tf_size += st.st_size
+                    f_rows, f_min, f_max = _get_parquet_file_stats(str(f), st.st_mtime_ns, st.st_size)
+                    tf_bars += f_rows
+                    if f_min is not None:
                         tf_start = f_min if tf_start is None else min(tf_start, f_min)
+                    if f_max is not None:
                         tf_end = f_max if tf_end is None else max(tf_end, f_max)
                 except Exception:
                     pass
@@ -768,7 +825,7 @@ def scan_catalog_summary(
             })
 
     all_timeframes_set: set[str] = set()
-    items: list[dict[str, Any]] = []
+    filtered_items: list[dict[str, Any]] = []
 
     for inst_id, entry in symbols_map.items():
         min_ns = entry.pop("_min_ns", None)
@@ -789,7 +846,7 @@ def scan_catalog_summary(
 
         if query:
             q = query.strip().upper()
-            if q not in entry["symbol"].upper() and q not in inst_id.upper():
+            if q not in entry["symbol"].upper() and q not in inst_id.upper() and q not in entry["base_currency"].upper():
                 continue
 
         if market_type and market_type != "all":
@@ -808,20 +865,51 @@ def scan_catalog_summary(
             if entry["start_date"] > end_date.isoformat():
                 continue
 
-        items.append(entry)
+        filtered_items.append(entry)
 
-    items.sort(key=lambda x: x["symbol"])
+    # Sort filtered items
+    reverse = (sort_order == "desc")
+    if sort_by == "bars":
+        filtered_items.sort(key=lambda x: x["total_bars"], reverse=reverse)
+    elif sort_by == "size":
+        filtered_items.sort(key=lambda x: x["total_size_bytes"], reverse=reverse)
+    elif sort_by == "start":
+        filtered_items.sort(key=lambda x: x["start_date"] or "", reverse=reverse)
+    elif sort_by == "end":
+        filtered_items.sort(key=lambda x: x["end_date"] or "", reverse=reverse)
+    else:
+        filtered_items.sort(key=lambda x: x["symbol"], reverse=reverse)
+
+    total_filtered_symbols = len(filtered_items)
+    total_filtered_bars = sum(x["total_bars"] for x in filtered_items)
+    total_filtered_size = sum(x["total_size_bytes"] for x in filtered_items)
+
+    # Pagination
+    if page_size > 0:
+        total_pages = max(1, math.ceil(total_filtered_symbols / page_size)) if total_filtered_symbols > 0 else 1
+        page = min(max(1, page), total_pages)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paged_items = filtered_items[start_idx:end_idx]
+    else:
+        page = 1
+        page_size = total_filtered_symbols
+        total_pages = 1
+        paged_items = filtered_items
 
     return {
         "catalog_path": str(catalog_path),
-        "total_symbols": len(items),
-        "total_bars": sum(x["total_bars"] for x in items),
-        "total_size_bytes": sum(x["total_size_bytes"] for x in items),
+        "total_symbols": total_filtered_symbols,
+        "total_bars": total_filtered_bars,
+        "total_size_bytes": total_filtered_size,
         "all_symbols_count": len(symbols_map),
         "all_bars_count": total_catalog_bars,
         "all_size_bytes": total_catalog_size,
         "available_timeframes": sorted(all_timeframes_set),
-        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "items": paged_items,
     }
 
 
@@ -831,6 +919,13 @@ def delete_catalog_symbol_data(catalog_path: Path, instrument_id: str, interval:
     bar_dir = catalog_path / "data" / "bar"
     manifest_path, manifest = _manifest(catalog_path)
     deleted_anything = False
+
+    # Invalidate cache for deleted items
+    _CATALOG_INSTRUMENTS_CACHE.pop(str(catalog_path), None)
+    cached_keys = list(_PARQUET_FILE_CACHE.keys())
+    for k in cached_keys:
+        if instrument_id in k:
+            _PARQUET_FILE_CACHE.pop(k, None)
 
     if bar_dir.exists():
         for d in list(bar_dir.iterdir()):
@@ -874,6 +969,10 @@ def catalog_summary(
     start_date: date | None = None,
     end_date: date | None = None,
     catalog_path: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=0, le=500),
+    sort_by: str = Query("symbol"),
+    sort_order: str = Query("asc"),
 ):
     path = Path(catalog_path or settings.catalog_path)
     return scan_catalog_summary(
@@ -883,6 +982,10 @@ def catalog_summary(
         interval=interval,
         start_date=start_date,
         end_date=end_date,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
 
 
