@@ -226,3 +226,13 @@ class ResearchConclusionUpdate(BaseModel):
 class ResearchIterationCreate(BaseModel):
     target: Literal["DISCUSSING", "SPEC_REVIEW", "READY_FOR_BACKTEST"]
     reason: str = Field(min_length=1, max_length=5_000)
+
+
+class ResearchWriteStrategyRequest(BaseModel):
+    strategy_name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    instructions: str = Field(min_length=1, max_length=50_000)
+    specification: dict[str, Any] | None = None
+    is_fix: bool = False
+    error_context: str | None = Field(default=None, max_length=50_000)
+    project_id: str | None = None
+

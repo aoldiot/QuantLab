@@ -66,9 +66,15 @@ async def test_public_and_protected_routes():
         res_health = await ac.get("/api/health")
         assert res_health.status_code == 200
 
+        # /api/research/tools/ is public (no token needed)
+        res_tools = await ac.post("/api/research/tools/write-strategy", json={"strategy_name": "invalid name", "instructions": "test"})
+        # Should reach endpoint validation (422 or 400), not blocked with 401
+        assert res_tools.status_code != 401
+
         # Protected route without token -> 401
         res_no_token = await ac.get("/api/strategies")
         assert res_no_token.status_code == 401
+
 
         # Protected route with invalid token -> 401
         res_bad_token = await ac.get("/api/strategies", headers={"Authorization": "Bearer bad-token"})

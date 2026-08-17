@@ -22,7 +22,7 @@ export type AgentStoredMessage={id:string;role:string;event_type:string;content:
 export type ResearchSpecification={id:string;version:number;status:'DRAFT'|'APPROVED'|'SUPERSEDED';content:Record<string,any>;created_at:string;approved_at:string|null}
 export type ResearchConclusion={verdict:'SUPPORTED'|'REJECTED'|'INCONCLUSIVE';summary:string;next_step:string}
 export type ResearchProject={id:string;client_id:string;title:string;original_idea:string;status:string;strategy_id:string|null;implementation_session_id:string|null;latest_backtest_id:string|null;conclusion:ResearchConclusion|null;archived_at:string|null;created_at:string;updated_at:string;specification:ResearchSpecification|null;is_busy?:boolean}
-export type ResearchMessage={id:string;role:'user'|'assistant'|'system';content:string;message_type:string;metadata:Record<string,any>;created_at:string}
+export type ResearchMessage={id:string;role:'user'|'assistant'|'system'|'tool';content:string;message_type:string;metadata:Record<string,any>;created_at:string}
 export type ResearchDecision={id:string;question:string;options:string[];recommendation:string|null;impact:string|null;status:'PENDING'|'RESOLVED'|'DISMISSED';answer:string|null;origin:'DISCUSSION'|'SPECIFICATION';source_message_id:string|null;created_at:string;resolved_at:string|null}
 export type ResearchRun={id:string;name:string;status:string;stage:string;progress:number;metrics:Record<string,number|null>|null;error_message?:string|null;config?:Record<string,any>|null;created_at:string}
 export interface CatalogTimeframeItem{interval:string;spec:string;bar_type:string;bars:number;size_bytes:number;file_count:number;start_time:string|null;end_time:string|null;start_date:string|null;end_date:string|null}

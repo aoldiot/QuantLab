@@ -241,28 +241,43 @@ async def test_hermes_configuration(db: AsyncSession = Depends(get_db)):
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    body = {
-        "model": model,
-        "conversation": f"quantlab-test-{uuid.uuid4()}",
-        "input": "测试连接。请只回复 quantlab-hermes-ok",
-        "instructions": "严格只回复 quantlab-hermes-ok",
-        "store": False,
-    }
+
+    clean_url = base_url.rstrip("/")
+    if clean_url.endswith("/v1") or "/v1" in clean_url:
+        endpoint = f"{clean_url}/chat/completions"
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "测试连接。请只回复 quantlab-hermes-ok"}],
+        }
+    else:
+        endpoint = f"{clean_url}/responses"
+        body = {
+            "model": model,
+            "conversation": f"quantlab-test-{uuid.uuid4()}",
+            "input": "测试连接。请只回复 quantlab-hermes-ok",
+            "instructions": "严格只回复 quantlab-hermes-ok",
+            "store": False,
+        }
+
     timeout = httpx.Timeout(min(timeout_seconds, 30))
     result_text = ""
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{base_url.rstrip('/')}/responses", headers=headers, json=body)
+            resp = await client.post(endpoint, headers=headers, json=body)
             resp.raise_for_status()
             data = resp.json()
-            texts = []
-            for item in data.get("output", []):
-                for part in item.get("content", []):
-                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                        texts.append(part["text"])
-            if not texts and isinstance(data.get("output_text"), str):
-                texts.append(data["output_text"])
-            result_text = "\n".join(texts).strip() or resp.text
+            choices = data.get("choices", [])
+            if choices:
+                result_text = choices[0].get("message", {}).get("content", "")
+            else:
+                texts = []
+                for item in data.get("output", []):
+                    for part in item.get("content", []):
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            texts.append(part["text"])
+                if not texts and isinstance(data.get("output_text"), str):
+                    texts.append(data["output_text"])
+                result_text = "\n".join(texts).strip() or resp.text
         if config:
             config.hermes_last_test_ok = True
             config.hermes_last_test_message = result_text[:500] or "Hermes 连接成功"

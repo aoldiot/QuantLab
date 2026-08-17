@@ -738,6 +738,12 @@ function groupMessagesIntoTurns(
       continue
     }
 
+    if (msg.role === 'tool') {
+      // All tool execution results belong to processItems
+      addToolOutput(msg)
+      continue
+    }
+
     if (msg.message_type === 'code_approval' || msg.metadata?.code_approval) {
       if (msg.metadata?.reasoning_content?.trim()) {
         currentTurn.processItems.push({
@@ -746,7 +752,12 @@ function groupMessagesIntoTurns(
           thought: msg.metadata.reasoning_content,
         })
       }
-      currentTurn.responseMessages.push(msg)
+      const alreadyHasApproval = currentTurn.responseMessages.some(
+        m => m.message_type === 'code_approval' || m.metadata?.code_approval
+      )
+      if (!alreadyHasApproval) {
+        currentTurn.responseMessages.push(msg)
+      }
       continue
     }
 
@@ -758,7 +769,12 @@ function groupMessagesIntoTurns(
           thought: msg.metadata.reasoning_content,
         })
       }
-      currentTurn.responseMessages.push(msg)
+      const alreadyHasParams = currentTurn.responseMessages.some(
+        m => m.message_type === 'backtest_params' || m.metadata?.backtest_params
+      )
+      if (!alreadyHasParams) {
+        currentTurn.responseMessages.push(msg)
+      }
       continue
     }
 
@@ -770,11 +786,14 @@ function groupMessagesIntoTurns(
           thought: msg.metadata.reasoning_content,
         })
       }
-      currentTurn.responseMessages.push(msg)
+      const isDuplicate = currentTurn.responseMessages.some(
+        m => m.id === msg.id || (m.content && m.content.trim() === msg.content.trim())
+      )
+      if (!isDuplicate) {
+        currentTurn.responseMessages.push(msg)
+      }
       continue
     }
-
-    currentTurn.responseMessages.push(msg)
   }
 
   if (currentTurn.userMessage || currentTurn.processItems.length > 0 || currentTurn.responseMessages.length > 0) {
@@ -1470,6 +1489,7 @@ export default function Research(){
 
   const timeline=useRef<HTMLDivElement|null>(null)
   const textareaRef=useRef<HTMLTextAreaElement|null>(null)
+  const isComposingRef=useRef(false)
   const autoScrollRef=useRef(true)
   const[showScrollBottom,setShowScrollBottom]=useState(false)
 
@@ -1941,6 +1961,10 @@ export default function Research(){
 
   function handleKeyDown(e:React.KeyboardEvent<HTMLTextAreaElement>){
     if(e.key==='Enter'&&!e.shiftKey){
+      // 中文/日文等 IME 输入法正在选词输入中，不触发发送
+      if(e.nativeEvent.isComposing || isComposingRef.current || e.keyCode === 229){
+        return
+      }
       e.preventDefault()
       handleSend()
     }
@@ -2475,6 +2499,8 @@ export default function Research(){
                     value={input}
                     onChange={e=>setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
+                    onCompositionStart={()=>{isComposingRef.current=true}}
+                    onCompositionEnd={()=>{isComposingRef.current=false}}
                     disabled={busy||project.status==='ARCHIVED'}
                   />
                   <button

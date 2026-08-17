@@ -135,6 +135,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/redoc",
         "/api/openapi.json",
     }
+    PUBLIC_PREFIX_PATHS = (
+        "/api/research/tools/",
+        "/api/health",
+    )
 
     async def dispatch(self, request: Request, call_next):
         # Allow CORS preflight requests
@@ -148,8 +152,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Allow public whitelist paths
-        if path in self.PUBLIC_EXACT_PATHS:
+        if path in self.PUBLIC_EXACT_PATHS or any(path.startswith(prefix) for prefix in self.PUBLIC_PREFIX_PATHS):
             return await call_next(request)
+
 
         # Extract token from Header or Query Param
         auth_header = request.headers.get("Authorization")

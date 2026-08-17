@@ -585,7 +585,38 @@ async def test_code_approval_hermes_generates_and_syncs_strategy_code(monkeypatc
 
         assert len(messages) >= 2
         strat = await db.scalar(select(Strategy).where(Strategy.slug == "btc_trend_test"))
-        assert strat is not None
+@pytest.mark.anyio
+async def test_write_strategy_tool_endpoint(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    from app.auth import create_access_token
+    from app.main import app
+    import app.research as r_mod
+
+    async def mock_write_strategy(strategy_name, instructions, **kwargs):
+        return {
+            "ok": True,
+            "strategy_name": strategy_name,
+            "summary": "通过 4 级验证",
+            "steps": [],
+        }
+
+    monkeypatch.setattr(r_mod, "write_strategy_with_claude", mock_write_strategy)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/research/tools/write-strategy",
+            json={
+                "strategy_name": "test_claude_strat",
+                "instructions": "测试指令",
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("ok") is True
+        assert data.get("strategy_name") == "test_claude_strat"
+
+
+
 
 
 

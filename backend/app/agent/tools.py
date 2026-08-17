@@ -502,21 +502,22 @@ async def write_strategy_with_claude(
             cwd=Path(repo_path),
             model=cfg.model if cfg else None,
             env=env,
-            tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill"],
+            tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
             allowed_tools=[
                 "Read",
                 "Glob",
                 "Grep",
                 "Edit",
                 "Write",
-                "Skill(nautilus-strategy-author)",
+                "Bash",
             ],
             permission_mode="bypassPermissions",
-            skills=["nautilus-strategy-author"],
+            setting_sources=[],
             max_turns=cfg.max_turns or 60 if cfg else 60,
             system_prompt=NAUTILUS_DEVELOPER_GUIDE,
-            enable_file_checkpointing=True,
+            enable_file_checkpointing=False,
         )
+
 
         _update_status("正在启动 Claude Agent SDK 客户端...", 25, log_line="[SDK] 初始化 Claude Agent SDK 客户端...")
         client = ClaudeSDKClient(options=options)

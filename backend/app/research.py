@@ -19,6 +19,7 @@ from .agent.tools import (
     ensure_strategy_db_record,
     get_strategy_code_tool,
     get_writing_log_tool,
+    write_strategy_with_claude,
 )
 from .config import settings
 from .db import get_db, SessionLocal
@@ -34,8 +35,10 @@ from .models import (
 from .schemas import (
     ResearchMessageCreate,
     ResearchProjectCreate,
+    ResearchWriteStrategyRequest,
 )
 from .strategy_files import _path, save_strategy_code
+
 
 router = APIRouter(prefix="/api/research", tags=["strategy-research"])
 logger = logging.getLogger(__name__)
@@ -48,15 +51,19 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
 2. 研讨与设计：
    - 深入交流量化假设，质疑过度拟合，识别未来函数与数据窥探。
    - 用结构清晰的 Markdown 分节呈现策略构想（适用市场、时间周期、入场条件、出场规则、止损止盈、资金管理）。
-3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 Hermes 进行策略编码）：
+3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 Hermes 调用 Skill 驱动 Claude Agent SDK 编码）：
    - 【严禁擅自直接写码】：当策略逻辑设计清晰、准备编写代码时，必须首先调用工具 `propose_code_approval` 或输出 ```code_approval 机器块向用户发起编码审批请求，列出建议的策略名称、核心规则要点与参数定义，等待用户确认。
    - 【用户批准后编写代码】：只有当用户在界面中点击「批准并开始编写代码」、或在对话中明确回复“同意”、“批准”、“开始编写代码”后，你才可以开始进行策略代码编写。
-   - 【由 Hermes 自主完成策略编写（无需二次确认）】：
+   - 【由 Hermes 调用 Skill 驱动 Claude Agent SDK 完成策略编写（严禁私自手写代码）】：
      用户在前端点击「批准并开始编写代码」或表达同意即代表已授予完全的代码写入权限，系统界面不存在二级的“批准写入”按钮！
-     Hermes 会自主判断编码方式（优先调度 `write_strategy_with_claude` 工具完成策略编写并自动通过 4 级 Pre-Flight 运行期沙盒检测，也可在回复中给出完整说明）。
+     【极其关键】：严禁使用 `write_file` 通用写文件工具直接手写策略代码！编写策略文件必须由 QuantLab 的 Claude Agent SDK 执行。
+     Hermes 必须使用 `quantlab-claude-strategy` Skill，通过 `terminal` 工具运行驱动脚本完成策略编写并自动通过 4 级 Pre-Flight 沙盒自愈：
+     `python skills/quantlab-claude-strategy/scripts/invoke_claude_writer.py --strategy-name "<策略标识>" --instructions "<详细需求与规则>" --project-id "<项目ID>"`
+     或直接调用专用工具 `write_strategy_with_claude`（传入 strategy_name 与 instructions/specification）。
      严禁在回复中要求用户点击不存在的“批准写入按钮”或等待二次写入授权！
    - 【Pre-Flight 4 级全自动验证沙盒保证】：
-     后端在代码生成后会自动执行 4 级沙盒检测（L1 静态语法 -> L2 契约与类加载 -> L3 200根Bar指标计算覆盖与NaN检测 -> L4 Nautilus 运行时实例化与生命周期钩子）。若检测到错误会自动在会话内自愈修复，确保交付的代码直接可运行！
+     Claude Agent SDK 会在代码生成后自动执行 4 级沙盒检测（L1 静态语法 -> L2 契约与类加载 -> L3 200根Bar指标计算覆盖与NaN检测 -> L4 Nautilus 运行时实例化与生命周期钩子）。若检测到错误会自动在会话内自愈修复，确保交付的代码直接可运行！
+
    - 【四大核心导出结构与代码规范（策略代码必须严格涵盖）】：
      编写的代码必须包含且仅包含以下四个标准导出结构，严禁遗漏：
      1. `StrategyConfig` 子类（继承自 `nautilus_trader.config.StrategyConfig`）：
@@ -247,13 +254,15 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
      )
      ```
 
-   - 【策略代码生成与规范】：由 Hermes 编写策略文件并确保通过 Python AST 语法校验。
-   - 代码编写完成后，向用户汇报策略编写完成情况，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。
+   - 【策略代码生成与规范】：必须由 Claude Agent SDK 编写策略文件并确保通过 4 级 Pre-Flight 运行期沙盒校验。
+   - 代码编写完成后，向用户汇报策略编写完成情况与 4 级验证摘要，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。
 
-4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测才生成）：
-   - 【严格限制生成时机】：只有当用户在对话中【明确提出要进行回测】（例如明确表达“进行回测”、“回测一下”、“测试 2024 年数据”、“运行回测”等意图）时，你才可以生成回测参数方案（调用工具 `propose_backtest_params` 或输出 ```backtest_params 机器块）。
+4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测，且必须先查验 Catalog 真实数据）：
+   - 【严格限制生成时机】：只有当用户在对话中【明确提出要进行回测】（例如明确表达“进行回测”、“回测一下”、“运行回测”等意图）时，你才可以生成回测参数方案。
+   - 【必须先查验 Catalog 真实可用数据】：在生成回测方案前，你必须调用工具 `get_available_data` 或通过终端检查本地 Catalog 中已存在的交易标的、K线周期与历史起止时间，**严禁臆测本地不存在的远期时间区间**（否则会导致回测 0 根 Bar 空转）！
    - 在用户未明确要求回测之前（如策略讨论、代码编写完成阶段），严禁擅自生成回测参数方案，更严禁直接调用 `execute_backtest` 执行回测！
    - 当用户要求回测时，根据策略 Manifest 规范与可用行情数据提出合理的回测参数，调用工具 `propose_backtest_params` 或输出如下格式的机器块生成回测参数方案卡片：
+
 ```backtest_params
 {
   "strategy_name": "btc_ema_atr",
@@ -782,7 +791,10 @@ async def _sync_hermes_session_messages(project: ResearchProject, db: AsyncSessi
 
                             exists = any(
                                 m.role == "assistant"
-                                and m.content.strip() == clean_text
+                                and (
+                                    m.content.strip() == clean_text
+                                    or (len(clean_text) > 30 and (m.content.strip().startswith(clean_text[:60]) or clean_text.startswith(m.content.strip()[:60])))
+                                )
                                 for m in existing_rows
                             )
                             if not exists:
@@ -805,8 +817,11 @@ async def _sync_hermes_session_messages(project: ResearchProject, db: AsyncSessi
 
                     meta = {"tool_name": t_name, "result": res_obj}
                     exists = any(
-                        m.role == "tool"
-                        and m.content.strip() == content
+                        (m.role == "tool" or m.message_type in ("tool_output", "code_approval", "backtest_params"))
+                        and (
+                            m.content.strip() == content.strip()
+                            or (m.metadata_json.get("tool_name") == t_name and m.metadata_json.get("result") is not None)
+                        )
                         for m in existing_rows
                     )
                     if not exists:
@@ -828,7 +843,7 @@ async def _sync_hermes_session_messages(project: ResearchProject, db: AsyncSessi
 async def _poll_hermes_background_delegation(
     project: ResearchProject,
     db: AsyncSession,
-    max_wait_seconds: int = 240,
+    max_wait_seconds: int = 45,
     poll_interval: float = 2.0,
 ) -> tuple[str | None, str | None]:
     """Poll Hermes Agent session messages and disk files until background delegation completes."""
@@ -1544,3 +1559,27 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
     await db.delete(project)
     await db.commit()
     return {"ok": True, "message": "研究项目已删除"}
+
+
+@router.post("/tools/write-strategy")
+async def write_strategy_endpoint(
+    req: ResearchWriteStrategyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """API endpoint for Hermes skill / CLI to invoke Claude Agent SDK for strategy generation."""
+    res = await write_strategy_with_claude(
+        strategy_name=req.strategy_name,
+        instructions=req.instructions,
+        is_fix=req.is_fix,
+        error_context=req.error_context,
+        specification=req.specification,
+        project_id=req.project_id,
+        db=db,
+    )
+    if not res.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail=res.get("error", "Strategy generation failed"),
+        )
+    return res
+

@@ -22,23 +22,47 @@ def ensure_strategy_storage() -> None:
     STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Sync from STRATEGY_DIR to PERSISTENT_STRATEGY_DIR (preserve built-ins)
+    # 1. Sync from STRATEGY_DIR to PERSISTENT_STRATEGY_DIR (preserve newer / larger / valid strategies)
     for p in STRATEGY_DIR.glob("*.py"):
         if p.name == "__init__.py":
             continue
         dest = PERSISTENT_STRATEGY_DIR / p.name
-        if not dest.exists() or p.stat().st_mtime > dest.stat().st_mtime:
+        should_sync = False
+        if not dest.exists():
+            should_sync = True
+        else:
+            p_size = p.stat().st_size
+            dest_size = dest.stat().st_size
+            if p_size > dest_size and p_size > 1000:
+                should_sync = True
+            elif p.stat().st_mtime > dest.stat().st_mtime and p_size >= (dest_size - 100):
+                should_sync = True
+
+        if should_sync:
             try:
                 shutil.copy2(p, dest)
             except Exception as e:
                 logger.warning("同步策略到持久化目录失败 %s: %s", p.name, e)
 
-    # 2. Sync from PERSISTENT_STRATEGY_DIR to STRATEGY_DIR (restore user/research strategies after restart)
+    # 2. Sync from PERSISTENT_STRATEGY_DIR to STRATEGY_DIR (never overwrite a large strategy with a small template)
     for p in PERSISTENT_STRATEGY_DIR.glob("*.py"):
         if p.name == "__init__.py":
             continue
         dest = STRATEGY_DIR / p.name
-        if not dest.exists() or p.stat().st_mtime > dest.stat().st_mtime:
+        should_restore = False
+        if not dest.exists():
+            should_restore = True
+        else:
+            p_size = p.stat().st_size
+            dest_size = dest.stat().st_size
+            if dest_size > p_size and dest_size > 1200:
+                should_restore = False
+            elif p_size > dest_size and p_size > 1000:
+                should_restore = True
+            elif p.stat().st_mtime > dest.stat().st_mtime:
+                should_restore = True
+
+        if should_restore:
             try:
                 shutil.copy2(p, dest)
             except Exception as e:

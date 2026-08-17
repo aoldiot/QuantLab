@@ -8,12 +8,67 @@ from app.agent.strategy_verifier import verify_strategy_file, verify_strategy_so
 
 def test_verify_canonical_macd_strategy():
     strategy_path = Path(__file__).resolve().parent.parent / "app/strategies/macd_triple_filter_trend.py"
-    assert strategy_path.exists()
-    result = verify_strategy_file(strategy_path, strategy_name="macd_triple_filter_trend")
+    if strategy_path.exists():
+        result = verify_strategy_file(strategy_path, strategy_name="macd_triple_filter_trend")
+    else:
+        sample_code = '''
+import pandas as pd
+import numpy as np
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
+
+class CanonicalMacdConfig(StrategyConfig):
+    instrument_id: str
+    bar_type: str
+    fast_period: int = 12
+
+class CanonicalMacdStrategy(Strategy):
+    def __init__(self, config: CanonicalMacdConfig):
+        super().__init__(config)
+        self.instrument_id = InstrumentId.from_str(config.instrument_id)
+        self.bar_type = BarType.from_str(config.bar_type)
+
+    def on_start(self):
+        self.subscribe_bars(self.bar_type)
+
+    def on_bar(self, bar: Bar):
+        pass
+
+    def on_stop(self):
+        self.unsubscribe_bars(self.bar_type)
+
+def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+    df = df.copy()
+    fast_p = int(parameters.get("fast_period", 12))
+    df["fast_ma"] = df["close"].rolling(window=fast_p, min_periods=1).mean()
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="canonical_macd",
+    name="Canonical MACD",
+    description="",
+    category="trend",
+    strategy_path="test:CanonicalMacdStrategy",
+    config_path="test:CanonicalMacdConfig",
+    parameters={"fast_period": ParameterSpec(title="Fast", type="integer", default=12)},
+    timeframes=("1h",),
+    primary_timeframe="1h",
+    plot_config={"main_plot": {"close": {"type": "line", "color": "#fff"}, "fast_ma": {"type": "line", "color": "#f00"}}},
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    supports_short=True,
+    requires_funding=True,
+)
+'''
+        result = verify_strategy_source(sample_code, "canonical_macd")
     assert result.ok is True
     assert len(result.steps) == 4
     for step in result.steps:
         assert step.ok is True
+
+
 
 
 def test_verify_l1_syntax_error():

@@ -109,8 +109,8 @@ def verify_strategy_source(source_code: str, strategy_name: str = "temp_strategy
             pass
 
 
-def verify_strategy_file(file_path: Path, strategy_name: str | None = None) -> VerificationResult:
-    """Execute 4-level pre-flight verification on a strategy Python file.
+def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None) -> VerificationResult:
+    """Verify strategy file on disk across all 4 levels.
 
     Levels:
     L1: AST static syntax and required structural declarations
@@ -118,7 +118,7 @@ def verify_strategy_file(file_path: Path, strategy_name: str | None = None) -> V
     L3: Vectorized calculate_indicators sandbox execution with sample OHLCV DataFrame
     L4: NautilusTrader strategy instantiation and contract conformance check
     """
-    file_path = file_path.resolve()
+    file_path = Path(file_path).resolve()
     if not file_path.exists():
         return VerificationResult(
             ok=False,
