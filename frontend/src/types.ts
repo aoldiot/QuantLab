@@ -33,7 +33,8 @@ export interface CatalogSummary{catalog_path:string;total_symbols:number;total_b
 export interface CatalogMissingDetail{symbol:string;instrument_id:string;timeframe:string;status:'MISSING_INSTRUMENT'|'MISSING_DATA'|'PARTIAL_RANGE'|'OK';message:string}
 export interface CatalogCheckResponse{ok:boolean;has_missing:boolean;catalog_exists:boolean;catalog_path:string;missing_symbols:string[];details:CatalogMissingDetail[];summary_text:string}
 export interface BacktestLogsResponse{id:string;status:string;stage:string;progress:number;logs:string;error_message?:string|null}
-export interface ResearchWritingLog{status:'IDLE'|'RUNNING'|'COMPLETED'|'FAILED';stage:string;progress:number;strategy_name:string;logs:string;updated_at?:string}
+export interface VerificationStep{level:string;name:string;ok:boolean;message:string;details?:Record<string,unknown>}
+export interface ResearchWritingLog{status:'IDLE'|'RUNNING'|'COMPLETED'|'FAILED';stage:string;progress:number;strategy_name:string;logs:string;updated_at?:string;steps?:VerificationStep[]}
 export interface ResearchThinkingStatus{status:'IDLE'|'THINKING'|'WAITING_APPROVAL'|'TOOL_RUNNING'|'GENERATING';step:string;thought:string;updated_at?:string}
 export interface CodeApprovalData{strategy_name:string;strategy_summary:string;key_rules:string[];parameter_specs?:Record<string,any>}
 export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}

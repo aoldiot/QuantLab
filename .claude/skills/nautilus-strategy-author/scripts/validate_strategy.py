@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import ast
 import sys
 from pathlib import Path
+
+# Add backend directory to sys.path if not present
+backend_dir = (Path(__file__).resolve().parents[4] / "backend").resolve()
+if not (backend_dir / "app").exists():
+    backend_dir = (Path.cwd() / "backend").resolve()
+if (backend_dir / "app").exists() and str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+from app.agent.strategy_verifier import verify_strategy_file
 
 
 def main() -> int:
@@ -14,20 +22,19 @@ def main() -> int:
     if path.suffix != ".py" or "backend/app/strategies" not in path.as_posix():
         print("target must be a Python file under backend/app/strategies", file=sys.stderr)
         return 2
-    source = path.read_text(encoding="utf-8")
-    compile(source, str(path), "exec")
-    tree = ast.parse(source, filename=str(path))
-    assignments = {target.id for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign)) for target in ((node.targets if isinstance(node, ast.Assign) else [node.target])) if isinstance(target, ast.Name)}
-    functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    errors = []
-    if "STRATEGY_MANIFEST" not in assignments:
-        errors.append("missing STRATEGY_MANIFEST")
-    if "calculate_indicators" not in functions:
-        errors.append("missing calculate_indicators")
-    if errors:
-        print("; ".join(errors), file=sys.stderr)
+
+    result = verify_strategy_file(path)
+    for step in result.steps:
+        mark = "✓" if step.ok else "✗"
+        print(f"[{mark} {step.level}] {step.name}: {step.message}")
+
+    if not result.ok:
+        print(f"\nERROR: [{result.failed_level}] {result.error_message}", file=sys.stderr)
+        if result.suggestion:
+            print(f"SUGGESTION: {result.suggestion}", file=sys.stderr)
         return 1
-    print(f"OK: {path.name}")
+
+    print(f"\nALL 4 PRE-FLIGHT LEVELS PASSED: {path.name}")
     return 0
 
 

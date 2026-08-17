@@ -122,7 +122,19 @@ def test_strategy_file_validation(tmp_path):
     valid_py = tmp_path / "test_strat.py"
     valid_py.write_text(
         """
-from app.strategy_contract import StrategyManifest
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import StrategyManifest, StrategyMode
+
+class TestConfig(StrategyConfig):
+    instrument_id: str
+    bar_type: str
+
+class TestStrategy(Strategy):
+    def on_start(self): pass
+    def on_bar(self, bar): pass
+    def on_stop(self): pass
 
 STRATEGY_MANIFEST = StrategyManifest(
     name="Test",
@@ -130,6 +142,13 @@ STRATEGY_MANIFEST = StrategyManifest(
     description="Test strat",
     category="TEST",
     version="1.0.0",
+    strategy_path="app.strategies.test:TestStrategy",
+    config_path="app.strategies.test:TestConfig",
+    parameters={},
+    timeframes=("15m",),
+    primary_timeframe="15m",
+    plot_config={"main_plot": {"close": {"type": "line"}}, "subplots": {}},
+    mode=StrategyMode.SINGLE_INSTRUMENT,
 )
 
 def calculate_indicators(df, params):

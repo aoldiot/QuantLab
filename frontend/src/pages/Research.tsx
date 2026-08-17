@@ -966,6 +966,38 @@ function ProcessToolStep({
                   style={{ width: `${Math.max(8, writingLog?.progress ?? 100)}%` }}
                 />
               </div>
+              <div className="tool-verification-steps-row" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px', marginBottom: '8px' }}>
+                {[
+                  { level: 'L1', title: 'AST 语法与结构' },
+                  { level: 'L2', title: '契约与类加载' },
+                  { level: 'L3', title: '指标沙盒计算' },
+                  { level: 'L4', title: 'Nautilus 运行时' },
+                ].map((st) => {
+                  const stepResult = writingLog?.steps?.find((s: any) => s.level === st.level)
+                  const isDone = stepResult?.ok === true
+                  const isFail = stepResult?.ok === false
+                  return (
+                    <div
+                      key={st.level}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '11px',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        backgroundColor: isDone ? 'rgba(34, 197, 94, 0.12)' : isFail ? 'rgba(239, 68, 68, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                        color: isDone ? '#4ade80' : isFail ? '#f87171' : '#94a3b8',
+                        border: `1px solid ${isDone ? 'rgba(34, 197, 94, 0.3)' : isFail ? 'rgba(239, 68, 68, 0.4)' : 'rgba(255, 255, 255, 0.08)'}`
+                      }}
+                      title={stepResult?.message || st.title}
+                    >
+                      {isDone ? <Check size={11} className="text-emerald-400" /> : isFail ? <X size={11} className="text-rose-400" /> : <span style={{ opacity: 0.6 }}>•</span>}
+                      <span>{st.level} {st.title}</span>
+                    </div>
+                  )
+                })}
+              </div>
               {writingLog?.logs && (
                 <pre className="tool-mini-terminal">
                   {writingLog.logs.split('\n').filter(Boolean).slice(-5).join('\n')}

@@ -98,7 +98,7 @@ def validate_plot_contract(module: Any, manifest: StrategyManifest) -> None:
     calculate = getattr(module, "calculate_indicators", None)
     if calculate is not None and not callable(calculate):
         raise TypeError(f"{module.__name__} calculate_indicators 必须是可调用的函数")
-    supported = {"line", "histogram", "area", "baseline"}
+    supported = {"line", "histogram", "bar", "area", "baseline"}
     series = list(config.get("main_plot", {}).items()) if isinstance(config.get("main_plot"), dict) else []
     subplots = config.get("subplots", {})
     if isinstance(subplots, dict):
