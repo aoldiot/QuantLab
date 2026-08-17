@@ -479,8 +479,9 @@ async def write_strategy_with_claude(
 4. 编写完成后，确保通过 Python 语法和 QuantLab 4 级契约校验。
 """
 
-    # Retrieve environment variables for Claude CLI
+    # Retrieve environment variables for Claude
     env = os.environ.copy()
+    cfg = None
     if db:
         try:
             cfg = await get_config(db)
@@ -488,157 +489,110 @@ async def write_strategy_with_claude(
         except Exception:
             pass
 
-    # Ensure PATH contains typical locations for claude binary
-    extra_paths = [
-        str(Path.home() / ".local/bin"),
-        "/usr/local/bin",
-        "/opt/homebrew/bin",
-        "/usr/bin",
-        "/bin",
-    ]
-    cur_path = env.get("PATH", "")
-    for p in extra_paths:
-        if p not in cur_path:
-            cur_path = f"{p}:{cur_path}"
-    env["PATH"] = cur_path
-
-    claude_bin = (
-        shutil.which("claude", path=cur_path)
-        or (Path.home() / ".local/bin/claude").as_posix()
-        or "/usr/local/bin/claude"
-        or "/opt/homebrew/bin/claude"
-        or "claude"
-    )
-
     max_self_heal_turns = 2
-    current_prompt = base_prompt
+    eval_file = target_file
+    v_res = None
     stdout_lines: list[str] = []
 
-    for heal_turn in range(max_self_heal_turns + 1):
-        is_healing = heal_turn > 0
-        if is_healing:
-            _update_status(
-                f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮自动自愈修复...",
-                min(80, 50 + heal_turn * 15),
-                log_line=f"[SELF-HEAL] 触发自闭环自愈修复 (第 {heal_turn} 轮)...",
-            )
-        else:
-            _update_status("已启动代码编写进程，正在分析并编写策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
+    # Attempt to use stateful ClaudeSDKClient for session continuity
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-        cmd = [
-            claude_bin,
-            "-p",
-            current_prompt,
-            "--dangerously-skip-permissions",
-        ]
-
-        logger.info("正在调用代码编写进程：%s (turn=%d) ...", strategy_name, heal_turn)
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(repo_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=env,
-            )
-
-            async def _stream_claude_output():
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    text = line.decode("utf-8", errors="replace")
-                    stdout_lines.append(text)
-                    with log_file.open("a", encoding="utf-8") as f:
-                        f.write(text)
-                        f.flush()
-                    cur_prog = min(85, 30 + len(stdout_lines))
-                    _update_status("代码生成与文件修改中...", cur_prog)
-
-            await asyncio.wait_for(
-                asyncio.gather(process.wait(), _stream_claude_output()),
-                timeout=300,
-            )
-        except asyncio.TimeoutError:
-            try:
-                process.kill()
-            except Exception:
-                pass
-            err_msg = "Claude CLI 编写代码超时 (300s)"
-            _update_status("编写超时", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
-            return {"ok": False, "error": err_msg}
-        except Exception as exc:
-            err_msg = f"调用 Claude CLI 失败：{exc}"
-            _update_status("调用失败", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
-            return {"ok": False, "error": err_msg}
-
-        _update_status(
-            "代码生成完成，正在执行 4 级 Pre-Flight 策略验证沙盒...",
-            88,
-            log_line="[VERIFICATION] 代码生成退出，开始执行 4 级 Pre-Flight 运行期沙盒检测...",
+        options = ClaudeAgentOptions(
+            cwd=Path(repo_path),
+            model=cfg.model if cfg else None,
+            env=env,
+            tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash", "Skill"],
+            allowed_tools=[
+                "Read",
+                "Glob",
+                "Grep",
+                "Edit",
+                "Write",
+                "Skill(nautilus-strategy-author)",
+            ],
+            permission_mode="bypassPermissions",
+            skills=["nautilus-strategy-author"],
+            max_turns=cfg.max_turns or 60 if cfg else 60,
+            system_prompt=NAUTILUS_DEVELOPER_GUIDE,
+            enable_file_checkpointing=True,
         )
 
-        # Check canonical location
-        eval_file = target_file
-        if not eval_file.exists():
-            alt_file = (STRATEGY_DIR / f"{strategy_name}.py").resolve()
-            if alt_file.exists():
-                eval_file = alt_file
+        _update_status("正在启动 Claude Agent SDK 客户端...", 25, log_line="[SDK] 初始化 Claude Agent SDK 客户端...")
+        client = ClaudeSDKClient(options=options)
+        await client.connect()
 
-        # Run 4-level pre-flight verification
-        v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
+        try:
+            current_prompt = base_prompt
+            for heal_turn in range(max_self_heal_turns + 1):
+                is_healing = heal_turn > 0
+                if is_healing:
+                    _update_status(
+                        f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮自动自愈修复...",
+                        min(80, 50 + heal_turn * 15),
+                        log_line=f"[SELF-HEAL] 触发自闭环自愈修复 (第 {heal_turn} 轮)...",
+                    )
+                else:
+                    _update_status("已启动代码编写进程，正在分析并编写策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
 
-        # Log individual step results
-        for step in v_res.steps:
-            mark = "✓" if step.ok else "✗"
-            _update_status(
-                f"验证阶段: {step.level} {step.name}",
-                90,
-                log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
-            )
+                logger.info("Claude SDK 正在生成/修复代码: %s (turn=%d)", strategy_name, heal_turn)
+                await client.query(current_prompt)
 
-        if v_res.ok:
-            # Code is fully verified, sync to persistent storage
-            generated_code = eval_file.read_text(encoding="utf-8")
-            save_strategy_code(strategy_name, generated_code)
+                turn_tokens: list[str] = []
+                async for message in client.receive_response():
+                    m_type = message.__class__.__name__
+                    if hasattr(message, "content"):
+                        m_content = getattr(message, "content", [])
+                        if isinstance(m_content, list):
+                            for part in m_content:
+                                if isinstance(part, dict) and "text" in part:
+                                    t = str(part["text"])
+                                    turn_tokens.append(t)
+                                    with log_file.open("a", encoding="utf-8") as f:
+                                        f.write(t)
+                                        f.flush()
+                                elif hasattr(part, "text"):
+                                    t = str(getattr(part, "text"))
+                                    turn_tokens.append(t)
+                                    with log_file.open("a", encoding="utf-8") as f:
+                                        f.write(t)
+                                        f.flush()
+                    cur_prog = min(85, 30 + len(turn_tokens) // 5)
+                    _update_status("代码生成与文件修改中...", cur_prog)
 
-            _update_status(
-                "策略代码已成功生成并通过 4 级 Pre-Flight 校验！",
-                100,
-                status="COMPLETED",
-                log_line=f"[SUCCESS] 策略 {strategy_name}.py 4 级 Pre-Flight 校验全部通过，已成功保存与同步数据库！",
-                steps=[s.__dict__ for s in v_res.steps],
-            )
+                stdout_lines.extend(turn_tokens)
 
-            # Sync to DB Strategy & StrategyVersion tables
-            if db is not None:
-                await ensure_strategy_db_record(strategy_name, db, project_id=project_id)
-            else:
-                async with SessionLocal() as session:
-                    await ensure_strategy_db_record(strategy_name, session, project_id=project_id)
+                _update_status(
+                    "代码生成完成，正在执行 4 级 Pre-Flight 策略验证沙盒...",
+                    88,
+                    log_line="[VERIFICATION] 代码生成退出，开始执行 4 级 Pre-Flight 运行期沙盒检测...",
+                )
 
-            full_stdout = "".join(stdout_lines)
-            return {
-                "ok": True,
-                "status": "SUCCESS",
-                "strategy_name": strategy_name,
-                "message": f"策略 {strategy_name}.py 代码已成功生成并通过 4 级 Pre-Flight 沙盒验证！",
-                "validation": v_res.to_dict(),
-                "code_snippet": generated_code[:3000] + ("\n...(已截断)" if len(generated_code) > 3000 else ""),
-                "code_length": len(generated_code),
-                "log_preview": full_stdout[-2000:] if len(full_stdout) > 2000 else full_stdout,
-            }
+                if not eval_file.exists():
+                    alt_file = (STRATEGY_DIR / f"{strategy_name}.py").resolve()
+                    if alt_file.exists():
+                        eval_file = alt_file
 
-        # If verification failed and we have healing attempts left, feed the error back
-        if heal_turn < max_self_heal_turns:
-            _update_status(
-                f"Pre-Flight 校验未通过 ({v_res.failed_level})，正在准备自动修复...",
-                85,
-                log_line=f"[WARN] 校验未通过 ({v_res.failed_level}): {v_res.error_message}。准备触发自闭环自愈修复...",
-            )
-            current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
-            current_prompt = f"""
+                v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
+                for step in v_res.steps:
+                    mark = "✓" if step.ok else "✗"
+                    _update_status(
+                        f"验证阶段: {step.level} {step.name}",
+                        90,
+                        log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
+                    )
+
+                if v_res.ok:
+                    break
+
+                if heal_turn < max_self_heal_turns:
+                    _update_status(
+                        f"Pre-Flight 校验未通过 ({v_res.failed_level})，正在准备自动修复...",
+                        85,
+                        log_line=f"[WARN] 校验未通过 ({v_res.failed_level}): {v_res.error_message}。在同一会话中触发自愈修复...",
+                    )
+                    current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
+                    current_prompt = f"""
 【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level})】
 你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒在 `{v_res.failed_level}` 级别检测到以下错误：
 
@@ -652,27 +606,174 @@ async def write_strategy_with_claude(
 ```
 
 【修复任务】
-请针对上述具体错误与建议，直接修改并修复 `backend/app/strategies/{strategy_name}.py` 文件，确保满足所有契约要求，消除上述报错。
+请针对上述具体错误与建议，直接修改并修复 `backend/app/strategies/{strategy_name}.py`，确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
 """
-        else:
-            # All healing attempts exhausted
-            _update_status(
-                f"策略 4 级校验未通过 ({v_res.failed_level})",
-                100,
-                status="FAILED",
-                log_line=f"[ERROR] 策略 4 级校验未通过: [{v_res.failed_level}] {v_res.error_message}",
-                steps=[s.__dict__ for s in v_res.steps],
-            )
-            full_stdout = "".join(stdout_lines)
-            return {
-                "ok": False,
-                "status": "VALIDATION_FAILED",
-                "strategy_name": strategy_name,
-                "error": f"Pre-Flight 4 级校验未通过 [{v_res.failed_level}]: {v_res.error_message}\n修复建议: {v_res.suggestion}\n\nClaude 输出：\n{full_stdout[:1000]}",
-                "validation": v_res.to_dict(),
-            }
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
-    return {"ok": False, "error": "未知状态退出"}
+    except Exception as sdk_exc:
+        logger.warning("Claude SDK 运行遇到异常 (%s)，降级为 CLI 方式执行...", sdk_exc)
+        # Fallback to CLI execution
+        extra_paths = [
+            str(Path.home() / ".local/bin"),
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        cur_path = env.get("PATH", "")
+        for p in extra_paths:
+            if p not in cur_path:
+                cur_path = f"{p}:{cur_path}"
+        env["PATH"] = cur_path
+
+        claude_bin = (
+            shutil.which("claude", path=cur_path)
+            or (Path.home() / ".local/bin/claude").as_posix()
+            or "/usr/local/bin/claude"
+            or "/opt/homebrew/bin/claude"
+            or "claude"
+        )
+
+        current_prompt = base_prompt
+        for heal_turn in range(max_self_heal_turns + 1):
+            is_healing = heal_turn > 0
+            if is_healing:
+                _update_status(
+                    f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮自动自愈修复...",
+                    min(80, 50 + heal_turn * 15),
+                    log_line=f"[SELF-HEAL] 触发自闭环自愈修复 (第 {heal_turn} 轮)...",
+                )
+            else:
+                _update_status("已启动代码编写进程，正在分析并编写策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
+
+            cmd = [
+                claude_bin,
+                "-p",
+                current_prompt,
+                "--dangerously-skip-permissions",
+            ]
+
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(repo_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    env=env,
+                )
+
+                async def _stream_cli_output():
+                    while True:
+                        line = await process.stdout.readline()
+                        if not line:
+                            break
+                        text = line.decode("utf-8", errors="replace")
+                        stdout_lines.append(text)
+                        with log_file.open("a", encoding="utf-8") as f:
+                            f.write(text)
+                            f.flush()
+                        cur_prog = min(85, 30 + len(stdout_lines))
+                        _update_status("代码生成与文件修改中...", cur_prog)
+
+                await asyncio.wait_for(
+                    asyncio.gather(process.wait(), _stream_cli_output()),
+                    timeout=300,
+                )
+            except Exception as exc:
+                err_msg = f"调用 Claude CLI 失败：{exc}"
+                _update_status("调用失败", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
+                return {"ok": False, "error": err_msg}
+
+            if not eval_file.exists():
+                alt_file = (STRATEGY_DIR / f"{strategy_name}.py").resolve()
+                if alt_file.exists():
+                    eval_file = alt_file
+
+            v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
+            for step in v_res.steps:
+                mark = "✓" if step.ok else "✗"
+                _update_status(
+                    f"验证阶段: {step.level} {step.name}",
+                    90,
+                    log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
+                )
+
+            if v_res.ok:
+                break
+
+            if heal_turn < max_self_heal_turns:
+                current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
+                current_prompt = f"""
+【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level})】
+你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒在 `{v_res.failed_level}` 级别检测到以下错误：
+
+- 错误摘要: {v_res.summary}
+- 错误详情: {v_res.error_message}
+- 修复建议: {v_res.suggestion}
+
+当前代码内容如下：
+```python
+{current_code[:12000]}
+```
+
+【修复任务】
+请针对上述具体错误与建议，直接修改并修复 `backend/app/strategies/{strategy_name}.py`，确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
+"""
+
+    if v_res and v_res.ok:
+        # Code is fully verified, sync to persistent storage
+        generated_code = eval_file.read_text(encoding="utf-8")
+        save_strategy_code(strategy_name, generated_code)
+
+        _update_status(
+            "策略代码已成功生成并通过 4 级 Pre-Flight 校验！",
+            100,
+            status="COMPLETED",
+            log_line=f"[SUCCESS] 策略 {strategy_name}.py 4 级 Pre-Flight 校验全部通过，已成功保存与同步数据库！",
+            steps=[s.__dict__ for s in v_res.steps],
+        )
+
+        # Sync to DB Strategy & StrategyVersion tables
+        if db is not None:
+            await ensure_strategy_db_record(strategy_name, db, project_id=project_id)
+        else:
+            async with SessionLocal() as session:
+                await ensure_strategy_db_record(strategy_name, session, project_id=project_id)
+
+        full_stdout = "".join(stdout_lines)
+        return {
+            "ok": True,
+            "status": "SUCCESS",
+            "strategy_name": strategy_name,
+            "message": f"策略 {strategy_name}.py 代码已成功生成并通过 4 级 Pre-Flight 沙盒验证！",
+            "validation": v_res.to_dict(),
+            "code_snippet": generated_code[:3000] + ("\n...(已截断)" if len(generated_code) > 3000 else ""),
+            "code_length": len(generated_code),
+            "log_preview": full_stdout[-2000:] if len(full_stdout) > 2000 else full_stdout,
+        }
+    else:
+        failed_level = v_res.failed_level if v_res else "UNKNOWN"
+        error_msg = v_res.error_message if v_res else "验证未完成"
+        suggestion = v_res.suggestion if v_res else ""
+        _update_status(
+            f"策略 4 级校验未通过 ({failed_level})",
+            100,
+            status="FAILED",
+            log_line=f"[ERROR] 策略 4 级校验未通过: [{failed_level}] {error_msg}",
+            steps=[s.__dict__ for s in v_res.steps] if v_res else None,
+        )
+        full_stdout = "".join(stdout_lines)
+        return {
+            "ok": False,
+            "status": "VALIDATION_FAILED",
+            "strategy_name": strategy_name,
+            "error": f"Pre-Flight 4 级校验未通过 [{failed_level}]: {error_msg}\n修复建议: {suggestion}\n\nClaude 输出：\n{full_stdout[:1000]}",
+            "validation": v_res.to_dict() if v_res else {},
+        }
 
 
 async def execute_backtest_tool(
