@@ -79,27 +79,133 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
         - 必须包含 `instrument_id: str` 和 `bar_type: str`。
         - 声明策略所需的全部参数，类型推荐使用 `int`, `float`, `str`, `bool`（字段名必须与 `STRATEGY_MANIFEST.parameters` 的 key 严格一致）。
      2. `Strategy` 子类（继承自 `nautilus_trader.trading.strategy.Strategy`）：
-        - `__init__(self, config)`：保存属性，初始化状态。
-        - `on_start(self)`：获取 `self.instrument = self.cache.instrument(self.instrument_id)` 并订阅行情 `self.subscribe_bars(self.bar_type)`。
-        - `on_bar(self, bar: Bar)`：实现入场、出场、止损止盈与持仓管理。通过 `self.order_factory.market(...)` 构建市价单，并通过 `self.submit_order(order)` 下单。
-        - `on_stop(self)`：取消订阅 `self.unsubscribe_bars(self.bar_type)`。
-     3. `calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame` 向量化指标计算函数：
-        - 输入原始行情 DataFrame（含 open, high, low, close, volume 列）及 parameters 字典。
-        - 必须返回行数完全相同的 DataFrame。
-        - **【极其重要】必须计算并在 DataFrame 中新增 `plot_config` 中声明的所有指标列！**
-     4. `STRATEGY_MANIFEST = StrategyManifest(...)` 策略元数据与参数契约定义：
-        - `slug`: 策略唯一标识（英文小写与下划线，如 `btc_ema_atr`）。
-        - `name`: 策略中文名称。
-        - `description`: 策略简述。
-        - `category`: 策略分类（如 `"trend"`, `"mean_reversion"`, `"momentum"`）。
-        - `strategy_path`: 策略类路径（格式 `"app.strategies.{slug}:{StrategyClassName}"`）。
-        - `config_path`: 配置类路径（格式 `"app.strategies.{slug}:{ConfigClassName}"`）。
-        - `parameters`: 参数字典，每个参数必须是 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`。
-        - `timeframes`: 周期元组，如 `("15m", "1h", "4h", "1d")`。
-        - `primary_timeframe`: 主周期，如 `"1h"`。
-        - `mode`: `StrategyMode.SINGLE_INSTRUMENT`。
-        - `supports_short`: `True` / `False`。
-        - `requires_funding`: `True` / `False`。
+      - 【QuantLab 标杆策略范本（Golden Template）】：
+      编写策略时请严格参考以下标准模板结构：
+      ```python
+      from decimal import Decimal
+      import pandas as pd
+      import numpy as np
+
+      from nautilus_trader.config import StrategyConfig
+      from nautilus_trader.model.data import Bar, BarType
+      from nautilus_trader.model.enums import OrderSide, PositionSide
+      from nautilus_trader.model.identifiers import InstrumentId
+      from nautilus_trader.model.objects import Quantity
+      from nautilus_trader.trading.strategy import Strategy
+      from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
+
+
+      class BtcEmaAtrConfig(StrategyConfig, frozen=True):
+          instrument_id: InstrumentId
+          bar_type: BarType
+          fast_period: int = 12
+          slow_period: int = 26
+          atr_period: int = 14
+          trade_size: Decimal = Decimal("0.01")
+
+
+      class BtcEmaAtrStrategy(Strategy):
+          def __init__(self, config: BtcEmaAtrConfig) -> None:
+              super().__init__(config)
+              self.instrument_id = config.instrument_id
+              self.bar_type = config.bar_type
+              self.fast_period = config.fast_period
+              self.slow_period = config.slow_period
+              self.atr_period = config.atr_period
+              self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
+              self.bars: list[Bar] = []
+
+          def on_start(self) -> None:
+              self.instrument = self.cache.instrument(self.instrument_id)
+              self.subscribe_bars(self.bar_type)
+
+          def on_bar(self, bar: Bar) -> None:
+              self.bars.append(bar)
+              if len(self.bars) < max(self.slow_period, self.atr_period) + 5:
+                  return
+
+              closes = pd.Series([b.close.as_double() for b in self.bars])
+              fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
+              slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
+              prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
+              prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
+
+              is_long = self.portfolio.is_net_long(self.instrument_id)
+              is_flat = self.portfolio.is_net_flat(self.instrument_id)
+
+              # 金叉做多
+              if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
+                  if not is_flat:
+                      self.close_all_positions(self.instrument_id)
+                  order = self.order_factory.market(
+                      instrument_id=self.instrument_id,
+                      order_side=OrderSide.BUY,
+                      quantity=self.trade_size,
+                  )
+                  self.submit_order(order)
+              # 死叉平多
+              elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
+                  self.close_all_positions(self.instrument_id)
+
+          def on_stop(self) -> None:
+              self.unsubscribe_bars(self.bar_type)
+
+
+      def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+          result = df.copy()
+          fast_p = int(parameters.get("fast_period", 12))
+          slow_p = int(parameters.get("slow_period", 26))
+          atr_p = int(parameters.get("atr_period", 14))
+
+          close = pd.to_numeric(result["close"], errors="coerce")
+          high = pd.to_numeric(result["high"], errors="coerce")
+          low = pd.to_numeric(result["low"], errors="coerce")
+
+          result["fast_ma"] = close.ewm(span=fast_p, adjust=False).mean().bfill()
+          result["slow_ma"] = close.ewm(span=slow_p, adjust=False).mean().bfill()
+
+          prev_close = close.shift(1)
+          tr1 = high - low
+          tr2 = (high - prev_close).abs()
+          tr3 = (low - prev_close).abs()
+          tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+          result["atr"] = tr.rolling(window=atr_p).mean().bfill()
+          return result
+
+
+      STRATEGY_MANIFEST = StrategyManifest(
+          slug="btc_ema_atr",
+          name="BTC EMA+ATR趋势跟踪",
+          description="双均线交叉结合ATR的趋势策略",
+          version="1.0.0",
+          category="trend",
+          strategy_path="app.strategies.btc_ema_atr:BtcEmaAtrStrategy",
+          config_path="app.strategies.btc_ema_atr:BtcEmaAtrConfig",
+          parameters={
+              "fast_period": ParameterSpec(title="快线周期", type="integer", default=12, minimum=2, maximum=100),
+              "slow_period": ParameterSpec(title="慢线周期", type="integer", default=26, minimum=5, maximum=200),
+              "atr_period": ParameterSpec(title="ATR周期", type="integer", default=14, minimum=2, maximum=50),
+              "trade_size": ParameterSpec(title="单笔下单数量", type="number", default=0.01, minimum=0.0001, maximum=100.0),
+          },
+          timeframes=("15m", "1h", "4h", "1d"),
+          primary_timeframe="1h",
+          plot_config={
+              "main_plot": {
+                  "close": {"type": "line", "color": "#ffffff"},
+                  "fast_ma": {"type": "line", "color": "#ffaa00"},
+                  "slow_ma": {"type": "line", "color": "#00aaff"},
+              },
+              "subplots": {
+                  "ATR": {
+                      "atr": {"type": "line", "color": "#ff55ff"}
+                  }
+              }
+          },
+          mode=StrategyMode.SINGLE_INSTRUMENT,
+          supports_short=True,
+          requires_funding=True,
+      )
+      ```
 
    - 【`plot_config` 图表契约规范（CRITICAL - 严禁写错字典层级）】：
      `plot_config` 决定了回测完成后在前端 K 线图表上的指标渲染。**必须严格按照以下结构定义：**
@@ -124,75 +230,6 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
      }
      ```
 
-   - 【QuantLab 标杆策略范本（Golden Template）】：
-     编写策略时请严格参考以下标准模板结构：
-     ```python
-     import pandas as pd
-     import numpy as np
-     from nautilus_trader.config import StrategyConfig
-     from nautilus_trader.trading.strategy import Strategy
-     from nautilus_trader.model.data import Bar, BarType
-     from nautilus_trader.model.enums import OrderSide, PositionSide
-     from nautilus_trader.model.identifiers import InstrumentId
-     from nautilus_trader.model.objects import Quantity
-     from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
-
-
-     class BtcEmaAtrConfig(StrategyConfig):
-         instrument_id: str
-         bar_type: str
-         fast_period: int = 12
-         slow_period: int = 26
-         atr_period: int = 14
-         position_size_pct: float = 0.1
-
-
-     class BtcEmaAtrStrategy(Strategy):
-         def __init__(self, config: BtcEmaAtrConfig):
-             super().__init__(config)
-             self.instrument_id = InstrumentId.from_str(config.instrument_id)
-             self.bar_type = BarType.from_str(config.bar_type)
-
-         def on_start(self):
-             self.instrument = self.cache.instrument(self.instrument_id)
-             self.subscribe_bars(self.bar_type)
-
-         def on_bar(self, bar: Bar):
-             bars = list(self.cache.bars(self.bar_type))
-             warmup = max(self.config.slow_period, self.config.atr_period)
-             if len(bars) < warmup:
-                 return
-
-             closes = np.array([b.close.as_double() for b in bars])
-             fast_ma = np.mean(closes[-self.config.fast_period:])
-             slow_ma = np.mean(closes[-self.config.slow_period:])
-
-             positions = self.cache.positions()
-             current_pos = positions[0].side if positions else None
-
-             if current_pos is None:
-                 if fast_ma > slow_ma:
-                     self.open_position(PositionSide.LONG)
-                 elif fast_ma < slow_ma:
-                     self.open_position(PositionSide.SHORT)
-             elif current_pos == PositionSide.LONG and fast_ma < slow_ma:
-                 self.close_position()
-             elif current_pos == PositionSide.SHORT and fast_ma > slow_ma:
-                 self.close_position()
-
-         def on_stop(self):
-             self.unsubscribe_bars(self.bar_type)
-
-         def open_position(self, side: PositionSide):
-             account = self.portfolio.account(self.instrument_id.venue)
-             free_balance = account.balance_free(self.instrument.quote_currency).as_double()
-             position_size = (free_balance * self.config.position_size_pct) / self.instrument.price_increment
-             qty = Quantity.from_int(int(position_size)) if position_size.is_integer() else Quantity(str(round(position_size, 4)))
-             order_side = OrderSide.BUY if side == PositionSide.LONG else OrderSide.SELL
-             order = self.order_factory.market(
-                 instrument_id=self.instrument_id,
-                 order_side=order_side,
-                 quantity=qty,
              )
              self.submit_order(order)
 
@@ -796,20 +833,31 @@ async def _sync_strategy_code_if_present(
     project: ResearchProject,
     db: AsyncSession,
 ) -> str | None:
-    """Helper to detect python strategy code in text and auto-save/sync to DB."""
+    """Helper to detect full python strategy code in text and auto-save/sync to DB.
+    Never overwrite with partial snippets or dummy names.
+    """
     if not text:
         return None
-    if "STRATEGY_MANIFEST" in text or "StrategyConfig" in text:
+    if "STRATEGY_MANIFEST" in text and "StrategyConfig" in text and "calculate_indicators" in text and "Strategy" in text:
         py_blocks = re.findall(r"```python\s*(.*?)\s*```", text, re.DOTALL)
         for block in py_blocks:
-            if "STRATEGY_MANIFEST" in block or "StrategyConfig" in block:
+            if (
+                len(block) > 500
+                and "STRATEGY_MANIFEST" in block
+                and "StrategyConfig" in block
+                and "calculate_indicators" in block
+                and "Strategy" in block
+            ):
                 slug_m = re.search(r'slug\s*=\s*["\']([a-z0-9_]+)["\']', block)
-                if not slug_m:
-                    slug_m = re.search(r'name\s*=\s*["\']([a-z0-9_]+)["\']', block)
-                s_slug = slug_m.group(1).lower() if slug_m else f"strat_{project.id[:8]}"
-                save_strategy_code(s_slug, block)
-                await ensure_strategy_db_record(s_slug, db, project_id=project.id)
-                return s_slug
+                if slug_m:
+                    s_slug = slug_m.group(1).lower()
+                    try:
+                        ast.parse(block)
+                        save_strategy_code(s_slug, block)
+                        await ensure_strategy_db_record(s_slug, db, project_id=project.id)
+                        return s_slug
+                    except Exception:
+                        pass
 
     strat_dir = settings.strategy_repo_path.resolve() / "backend/app/strategies"
     if strat_dir.exists():
@@ -819,7 +867,12 @@ async def _sync_strategy_code_if_present(
             if (datetime.now().timestamp() - py_file.stat().st_mtime) < 120:
                 try:
                     c_text = py_file.read_text(encoding="utf-8")
-                    if "STRATEGY_MANIFEST" in c_text and "StrategyConfig" in c_text:
+                    if (
+                        len(c_text) > 500
+                        and "STRATEGY_MANIFEST" in c_text
+                        and "StrategyConfig" in c_text
+                        and "calculate_indicators" in c_text
+                    ):
                         s_slug = py_file.stem
                         await ensure_strategy_db_record(s_slug, db, project_id=project.id)
                         return s_slug
@@ -1427,18 +1480,27 @@ async def get_project_strategy(
     for m in asst_msgs:
         code_blocks = re.findall(r"```python\s*(.*?)\s*```", m.content, re.DOTALL)
         for code_block in code_blocks:
-            if "STRATEGY_MANIFEST" in code_block or "StrategyConfig" in code_block:
+            if (
+                len(code_block) > 500
+                and "STRATEGY_MANIFEST" in code_block
+                and "StrategyConfig" in code_block
+                and "calculate_indicators" in code_block
+                and "Strategy" in code_block
+            ):
                 slug_match = re.search(r'slug\s*=\s*["\']([a-z0-9_]+)["\']', code_block)
-                if not slug_match:
-                    slug_match = re.search(r'name\s*=\s*["\']([a-z0-9_]+)["\']', code_block)
-                derived_slug = slug_match.group(1).lower() if slug_match else f"strat_{project.id[:8]}"
-                save_strategy_code(derived_slug, code_block)
-                await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
-                return {
-                    "ok": True,
-                    "strategy_name": derived_slug,
-                    "code": code_block,
-                }
+                if slug_match:
+                    derived_slug = slug_match.group(1).lower()
+                    try:
+                        ast.parse(code_block)
+                        save_strategy_code(derived_slug, code_block)
+                        await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
+                        return {
+                            "ok": True,
+                            "strategy_name": derived_slug,
+                            "code": code_block,
+                        }
+                    except Exception:
+                        pass
 
     return {"ok": False, "message": "尚未生成策略代码"}
 

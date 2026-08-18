@@ -516,3 +516,25 @@ STRATEGY_MANIFEST = StrategyManifest(
     res = verify_strategy_source(code, strategy_name="port_strat")
     assert res.ok is True
 
+
+@pytest.mark.anyio
+async def test_sync_strategy_code_ignores_fragments():
+    from app.research import _sync_strategy_code_if_present
+    from unittest.mock import MagicMock
+
+    mock_proj = MagicMock()
+    mock_proj.id = "proj12345"
+    mock_db = MagicMock()
+
+    # Partial fragment should NOT be synced
+    fragment = """
+```python
+# Just a partial class
+class BrokenConfig(StrategyConfig):
+    period: int = 10
+```
+"""
+    slug = await _sync_strategy_code_if_present(fragment, mock_proj, mock_db)
+    assert slug is None
+
+

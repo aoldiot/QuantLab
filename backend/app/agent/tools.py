@@ -30,9 +30,9 @@ NAUTILUS_DEVELOPER_GUIDE = """
 【NautilusTrader 策略开发核心速查表与规范】
 1. 依赖与模块导入规范：
 ```python
+from decimal import Decimal
 import pandas as pd
 import numpy as np
-from decimal import Decimal
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar, BarType
@@ -44,18 +44,81 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
 ```
 
 2. 核心四大导出结构规范（严禁遗漏任何一项）：
-- 结构 1：`StrategyConfig` 子类：包含 `instrument_id: str`、`bar_type: str` 及策略参数定义。
-- 结构 2：`Strategy` 子类：
-  - `__init__(self, config)`：保存属性与初始化状态。
-  - `on_start(self)`：获取 `self.instrument = self.cache.instrument(self.instrument_id)` 并执行 `self.subscribe_bars(self.bar_type)`。
-  - `on_bar(self, bar: Bar)`：基于历史 Bar 或指标执行入场、出场、止损止盈与持仓管理。
-  - `on_stop(self)`：执行 `self.unsubscribe_bars(self.bar_type)`。
+- 结构 1：`StrategyConfig` 子类（继承自 `StrategyConfig, frozen=True`）：
+  ```python
+  class XxxConfig(StrategyConfig, frozen=True):
+      instrument_id: InstrumentId
+      bar_type: BarType
+      fast_period: int = 12
+      slow_period: int = 26
+      atr_period: int = 14
+      trade_size: Decimal = Decimal("0.01")
+  ```
+- 结构 2：`Strategy` 子类（继承自 `Strategy`）：
+  ```python
+  class XxxStrategy(Strategy):
+      def __init__(self, config: XxxConfig) -> None:
+          super().__init__(config)
+          self.instrument_id = config.instrument_id
+          self.bar_type = config.bar_type
+          self.fast_period = config.fast_period
+          self.slow_period = config.slow_period
+          self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
+          self.bars: list[Bar] = []
+
+      def on_start(self) -> None:
+          self.instrument = self.cache.instrument(self.instrument_id)
+          self.subscribe_bars(self.bar_type)
+
+      def on_bar(self, bar: Bar) -> None:
+          self.bars.append(bar)
+          if len(self.bars) < self.slow_period + 5:
+              return
+
+          closes = pd.Series([b.close.as_double() for b in self.bars])
+          fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
+          slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
+          prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
+          prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
+
+          is_long = self.portfolio.is_net_long(self.instrument_id)
+          is_flat = self.portfolio.is_net_flat(self.instrument_id)
+
+          if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
+              if not is_flat:
+                  self.close_all_positions(self.instrument_id)
+              order = self.order_factory.market(
+                  instrument_id=self.instrument_id,
+                  order_side=OrderSide.BUY,
+                  quantity=self.trade_size,
+              )
+              self.submit_order(order)
+          elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
+              self.close_all_positions(self.instrument_id)
+
+      def on_stop(self) -> None:
+          self.unsubscribe_bars(self.bar_type)
+  ```
 - 结构 3：`calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame`：
-  - 向量化计算所有指标。
+  - 必须返回行数完全相同的 DataFrame（严禁 dropna）。
   - **CRITICAL：必须计算并在返回的 DataFrame 中包含 `plot_config` 中声明的所有指标列！**
+  - 对 rolling/ewm 计算产生的头部 NaN，必须使用 `.bfill()` 或 `.fillna(0.0)` 填充，保证预热后无 NaN：
+  ```python
+  def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+      result = df.copy()
+      fast_p = int(parameters.get("fast_period", 12))
+      slow_p = int(parameters.get("slow_period", 26))
+      close = pd.to_numeric(result["close"], errors="coerce")
+      result["fast_ma"] = close.ewm(span=fast_p, adjust=False).mean().bfill()
+      result["slow_ma"] = close.ewm(span=slow_p, adjust=False).mean().bfill()
+      return result
+  ```
 - 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：
-  - 声明元数据、`parameters` 规范字典（类型为 `ParameterSpec`）及 `plot_config`。
-  - **CRITICAL：`plot_config` 必须严格遵循双层嵌套字典规范：**
+  - `strategy_path="app.strategies.{slug}:XxxStrategy"`（必须带 `app.strategies.{slug}:` 前缀）
+  - `config_path="app.strategies.{slug}:XxxConfig"`（必须带 `app.strategies.{slug}:` 前缀）
+  - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`，且必须满足 `minimum <= default <= maximum`。
+  - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`（`primary_timeframe` 必须包含在 `timeframes` 中）。
+  - `plot_config` 必须是双层嵌套字典规范：
     ```python
     plot_config = {
         "main_plot": {
@@ -64,18 +127,13 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
             "slow_ma": {"type": "line", "color": "#00aaff"},
         },
         "subplots": {
-            # 必须是两层嵌套字典：第一层为面板名称，第二层为 DataFrame 指标列名
+            # 第一层为面板标题，第二层为 DataFrame 指标列名
             "ATR": {
                 "atr": {"type": "line", "color": "#ff55ff"}
             }
         }
     }
     ```
-3. Pre-Flight 4 级运行期沙盒校验准则（代码将由沙盒全自动检测，请严格遵守）：
-- Level 1 语法与结构：必须包含 StrategyConfig 子类、Strategy 子类、calculate_indicators 函数与 STRATEGY_MANIFEST 实例。
-- Level 2 契约与实例化：StrategyConfig 子类必须声明所有在 STRATEGY_MANIFEST.parameters 中定义的参数，字段名与类型一致；plot_config 必须为双层嵌套字典，图形类型必须为 line/histogram/bar/area/baseline。
-- Level 3 指标计算：calculate_indicators 必须保持输入 DataFrame 行数不变（严禁使用 dropna 裁剪行数），必须计算并在 DataFrame 中新增 plot_config 中声明的全部指标列，且指标不能全为 NaN 或包含 Inf。
-- Level 4 运行时契约：Strategy 子类 __init__ 必须调用 super().__init__(config)，必须实现 on_bar(self, bar: Bar) 处理行情事件与下单。
 """
 
 TOOL_DEFINITIONS = [
@@ -476,13 +534,18 @@ async def write_strategy_code(
     if is_fix and error_context:
         fix_prompt = f"""
 【回测报错修复模式】
-本次回测运行时报错，请仔细分析以下错误堆栈并修复 backend/app/strategies/{strategy_name}.py 中的代码：
+本次回测运行时报错，请仔细分析以下错误堆栈并修复策略：
 {error_context}
 
-现有代码参考：
+现有完整策略代码：
 ```python
-{existing_code[:10000]}
+{existing_code[:20000]}
 ```
+
+【修复要求（极其关键）】：
+1. 深入分析报错堆栈与根因，重点检查指标计算公式、NaN 处理、持仓检查、下单数量转换及图表契约。
+2. 必须输出修复后的【完整 Python 策略代码】（包含从 import 到 STRATEGY_MANIFEST 的全部代码）。
+3. 严禁只输出局部函数、diff 补丁或纯文字解释，必须输出完整可执行的代码文件。
 """
 
     cfg = None
@@ -493,7 +556,10 @@ async def write_strategy_code(
             pass
 
     max_self_heal_turns = 2
-    eval_file = target_file
+    eval_file = work_dir / f"{strategy_name}_staging.py"
+    if existing_code:
+        eval_file.write_text(existing_code, encoding="utf-8")
+
     v_res = None
     stdout_lines: list[str] = []
 
@@ -541,13 +607,13 @@ async def write_strategy_code(
 - 错误详情: {v_res.error_message if v_res else '文件缺失'}
 - 修复建议: {v_res.suggestion if v_res else '请生成完整的 NautilusTrader 策略代码'}
 
-当前代码内容：
+当前暂存代码内容：
 ```python
-{current_code[:12000]}
+{current_code[:15000]}
 ```
 
 【修复任务】
-请针对上述具体错误与建议修复代码，直接输出修复后的完整 Python 策略代码块（```python ... ```），确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
+请针对上述具体错误与建议修复代码，直接输出修复后的【完整 Python 策略代码块】（```python ... ```），确保通过全部 4 级 Pre-Flight 运行期沙盒检测。严禁输出代码片段！
 """
         else:
             _update_status("正在生成策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
@@ -575,7 +641,7 @@ async def write_strategy_code(
                 f.flush()
 
             _update_status(
-                "代码已写入，正在执行 4 级 Pre-Flight 沙盒检测...",
+                "代码已暂存，正在执行 4 级 Pre-Flight 沙盒检测...",
                 88,
                 log_line="[VERIFY] 开始执行 4 级 Pre-Flight 运行期沙盒检测...",
             )
@@ -607,7 +673,7 @@ async def write_strategy_code(
         v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
 
     if v_res and v_res.ok:
-        # Code is fully verified, sync to persistent storage
+        # Code is fully verified, promote from staging to persistent storage
         generated_code = eval_file.read_text(encoding="utf-8")
         save_strategy_code(strategy_name, generated_code)
 

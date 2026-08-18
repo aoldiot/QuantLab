@@ -50,9 +50,9 @@ NAUTILUS_STRATEGY_CHEATSHEET = """
 【NautilusTrader 策略开发核心速查表与规范】
 1. 依赖与模块导入规范：
 ```python
+from decimal import Decimal
 import pandas as pd
 import numpy as np
-from decimal import Decimal
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar, BarType
@@ -64,33 +64,71 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
 ```
 
 2. 核心四大导出结构规范（严禁遗漏任何一项）：
-- 结构 1：`StrategyConfig` 子类：包含 `instrument_id: str`、`bar_type: str` 及策略参数定义。
-- 结构 2：`Strategy` 子类：
-  - `__init__(self, config)`：保存属性与初始化状态。
-  - `on_start(self)`：获取 `self.instrument = self.cache.instrument(self.instrument_id)` 并执行 `self.subscribe_bars(self.bar_type)`。
-  - `on_bar(self, bar: Bar)`：基于历史 Bar 或指标执行入场、出场、止损止盈与持仓管理。
-  - `on_stop(self)`：执行 `self.unsubscribe_bars(self.bar_type)`。
+- 结构 1：`StrategyConfig` 子类（继承自 `StrategyConfig, frozen=True`）：
+  ```python
+  class XxxConfig(StrategyConfig, frozen=True):
+      instrument_id: InstrumentId
+      bar_type: BarType
+      fast_period: int = 12
+      slow_period: int = 26
+      atr_period: int = 14
+      trade_size: Decimal = Decimal("0.01")
+  ```
+- 结构 2：`Strategy` 子类（继承自 `Strategy`）：
+  ```python
+  class XxxStrategy(Strategy):
+      def __init__(self, config: XxxConfig) -> None:
+          super().__init__(config)
+          self.instrument_id = config.instrument_id
+          self.bar_type = config.bar_type
+          self.fast_period = config.fast_period
+          self.slow_period = config.slow_period
+          self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
+          self.bars: list[Bar] = []
+
+      def on_start(self) -> None:
+          self.instrument = self.cache.instrument(self.instrument_id)
+          self.subscribe_bars(self.bar_type)
+
+      def on_bar(self, bar: Bar) -> None:
+          self.bars.append(bar)
+          if len(self.bars) < self.slow_period + 5:
+              return
+
+          closes = pd.Series([b.close.as_double() for b in self.bars])
+          fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
+          slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
+          prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
+          prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
+
+          is_long = self.portfolio.is_net_long(self.instrument_id)
+          is_flat = self.portfolio.is_net_flat(self.instrument_id)
+
+          if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
+              if not is_flat:
+                  self.close_all_positions(self.instrument_id)
+              order = self.order_factory.market(
+                  instrument_id=self.instrument_id,
+                  order_side=OrderSide.BUY,
+                  quantity=self.trade_size,
+              )
+              self.submit_order(order)
+          elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
+              self.close_all_positions(self.instrument_id)
+
+      def on_stop(self) -> None:
+          self.unsubscribe_bars(self.bar_type)
+  ```
 - 结构 3：`calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame`：
-  - 向量化计算所有指标。
+  - 必须返回行数完全相同的 DataFrame（严禁 dropna）。
   - **CRITICAL：必须计算并在返回的 DataFrame 中包含 `plot_config` 中声明的所有指标列！**
+  - 对 rolling/ewm 计算产生的头部 NaN，必须使用 `.bfill()` 或 `.fillna(0.0)` 填充，保证预热后无 NaN。
 - 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：
-  - 声明元数据、`parameters` 规范字典（类型为 `ParameterSpec`）及 `plot_config`。
-  - **CRITICAL：`plot_config` 必须严格遵循双层嵌套字典规范：**
-    ```python
-    plot_config = {
-        "main_plot": {
-            "close": {"type": "line", "color": "#ffffff"},
-            "fast_ma": {"type": "line", "color": "#ffaa00"},
-            "slow_ma": {"type": "line", "color": "#00aaff"},
-        },
-        "subplots": {
-            # 必须是两层嵌套字典：第一层为面板名称，第二层为 DataFrame 指标列名
-            "ATR": {
-                "atr": {"type": "line", "color": "#ff55ff"}
-            }
-        }
-    }
-    ```
+  - `strategy_path="app.strategies.{slug}:XxxStrategy"`（必须带 `app.strategies.{slug}:` 前缀）
+  - `config_path="app.strategies.{slug}:XxxConfig"`（必须带 `app.strategies.{slug}:` 前缀）
+  - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`，且必须满足 `minimum <= default <= maximum`。
+  - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`（`primary_timeframe` 必须包含在 `timeframes` 中）。
+  - `plot_config` 必须是双层嵌套字典规范。
 """
 
 
