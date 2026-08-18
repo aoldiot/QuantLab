@@ -117,40 +117,138 @@ def verify_strategy_source(source_code: str, strategy_name: str = "temp_strategy
             pass
 
 
+def _clean_code_lines(code: str) -> str:
+    """Clean common LLM code formatting artifacts, repeated fences, headers, and conversational text."""
+    if not code:
+        return ""
+
+    # Strip Unicode BOM and zero-width / invisible control characters
+    code = (
+        code.replace("\ufeff", "")
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .replace("\u2060", "")
+    )
+    lines = code.splitlines()
+
+    # 1. Strip leading invalid lines (markdown fences, info strings, language tags, conversational intro)
+    while lines:
+        line = lines[0].strip()
+        if not line:
+            lines = lines[1:]
+            continue
+
+        # Repeated code fence or docstring fence on line 1
+        if line.startswith("```") or line.startswith("'''") or line.startswith('"""') and not (line.endswith('"""') and len(line) > 6):
+            lines = lines[1:]
+            continue
+
+        # Language identifiers or file info lines
+        line_lower = line.lower()
+        if line_lower in ("python", "python3", "py", "python:", "py:"):
+            lines = lines[1:]
+            continue
+
+        if (
+            line.startswith(":")
+            or line_lower.startswith("python:")
+            or line_lower.startswith("filename=")
+            or line_lower.startswith("file:")
+            or line_lower.startswith("path:")
+            or line_lower.startswith("filepath:")
+            or line_lower.startswith("# filepath:")
+            or line_lower.startswith("//")
+            or (line.startswith("[") and line.endswith("]") and ".py" in line)
+            or (line.startswith("#") and ".py" in line and not line.startswith("#!/") and "coding:" not in line)
+            or (line.startswith("##") or line.startswith("###"))
+        ):
+            lines = lines[1:]
+            continue
+
+        # Check if line is a valid Python statement starter
+        is_valid_python_starter = (
+            line.startswith("from ")
+            or line.startswith("import ")
+            or line.startswith("class ")
+            or line.startswith("def ")
+            or line.startswith("@")
+            or line.startswith("#")
+            or line.startswith("STRATEGY_MANIFEST")
+            or line.startswith('"""')
+            or line.startswith("'''")
+            or line.startswith("try:")
+            or line.startswith("if ")
+            or line.startswith("__")
+        )
+        if is_valid_python_starter:
+            break
+
+        # If it is not a standard Python starter, test if it compiles as a standalone Python statement
+        try:
+            compile(line, "<line_test>", "exec")
+            break
+        except SyntaxError:
+            # It's non-Python conversational text on line 1, strip it!
+            lines = lines[1:]
+
+    # 2. Strip trailing closing backticks or conversational text
+    while lines:
+        line = lines[-1].strip()
+        if not line or line.startswith("```") or line.startswith("'''"):
+            lines = lines[:-1]
+            continue
+        # Check if trailing line is conversational text after manifest/definitions
+        if not line.endswith(")") and not line.endswith("}") and not line.endswith("]") and not line.endswith(":") and not line.startswith("#"):
+            try:
+                compile(line, "<line_test>", "exec")
+                break
+            except SyntaxError:
+                lines = lines[:-1]
+                continue
+        break
+
+    return "\n".join(lines).strip()
+
+
 def extract_python_strategy_code(content: str) -> str:
     """Robustly extract the full Python strategy code block from LLM output.
 
     Handles:
-    1. Multiple code blocks (e.g. ```json ..., ```markdown ..., ```python ...) by scoring blocks
+    1. Unicode BOM, zero-width spaces, and control artifacts.
+    2. Multiple code blocks (e.g. ```json ..., ```markdown ..., ```python ...) by scoring blocks
        based on Python strategy keywords (STRATEGY_MANIFEST, StrategyConfig, calculate_indicators, Strategy).
-    2. Code fence info strings (e.g. ```python:backend/app/strategies/xxx.py, ```python filename=xxx.py).
-    3. Accidental leading artifacts or header tags on line 1 (e.g. :path/to/file.py, python:path).
-    4. Naked code without code fence blocks.
+    3. Code fence info strings and repeated fences (e.g. ```python:backend/app/..., ```python\\n```python).
+    4. Conversational / markdown headers or commentary inside or outside code fences.
+    5. Fallback for unclosed code fences or raw Python code.
+    6. Multi-chunk strategy stitching when LLM divides imports, config, strategy, calculate_indicators, manifest across blocks.
     """
     if not content or not content.strip():
         return ""
 
     import re
 
+    # Strip BOM / zero-width characters upfront
+    content = (
+        content.replace("\ufeff", "")
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .replace("\u2060", "")
+    )
+
     # 1. Regex to match all fenced blocks: ```[info_string]\n[code_content]```
     fenced_pattern = r"```([^\n]*)\n([\s\S]*?)```"
     matches = re.findall(fenced_pattern, content)
 
     candidates: list[tuple[int, str]] = []
+    python_blocks: list[str] = []
+
     for info, raw_code in matches:
         info_lower = info.strip().lower()
-        cleaned_code = raw_code.strip()
-
-        # If the first line starts with a colon or info tag (e.g. ":backend/app/...", "filename=...", "python:...")
-        lines = cleaned_code.splitlines()
-        while lines and (
-            lines[0].startswith(":")
-            or lines[0].startswith("python:")
-            or lines[0].startswith("filename=")
-            or (lines[0].startswith("[") and lines[0].endswith("]") and ".py" in lines[0])
-        ):
-            lines = lines[1:]
-        cleaned_code = "\n".join(lines).strip()
+        cleaned_code = _clean_code_lines(raw_code)
+        if not cleaned_code:
+            continue
 
         # Score candidate
         score = 0
@@ -168,26 +266,46 @@ def extract_python_strategy_code(content: str) -> str:
             score += 2
 
         candidates.append((score, cleaned_code))
+        if any(lang in info_lower for lang in ("python", "py")) or "import " in cleaned_code or "class " in cleaned_code:
+            python_blocks.append(cleaned_code)
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
         best_score, best_code = candidates[0]
+        # If the best single block has all essential elements, return it
+        if best_score >= 20 or (best_score >= 10 and "STRATEGY_MANIFEST" in best_code):
+            return best_code
+
+        # If LLM split strategy into multiple code blocks, stitch them together
+        if len(python_blocks) > 1:
+            stitched = "\n\n".join(python_blocks)
+            cleaned_stitched = _clean_code_lines(stitched)
+            if "STRATEGY_MANIFEST" in cleaned_stitched and "calculate_indicators" in cleaned_stitched:
+                return cleaned_stitched
+
         if best_score > 0:
             return best_code
 
     # 2. Fallback if no clean ``` ``` was closed, but content contains Strategy definitions
     if "class " in content and "Strategy" in content and "STRATEGY_MANIFEST" in content:
+        # If there's an opening ```python fence somewhere, extract from that point forward
+        match_fence = re.search(r"```(?:python[^\n]*|py[^\n]*|[^\n]*)\n", content, flags=re.IGNORECASE)
+        if match_fence:
+            after_fence = content[match_fence.end() :]
+            # Remove any trailing closing backticks
+            after_fence = re.sub(r"\n```[^\n]*$", "", after_fence.strip())
+            cleaned_after = _clean_code_lines(after_fence)
+            if "STRATEGY_MANIFEST" in cleaned_after:
+                return cleaned_after
+
+        # Otherwise clean content directly
         naked = re.sub(r"^```[^\n]*\n", "", content.strip(), flags=re.MULTILINE)
         naked = re.sub(r"\n```$", "", naked, flags=re.MULTILINE)
-        lines = naked.splitlines()
-        while lines and (
-            lines[0].startswith(":")
-            or lines[0].startswith("python:")
-            or lines[0].startswith("filename=")
-            or (lines[0].startswith("[") and lines[0].endswith("]") and ".py" in lines[0])
-        ):
-            lines = lines[1:]
-        return "\n".join(lines).strip()
+        return _clean_code_lines(naked)
+
+    # 3. Fallback for raw python code without fences
+    if "from " in content or "import " in content or "class " in content:
+        return _clean_code_lines(content)
 
     return ""
 
@@ -347,24 +465,52 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
             suggestion="请检查代码生成过程是否被提前截断。",
         )
 
+    # Auto-clean BOM, zero-width characters and stray markdown fences if present
+    cleaned_source = _clean_code_lines(source_text)
+    if "```" in source_text or "STRATEGY_MANIFEST" in source_text:
+        extracted = extract_python_strategy_code(source_text)
+        if extracted and "STRATEGY_MANIFEST" in extracted:
+            cleaned_source = extracted
+
+    if cleaned_source and cleaned_source != source_text:
+        source_text = cleaned_source
+        try:
+            file_path.write_text(source_text, encoding="utf-8")
+        except Exception:
+            pass
+
     try:
         compile(source_text, str(file_path), "exec")
     except SyntaxError as exc:
-        step = VerificationStepResult(
-            level="L1",
-            name="Python 语法编译",
-            ok=False,
-            message=f"Python 语法错误 (第 {exc.lineno} 行): {exc.msg}",
-        )
-        steps.append(step)
-        return VerificationResult(
-            ok=False,
-            summary="Python 语法错误 (L1 静态语法失败)",
-            steps=steps,
-            failed_level="L1",
-            error_message=f"第 {exc.lineno} 行: {exc.msg}",
-            suggestion="请检查 Python 代码缩进、括号匹配与语法合规性。",
-        )
+        # Attempt auto-heal if error is at line 1 (e.g. stray comment, path tag, or header)
+        healed = False
+        if exc.lineno == 1:
+            heal_attempt = _clean_code_lines("\n".join(source_text.splitlines()[1:]))
+            if heal_attempt and "STRATEGY_MANIFEST" in heal_attempt:
+                try:
+                    compile(heal_attempt, str(file_path), "exec")
+                    source_text = heal_attempt
+                    file_path.write_text(source_text, encoding="utf-8")
+                    healed = True
+                except Exception:
+                    pass
+
+        if not healed:
+            step = VerificationStepResult(
+                level="L1",
+                name="Python 语法编译",
+                ok=False,
+                message=f"Python 语法错误 (第 {exc.lineno} 行): {exc.msg}",
+            )
+            steps.append(step)
+            return VerificationResult(
+                ok=False,
+                summary="Python 语法错误 (L1 静态语法失败)",
+                steps=steps,
+                failed_level="L1",
+                error_message=f"第 {exc.lineno} 行: {exc.msg}",
+                suggestion="请检查 Python 代码缩进、括号匹配与语法合规性。代码第一行必须是 Python 导入语句，严禁输出中文说明或格式标记。",
+            )
     except Exception as exc:
         step = VerificationStepResult(
             level="L1",

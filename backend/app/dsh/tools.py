@@ -99,12 +99,12 @@ DSH_TOOL_DEFINITIONS = [
     },
     {
         "name": "quant_save_strategy_code",
-        "description": "保存或更新 NautilusTrader 策略 Python 源代码到 backend/app/strategies/{strategy_name}.py",
+        "description": "保存或更新 NautilusTrader 策略 Python 源代码到 backend/app/strategies/{strategy_name}.py 并自动执行 4 级 Pre-Flight 运行期沙盒校验。代码第一行必须为 Python 导入语句（如 from decimal import Decimal）。",
         "parameters": {
             "type": "object",
             "properties": {
-                "strategy_name": {"type": "string", "description": "策略标识符（如 btc_ema_atr）"},
-                "code": {"type": "string", "description": "完整的 Python 源代码"},
+                "strategy_name": {"type": "string", "description": "策略小写下划线标识符（如 btc_ema_atr）"},
+                "code": {"type": "string", "description": "完整的 Python 源代码（纯代码，第一行为 import 语句）"},
             },
             "required": ["strategy_name", "code"],
         },
@@ -320,7 +320,11 @@ async def dispatch_dsh_tool_call(
         strategy_name = arguments.get("strategy_name", "")
         code = arguments.get("code", "")
         try:
-            saved_path = save_strategy_file(strategy_name, code)
+            from app.agent.strategy_verifier import extract_python_strategy_code, _clean_code_lines
+            clean_code = extract_python_strategy_code(code) if ("```" in code or not code.startswith(("from", "import", "#", "class", "\"\"\"", "'''"))) else code
+            if not clean_code.strip():
+                clean_code = _clean_code_lines(code) or code.strip()
+            saved_path = save_strategy_file(strategy_name, clean_code)
             v_res = verify_strategy_code(strategy_name, saved_path)
             is_ok = bool(v_res.get("ok")) if isinstance(v_res, dict) else False
             if db is not None:

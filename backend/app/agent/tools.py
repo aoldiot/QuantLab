@@ -616,11 +616,13 @@ async def write_strategy_code(
 【NautilusTrader 策略开发核心规范】
 {NAUTILUS_DEVELOPER_GUIDE}
 
-【严格要求】
-1. 只输出包含完整策略代码的 Python 代码块（```python ... ```）。
-2. 必须包含四大核心导出声明：`{class_prefix}Config`（继承自 StrategyConfig）、`{class_prefix}Strategy`（继承自 Strategy）、`calculate_indicators` 与 `STRATEGY_MANIFEST`。
-3. 确保所有指标和信号严格向量化与事件驱动计算正确，杜绝未来函数。
-4. 不要输出多余说明，直接输出可直接保存执行的完整 Python 代码。
+【极其重要：输出格式规范（违规将直接触发 Pre-Flight L1 语法校验失败）】
+1. 只输出包含完整策略代码的单一 Python 代码块（```python ... ```）。
+2. 代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），严禁在代码块开头输出任何中文说明、路径标签（如 :backend/app/... 或 filename=...）或重复的 ```python 标记！
+3. 必须包含四大核心导出声明：`{class_prefix}Config`（继承自 StrategyConfig）、`{class_prefix}Strategy`（继承自 Strategy）、`calculate_indicators` 与 `STRATEGY_MANIFEST`。
+4. 必须确保 `calculate_indicators` 计算了 `plot_config` 中声明的全部指标列，且使用 `.bfill().fillna(0.0)` 处理头部 NaN。
+5. 确保所有指标和信号严格向量化与事件驱动计算正确，杜绝未来函数。
+6. 不要输出任何多余的寒暄或解释，直接输出可编译执行的完整 Python 代码。
 """
     current_dsh_prompt = dsh_base_prompt
     for heal_turn in range(max_self_heal_turns + 1):
@@ -636,6 +638,7 @@ async def write_strategy_code(
 【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level if v_res else 'L1'})】
 你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒检测到以下错误：
 
+- 错误级别: {v_res.failed_level if v_res else 'L1'}
 - 错误摘要: {v_res.summary if v_res else '代码缺失或校验失败'}
 - 错误详情: {v_res.error_message if v_res else '文件缺失'}
 - 修复建议: {v_res.suggestion if v_res else '请生成完整的 NautilusTrader 策略代码'}
@@ -646,7 +649,8 @@ async def write_strategy_code(
 ```
 
 【修复任务】
-请针对上述具体错误与建议修复代码，直接输出修复后的【完整 Python 策略代码块】（```python ... ```），确保通过全部 4 级 Pre-Flight 运行期沙盒检测。严禁输出代码片段！
+请针对上述具体错误与建议修复代码，直接输出修复后的【完整 Python 策略代码块】（```python ... ```），确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
+【重要】：代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），严禁输出代码片段，严禁在第一行输出中文说明或路径标签！
 """
         else:
             _update_status("正在生成策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
@@ -654,7 +658,7 @@ async def write_strategy_code(
         logger.info("代码生成引擎开始生成策略 %s (turn=%d)...", strategy_name, heal_turn)
         content, _, reasoning = await dsh_runtime.call_llm(
             messages=[{"role": "user", "content": current_dsh_prompt}],
-            system_prompt="你是 QuantLab 首席量化策略架构师与代码开发专家。只输出符合 NautilusTrader 规范的完整 Python 代码块。",
+            system_prompt="你是 QuantLab 首席量化策略架构师与代码开发专家。只输出符合 NautilusTrader 规范的完整 Python 代码块，第一行为导入语句。",
             db_config=cfg,
         )
 

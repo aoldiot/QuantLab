@@ -159,7 +159,8 @@ class DSHOrchestrator:
         _emit("developer", "thought", f"正在基于 Researcher 的 Candidate 规格编写 NautilusTrader 策略代码：{strategy_slug}.py...")
 
         # Standard clean Nautilus strategy implementation template
-        sample_code = f'''import pandas as pd
+        sample_code = f'''from decimal import Decimal
+import pandas as pd
 import numpy as np
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy

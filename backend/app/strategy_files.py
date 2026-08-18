@@ -102,12 +102,18 @@ def ensure_strategy_storage() -> None:
 
 def save_strategy_code(name: str, code: str) -> Path:
     """Save strategy code to both ephemeral STRATEGY_DIR and persistent PERSISTENT_STRATEGY_DIR."""
+    from .agent.strategy_verifier import extract_python_strategy_code, _clean_code_lines
+
+    clean_code = extract_python_strategy_code(code) if ("```" in code or not code.startswith(("from", "import", "#", "class", "\"\"\"", "'''"))) else code
+    if not clean_code.strip():
+        clean_code = _clean_code_lines(code) or code.strip()
+
     STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     canonical = (STRATEGY_DIR / f"{name}.py").resolve()
     persisted = (PERSISTENT_STRATEGY_DIR / f"{name}.py").resolve()
-    canonical.write_text(code, encoding="utf-8")
-    persisted.write_text(code, encoding="utf-8")
+    canonical.write_text(clean_code, encoding="utf-8")
+    persisted.write_text(clean_code, encoding="utf-8")
     return canonical
 
 

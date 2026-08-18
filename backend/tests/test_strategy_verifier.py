@@ -702,10 +702,199 @@ STRATEGY_MANIFEST = StrategyManifest(
 )
 ```"""
     code2 = extract_python_strategy_code(llm_output_2)
-    assert not code2.startswith("json")
-    assert code2.startswith("from decimal import Decimal")
-    ast.parse(code2)
+    # Case 3: Nested code fences (```python\n```python\n...)
+    llm_output_3 = """```python
+```python
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+```
+```"""
+    code3 = extract_python_strategy_code(llm_output_3)
+    assert not code3.startswith("```")
+    assert code3.startswith("from decimal import Decimal")
+    ast.parse(code3)
+
+    # Case 4: Conversational text inside code block on line 1
+    llm_output_4 = """```python
+这是为您生成的完整量化策略代码：
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+```"""
+    code4 = extract_python_strategy_code(llm_output_4)
+    assert not code4.startswith("这是")
+    assert code4.startswith("from decimal import Decimal")
+    ast.parse(code4)
+
+    # Case 5: Unicode BOM and zero-width characters
+    llm_output_5 = "\ufeff\u200b```python\nfrom decimal import Decimal\nimport pandas as pd\nfrom nautilus_trader.config import StrategyConfig\nfrom nautilus_trader.model.data import BarType\nfrom nautilus_trader.model.identifiers import InstrumentId\nfrom nautilus_trader.trading.strategy import Strategy\nfrom app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode\n\nclass MyConfig(StrategyConfig, frozen=True):\n    instrument_id: InstrumentId\n    bar_type: BarType\n\nclass MyStrategy(Strategy):\n    def on_bar(self, bar):\n        pass\n\ndef calculate_indicators(df, p):\n    return df\n\nSTRATEGY_MANIFEST = StrategyManifest(\n    slug=\"my_strat\",\n    strategy_path=\"app.strategies.my_strat:MyStrategy\",\n    config_path=\"app.strategies.my_strat:MyConfig\",\n    mode=StrategyMode.SINGLE_INSTRUMENT,\n    plot_config={\"main_plot\": {}, \"subplots\": {}},\n)\n```"
+    code5 = extract_python_strategy_code(llm_output_5)
+    assert "\ufeff" not in code5
+    assert "\u200b" not in code5
+    assert code5.startswith("from decimal import Decimal")
+    ast.parse(code5)
+
+    # Case 6: Unclosed fence / truncated LLM generation
+    llm_output_6 = """好的，请查收策略代码：
+```python
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+"""
+    code6 = extract_python_strategy_code(llm_output_6)
+    assert not code6.startswith("好的")
+    assert not code6.startswith("```")
+    assert code6.startswith("from decimal import Decimal")
+    ast.parse(code6)
+
+    # Case 7: File header tags and comment lines
+    llm_output_7 = """```python
+# filepath: backend/app/strategies/my_strat.py
+// File: my_strat.py
+[my_strat.py]
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+```"""
+    code7 = extract_python_strategy_code(llm_output_7)
+    assert not code7.startswith("# filepath")
+    assert not code7.startswith("//")
+    assert not code7.startswith("[")
+    assert code7.startswith("from decimal import Decimal")
+    ast.parse(code7)
 
 
+def test_save_strategy_file_auto_sanitizes_markdown_wrapping(tmp_path, monkeypatch):
+    from app.strategy_files import save_strategy_code
+    import app.strategy_files as sf
 
+    monkeypatch.setattr(sf, "STRATEGY_DIR", tmp_path / "strategies")
+    monkeypatch.setattr(sf, "PERSISTENT_STRATEGY_DIR", tmp_path / "persist")
 
+    dirty_code = """```python
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class TestStratConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class TestStratStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="test_strat",
+    strategy_path="app.strategies.test_strat:TestStratStrategy",
+    config_path="app.strategies.test_strat:TestStratConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+```"""
+    saved_path = save_strategy_code("test_strat", dirty_code)
+    disk_content = saved_path.read_text(encoding="utf-8")
+    assert not disk_content.startswith("```")
+    assert disk_content.startswith("from decimal import Decimal")
+    # Verify it compiles cleanly
+    compile(disk_content, str(saved_path), "exec")

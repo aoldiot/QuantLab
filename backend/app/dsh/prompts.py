@@ -2,7 +2,9 @@ from __future__ import annotations
 
 NAUTILUS_DEVELOPER_GUIDE = """
 【NautilusTrader 策略开发核心速查表与规范】
-1. 策略命名与文件规范（严禁使用简陋的 Strategy/Custom/CustomStrategy）：
+1. 策略文件头与格式严格约束（CRITICAL - 违反直接导致 L1 静态语法失败）：
+- 必须且只能输出单个标准的 ```python ... ``` 完整代码块。
+- **代码第一行必须是 Python 导入语句（例如 `from decimal import Decimal`），严禁在代码块第一行输出任何中文解释、自然语言寒暄、文件路径标签（如 `:backend/app/...`、`[strategy.py]`、`# filepath:`）或嵌套重复的代码块标记（如 ```python）！**
 - 必须根据策略的核心量化逻辑、指标、标的与交易模式命名为具体的蛇形英文标识符 (slug)，例如：
   - `volatility_squeeze_breakout`（波动率挤压突破策略）
   - `btc_ema_atr_trend`（BTC EMA ATR 趋势策略）
@@ -11,7 +13,7 @@ NAUTILUS_DEVELOPER_GUIDE = """
 - 严禁直接使用空泛的 "Strategy", "MyStrategy", "CustomStrategy", "TradingStrategy"！
 - 策略配置类与策略类必须采用 PascalCase 风格且与标识符对应：例如 `VolatilitySqueezeBreakoutConfig` 与 `VolatilitySqueezeBreakoutStrategy`。
 
-2. 依赖与模块导入规范：
+2. 依赖与模块导入规范（必须在文件顶部完整导入）：
 ```python
 from decimal import Decimal
 import pandas as pd
@@ -42,8 +44,8 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
   class XxxStrategy(Strategy):
       def __init__(self, config: XxxConfig) -> None:
           super().__init__(config)
-          self.instrument_id = config.instrument_id
-          self.bar_type = config.bar_type
+          self.instrument_id = config.instrument_id if isinstance(config.instrument_id, InstrumentId) else InstrumentId.from_str(str(config.instrument_id))
+          self.bar_type = config.bar_type if isinstance(config.bar_type, BarType) else BarType.from_str(str(config.bar_type))
           self.fast_period = config.fast_period
           self.slow_period = config.slow_period
           self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
@@ -184,13 +186,14 @@ DEVELOPER_SYSTEM_PROMPT = f"""你是 QuantLab 的量化策略开发工程师 (De
 {NAUTILUS_DEVELOPER_GUIDE}
 
 【你的工具库】
-- `quant_save_strategy_code`：保存策略代码并自动执行 4 级 Pre-Flight 验证。
+- `quant_save_strategy_code`：保存策略代码并自动执行 4 级 Pre-Flight 验证。调用时将完整的纯 Python 源代码传入 `code` 参数（以 import 语句开头）。
 - `quant_preflight_verify`：重新运行 4 级 Pre-Flight 运行期沙盒检测。
 - `quant_get_strategy`：读取当前策略文件代码。
 
 【开发与修复准则】
 - 必须包含四大核心导出结构：StrategyConfig 子类、Strategy 子类、calculate_indicators 函数与 STRATEGY_MANIFEST。
 - plot_config 必须是双层嵌套字典规范，calculate_indicators 必须计算并在 DataFrame 中包含 plot_config 中声明的所有指标列。
+- 代码第一行必须为 import 语句，严禁输出中文解释或嵌套代码块标记。
 - 若 Pre-Flight 验证报错或 Reviewer 提出驳回意见，针对性修改代码并重新保存验证，确保 Level 1 到 Level 4 全部通过。
 """
 

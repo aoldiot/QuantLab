@@ -31,7 +31,11 @@ def save_strategy_file(strategy_name: str, code: str) -> Path:
     strategy_name = strategy_name.strip().lower()
     if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", strategy_name):
         raise ValueError(f"无效的策略名称: {strategy_name}")
-    save_strategy_code(strategy_name, code)
+    from app.agent.strategy_verifier import extract_python_strategy_code, _clean_code_lines
+    clean_code = extract_python_strategy_code(code) if ("```" in code or not code.startswith(("from", "import", "#", "class", "\"\"\"", "'''"))) else code
+    if not clean_code.strip():
+        clean_code = _clean_code_lines(code) or code.strip()
+    save_strategy_code(strategy_name, clean_code)
     return _path(strategy_name)
 
 

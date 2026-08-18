@@ -41,6 +41,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {Link,useLocation,useNavigate} from 'react-router-dom'
 import CodeEditor from '../CodeEditor'
+import ExportModal from '../ExportModal'
 import {api} from '../api'
 import {Status} from '../components'
 import type {
@@ -1705,6 +1706,7 @@ export default function Research(){
   const[expandedTools,setExpandedTools]=useState<Record<string,boolean>>({})
 
   // Export log state
+  const[exportModalOpen,setExportModalOpen]=useState(false)
   const[exportMenuOpen,setExportMenuOpen]=useState(false)
   const[exportingLog,setExportingLog]=useState(false)
 
@@ -2331,9 +2333,21 @@ export default function Research(){
               <span>量化研究会话</span>
               {projects.length>0&&<span className="count-pill">{projects.length}</span>}
             </div>
-            <button className="button primary new-session-btn" onClick={()=>setCreating(true)}>
-              <Plus size={14}/>新建研究
-            </button>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button
+                type="button"
+                className="button tool-btn"
+                style={{ height: '30px', padding: '0 8px', fontSize: '11px', borderColor: 'rgba(33,201,237,0.3)', background: 'rgba(33,201,237,0.08)', color: '#70e1f5' }}
+                onClick={() => setExportModalOpen(true)}
+                title="导出策略研究记录与 DSH 调试日志"
+              >
+                <FileDown size={13} className="text-cyan" />
+                <span>导出</span>
+              </button>
+              <button className="button primary new-session-btn" onClick={()=>setCreating(true)}>
+                <Plus size={14}/>新建
+              </button>
+            </div>
           </div>
 
           <div className="session-list">
@@ -2405,38 +2419,16 @@ export default function Research(){
                   >
                     <FlaskConical size={14}/>回测列表 ({runs.length})
                   </button>
-                  <div className="header-export-container" style={{ position: 'relative' }}>
-                    <button
-                      className="button tool-btn header-export-btn"
-                      title="导出策略研究记录与 DSH 调试日志"
-                      onClick={() => setExportMenuOpen((o) => !o)}
-                      disabled={exportingLog}
-                    >
-                      {exportingLog ? <Loader2 size={14} className="spin text-cyan" /> : <FileDown size={14} />}
-                      导出日志
-                      <ChevronDown size={11} />
-                    </button>
-                    {exportMenuOpen && (
-                      <div className="header-export-dropdown">
-                        <button
-                          type="button"
-                          className="header-export-item"
-                          onClick={() => handleExportLog('markdown')}
-                        >
-                          <FileText size={13} className="text-cyan" />
-                          <span>导出 Markdown 报告 (.md)</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="header-export-item"
-                          onClick={() => handleExportLog('json')}
-                        >
-                          <FileJson size={13} className="text-amber" />
-                          <span>导出 JSON 原始数据 (.json)</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  <button
+                    type="button"
+                    className="button tool-btn header-export-btn active"
+                    style={{ borderColor: 'rgba(33,201,237,0.4)', background: 'rgba(33,201,237,0.12)', color: '#70e1f5', fontWeight: 600 }}
+                    title="导出当前策略完整研究记录与 DSH 调试日志"
+                    onClick={() => setExportModalOpen(true)}
+                  >
+                    <FileDown size={14} className="text-cyan" />
+                    <span>导出日志</span>
+                  </button>
                   <button className="button icon-btn" title={project.status==='ARCHIVED'?'重新打开':'归档研究'} onClick={handleArchive}>
                     {project.status==='ARCHIVED'?<RotateCcw size={14}/>:<Archive size={14}/>}
                   </button>
@@ -3062,6 +3054,11 @@ export default function Research(){
           </section>
         </div>
       )}
+      <ExportModal
+        isOpen={exportModalOpen}
+        onClose={() => setExportModalOpen(false)}
+        defaultProjectId={project?.id}
+      />
     </div>
   )
 }
