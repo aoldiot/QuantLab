@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.strategy_verifier import verify_strategy_file
 from app.git_versions import code_hash, manifest_hash
 from app.models import ResearchProject, Strategy, StrategyVersion
-from app.strategy_contract import load_manifest
+from app.strategy_contract import load_manifest, sanitize_strategy_slug
 from app.strategy_files import _path, save_strategy_code
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def get_strategy_code(strategy_name: str) -> str | None:
     """Retrieve strategy python code by name."""
-    strategy_name = strategy_name.strip().lower()
+    strategy_name = sanitize_strategy_slug(strategy_name) if strategy_name else ""
     p = _path(strategy_name)
     if not p.exists():
         return None
@@ -28,17 +28,15 @@ def get_strategy_code(strategy_name: str) -> str | None:
 
 def save_strategy_file(strategy_name: str, code: str) -> Path:
     """Save code into backend/app/strategies/{strategy_name}.py."""
-    strategy_name = strategy_name.strip().lower()
-    if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", strategy_name):
-        raise ValueError(f"无效的策略名称: {strategy_name}")
-    save_strategy_code(strategy_name, code)
-    return _path(strategy_name)
+    slug = sanitize_strategy_slug(strategy_name)
+    save_strategy_code(slug, code)
+    return _path(slug)
 
 
 def verify_strategy_code(strategy_name: str, custom_path: Path | None = None) -> dict[str, Any]:
     """Run the 4-level Pre-Flight sandbox verification."""
-    strategy_name = strategy_name.strip().lower()
-    target = custom_path or _path(strategy_name)
+    slug = sanitize_strategy_slug(strategy_name) if strategy_name else "temp_strategy"
+    target = custom_path or _path(slug)
     if not target.exists():
         return {
             "ok": False,
@@ -47,7 +45,7 @@ def verify_strategy_code(strategy_name: str, custom_path: Path | None = None) ->
             "steps": [],
         }
 
-    res = verify_strategy_file(target, strategy_name=strategy_name)
+    res = verify_strategy_file(target, strategy_name=slug)
     return res.to_dict()
 
 
@@ -58,20 +56,21 @@ async def ensure_strategy_db_record(
 ) -> tuple[Strategy, StrategyVersion] | None:
     """Ensure Strategy and StrategyVersion exist in DB and link with project."""
     try:
-        strategy_name = strategy_name.strip().lower()
-        source_path = _path(strategy_name)
+        raw_name = strategy_name.strip() if strategy_name else ""
+        slug = sanitize_strategy_slug(raw_name)
+        source_path = _path(slug)
         if not source_path.exists():
             return None
         code = source_path.read_text(encoding="utf-8")
         if not code.strip():
             return None
 
-        module = f"app.strategies.{strategy_name}"
+        module = f"app.strategies.{slug}"
         c_hash = code_hash(code)
         try:
             manifest = load_manifest(module)
             s_name = manifest.name
-            s_slug = manifest.slug
+            s_slug = manifest.slug or slug
             s_desc = manifest.description
             s_cat = manifest.category
             s_ver = manifest.version
@@ -80,8 +79,8 @@ async def ensure_strategy_db_record(
             m_hash = manifest_hash(manifest)
         except Exception as m_exc:
             logger.warning("解析策略 Manifest 降级处理 (%s): %s", strategy_name, m_exc)
-            s_name = strategy_name.replace("_", " ").title()
-            s_slug = strategy_name
+            s_name = slug.replace("_", " ").title()
+            s_slug = slug
             s_desc = "QuantLab 研究策略"
             s_cat = "trend"
             s_ver = "1.0.0"
@@ -95,7 +94,16 @@ async def ensure_strategy_db_record(
             }
             m_hash = c_hash
 
-        strat = await db.scalar(select(Strategy).where(Strategy.slug == s_slug))
+        slug_candidates = list(dict.fromkeys(filter(None, [
+            s_slug,
+            slug,
+            raw_name,
+            s_slug.replace("-", "_") if s_slug else "",
+            s_slug.replace("_", "-") if s_slug else "",
+            raw_name.replace("-", "_") if raw_name else "",
+            raw_name.replace("_", "-") if raw_name else "",
+        ])))
+        strat = await db.scalar(select(Strategy).where(Strategy.slug.in_(slug_candidates)))
         if strat is None:
             strat = Strategy(
                 name=s_name,

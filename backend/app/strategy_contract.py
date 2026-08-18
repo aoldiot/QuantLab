@@ -1,11 +1,44 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from importlib import import_module, reload
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+def sanitize_strategy_slug(name: str) -> str:
+    """Normalize any user/LLM provided strategy name/filename into a standard safe Python identifier slug.
+
+    Examples:
+        'volatility-squeeze-breakout' -> 'volatility_squeeze_breakout'
+        'VolatilitySqueezeBreakout' -> 'volatility_squeeze_breakout'
+        'volatility_squeeze_breakout.py' -> 'volatility_squeeze_breakout'
+        'backend/app/strategies/volatility_squeeze_breakout.py' -> 'volatility_squeeze_breakout'
+        '  Awesome Trend Strategy!  ' -> 'awesome_trend_strategy'
+    """
+    if not name:
+        return "custom_strategy"
+    clean = str(name).strip()
+    if "/" in clean or "\\" in clean:
+        clean = Path(clean).stem
+    if clean.endswith(".py"):
+        clean = clean[:-3]
+    # Convert CamelCase to snake_case if applicable
+    clean = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", clean)
+    # Replace non-alphanumeric chars (hyphens, spaces, dots, etc.) with underscore
+    clean = re.sub(r"[^a-zA-Z0-9_]", "_", clean)
+    clean = clean.lower()
+    # Collapse multiple consecutive underscores
+    clean = re.sub(r"_+", "_", clean).strip("_")
+    if not clean:
+        return "custom_strategy"
+    if clean[0].isdigit():
+        clean = f"s_{clean}"
+    return clean[:64]
 
 
 class StrategyMode(StrEnum):
@@ -95,9 +128,23 @@ class StrategyManifest:
     requires_funding: bool = True
     strategy_id: str = ""
     id: str = ""
+    supported_modes: Any = None
 
     def __post_init__(self):
-        actual_slug = self.slug or self.strategy_id or self.id or "strategy"
+        if self.supported_modes is not None:
+            raw_modes = self.supported_modes if isinstance(self.supported_modes, (list, tuple, set)) else [self.supported_modes]
+            if raw_modes:
+                first = next(iter(raw_modes))
+                if isinstance(first, StrategyMode):
+                    object.__setattr__(self, "mode", first)
+                elif isinstance(first, str):
+                    try:
+                        object.__setattr__(self, "mode", StrategyMode(first.upper()))
+                    except Exception:
+                        pass
+
+        raw_slug = self.slug or self.strategy_id or self.id or "strategy"
+        actual_slug = sanitize_strategy_slug(raw_slug)
         if not self.slug:
             object.__setattr__(self, "slug", actual_slug)
         if not self.name:

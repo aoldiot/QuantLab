@@ -39,7 +39,7 @@ class StrategyVersionOut(BaseModel):
 
 
 class StrategyFileCreate(BaseModel):
-    name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    name: str = Field(min_length=1, max_length=128)
     mode: Literal["SINGLE_INSTRUMENT", "PORTFOLIO"] = "PORTFOLIO"
     description: str = Field(min_length=1, max_length=500)
     category: str = Field(min_length=1, max_length=50)
@@ -180,7 +180,7 @@ class LlmConfigurationUpdate(BaseModel):
 
 class AgentSessionCreate(BaseModel):
     client_id: str = Field(default="default_client", max_length=100)
-    strategy_name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    strategy_name: str = Field(min_length=1, max_length=128)
     permission_mode: PermissionMode = "default"
 
 
@@ -225,7 +225,7 @@ class ResearchIterationCreate(BaseModel):
 
 
 class ResearchWriteStrategyRequest(BaseModel):
-    strategy_name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
+    strategy_name: str = Field(min_length=1, max_length=128)
     instructions: str = Field(min_length=1, max_length=50_000)
     specification: dict[str, Any] | None = None
     is_fix: bool = False

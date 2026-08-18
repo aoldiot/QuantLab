@@ -20,7 +20,7 @@ from ..git_versions import code_hash, manifest_hash
 from ..llm_config import get_config
 from ..models import BacktestRun, ResearchProject, RunStatus, Strategy, StrategyVersion
 from ..runner import execute_backtest
-from ..strategy_contract import load_manifest, validate_parameters
+from ..strategy_contract import load_manifest, sanitize_strategy_slug, validate_parameters
 from ..strategy_files import _path, save_strategy_code, STRATEGY_DIR
 from .strategy_verifier import verify_strategy_file, VerificationResult
 
@@ -325,20 +325,21 @@ async def ensure_strategy_db_record(
 ) -> tuple[Strategy, StrategyVersion] | None:
     """Ensure Strategy and StrategyVersion exist in the DB and link to ResearchProject if specified."""
     try:
-        strategy_name = strategy_name.strip().lower()
-        source_path = _path(strategy_name)
+        raw_name = strategy_name.strip() if strategy_name else ""
+        slug = sanitize_strategy_slug(raw_name)
+        source_path = _path(slug)
         if not source_path.exists():
             return None
         code = source_path.read_text(encoding="utf-8")
         if not code.strip():
             return None
 
-        module = f"app.strategies.{strategy_name}"
+        module = f"app.strategies.{slug}"
         c_hash = code_hash(code)
         try:
             manifest = load_manifest(module)
             s_name = manifest.name
-            s_slug = manifest.slug
+            s_slug = manifest.slug or slug
             s_desc = manifest.description
             s_cat = manifest.category
             s_ver = manifest.version
@@ -347,8 +348,8 @@ async def ensure_strategy_db_record(
             m_hash = manifest_hash(manifest)
         except Exception as m_exc:
             logger.warning("解析策略 Manifest 降级处理 (%s): %s", strategy_name, m_exc)
-            s_name = strategy_name.replace("_", " ").title()
-            s_slug = strategy_name
+            s_name = slug.replace("_", " ").title()
+            s_slug = slug
             s_desc = "QuantLab 量化研究策略"
             s_cat = "trend"
             s_ver = "1.0.0"
@@ -356,7 +357,16 @@ async def ensure_strategy_db_record(
             s_dreq = {"timeframes": ["15m"], "primary_timeframe": "15m", "multi_symbol": True, "funding": True, "supports_short": True}
             m_hash = c_hash
 
-        strat = await db.scalar(select(Strategy).where(Strategy.slug == s_slug))
+        slug_candidates = list(dict.fromkeys(filter(None, [
+            s_slug,
+            slug,
+            raw_name,
+            s_slug.replace("-", "_") if s_slug else "",
+            s_slug.replace("_", "-") if s_slug else "",
+            raw_name.replace("-", "_") if raw_name else "",
+            raw_name.replace("_", "-") if raw_name else "",
+        ])))
+        strat = await db.scalar(select(Strategy).where(Strategy.slug.in_(slug_candidates)))
         if strat is None:
             strat = Strategy(
                 name=s_name,
@@ -489,13 +499,13 @@ async def write_strategy_code(
 
     # Attempt to resolve missing/generic strategy_name from instructions, error_context, or project
     if not strategy_name or strategy_name in ("strategy", "custom_strategy"):
-        m = re.search(r"backend/app/strategies/([a-z][a-z0-9_]{1,63})\.py", instructions or "")
+        m = re.search(r"backend/app/strategies/([a-zA-Z0-9_\-]+)\.py", instructions or "")
         if not m:
-            m = re.search(r"策略[「\"']([a-z][a-z0-9_]{1,63})[」\"']", instructions or "")
+            m = re.search(r"策略[「\"']([a-zA-Z0-9_\-\s]+)[」\"']", instructions or "")
         if not m and error_context:
-            m = re.search(r"backend/app/strategies/([a-z][a-z0-9_]{1,63})\.py", error_context)
+            m = re.search(r"backend/app/strategies/([a-zA-Z0-9_\-]+)\.py", error_context)
         if m:
-            strategy_name = m.group(1).lower()
+            strategy_name = m.group(1)
 
     if (not strategy_name or strategy_name in ("strategy", "custom_strategy")) and db and project_id:
         try:
@@ -504,17 +514,11 @@ async def write_strategy_code(
             if proj and proj.strategy_id:
                 strat = await db.get(Strategy, proj.strategy_id)
                 if strat and strat.slug:
-                    strategy_name = strat.slug.lower()
+                    strategy_name = strat.slug
         except Exception as e:
             logger.warning("尝试从项目关联策略获取 strategy_name 失败: %s", e)
 
-    if not strategy_name or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", strategy_name):
-        err_msg = f"策略名称格式不合法 ('{strategy_name}')，必须使用小写字母、数字和下划线，且以字母开头"
-        _update_status("参数校验失败", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
-        return {
-            "ok": False,
-            "error": err_msg,
-        }
+    strategy_name = sanitize_strategy_slug(strategy_name) if strategy_name else "custom_strategy"
 
     repo_path = settings.strategy_repo_path.resolve()
     target_file = (repo_path / "backend/app/strategies" / f"{strategy_name}.py").resolve()

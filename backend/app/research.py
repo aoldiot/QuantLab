@@ -37,6 +37,7 @@ from .schemas import (
     ResearchProjectCreate,
     ResearchWriteStrategyRequest,
 )
+from .strategy_contract import sanitize_strategy_slug
 from .strategy_files import _path, save_strategy_code
 
 
@@ -1446,24 +1447,32 @@ async def get_project_strategy(
                     or (Path(arg_path).stem if arg_path.endswith(".py") else None)
                 )
                 if not s_name:
-                    s_m = re.search(r'策略名称[：:\s]+([a-z0-9_]+)', str(t_msg.content) + " " + str(t_msg.metadata_json))
+                    s_m = re.search(r'策略名称[：:\s]+([a-zA-Z0-9_\-]+)', str(t_msg.content) + " " + str(t_msg.metadata_json))
                     if s_m:
                         s_name = s_m.group(1)
                 if not s_name and "app/strategies/" in t_msg.content:
-                    p_match = re.search(r'app/strategies/([a-z0-9_]+)\.py', t_msg.content)
+                    p_match = re.search(r'app/strategies/([a-zA-Z0-9_\-]+)\.py', t_msg.content)
                     if p_match:
                         s_name = p_match.group(1)
                 if s_name:
                     target_name = s_name
                     break
 
-    # If target_name found, try to read from disk or persistent storage
+    # If target_name found, try to read from disk or persistent storage with flexible slug variations
     if target_name:
-        res = get_strategy_code_tool(target_name)
-        if res.get("ok"):
-            # Ensure DB record is synced and linked to project
-            await ensure_strategy_db_record(target_name, db, project_id=project.id)
-            return res
+        clean_slug = sanitize_strategy_slug(target_name)
+        candidates = list(dict.fromkeys(filter(None, [
+            target_name,
+            clean_slug,
+            target_name.replace("-", "_"),
+            target_name.replace("_", "-"),
+            clean_slug.replace("_", "-"),
+        ])))
+        for c_name in candidates:
+            res = get_strategy_code_tool(c_name)
+            if res.get("ok"):
+                await ensure_strategy_db_record(c_name, db, project_id=project.id)
+                return res
 
     # If still not found, check assistant messages for python code blocks containing STRATEGY_MANIFEST
     asst_msgs = (
