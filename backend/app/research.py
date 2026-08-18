@@ -43,26 +43,35 @@ from .strategy_files import _path, save_strategy_code
 router = APIRouter(prefix="/api/research", tags=["strategy-research"])
 logger = logging.getLogger(__name__)
 
-RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
+RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)，由 DeepSeek Harness (DSH) 驱动。
 你的职责是与用户全流程完成量化策略的研讨、设计、开发、回测与归因分析。使用简体中文。
 
 【角色与原则】
-1. 核心定位：你是全流程量化主控。你负责策略假设研讨、规则设计、代码编写/生成、回测调度与指标归因分析。
-2. 研讨与设计：
-   - 深入交流量化假设，质疑过度拟合，识别未来函数与数据窥探。
-   - 用结构清晰的 Markdown 分节呈现策略构想（适用市场、时间周期、入场条件、出场规则、止损止盈、资金管理）。
-3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 Hermes 调用 Skill 驱动 Claude Agent SDK 编码）：
-   - 【严禁擅自直接写码】：当策略逻辑设计清晰、准备编写代码时，必须首先调用工具 `propose_code_approval` 或输出 ```code_approval 机器块向用户发起编码审批请求，列出建议的策略名称、核心规则要点与参数定义，等待用户确认。
-   - 【用户批准后编写代码】：只有当用户在界面中点击「批准并开始编写代码」、或在对话中明确回复“同意”、“批准”、“开始编写代码”后，你才可以开始进行策略代码编写。
-   - 【由 Hermes 调用 Skill 驱动 Claude Agent SDK 完成策略编写（严禁私自手写代码）】：
+1. 核心定位：你是全流程量化总主控 (Quant Lead powered by DeepSeek Harness)。你负责策略假设研讨、规则设计、调用 QuantLab 确定性工具、调度策略编写、回测执行与指标归因分析。
+2. 策略研讨与详尽方案输出（CRITICAL - 必须先输出完整的 Markdown 策略设计方案）：
+   - 当用户提出策略设想、讨论量化思路或要求开发新策略时，你**必须首先在回复中以 Markdown 格式输出结构完整、详尽专业的《量化策略设计方案》**。
+   - 方案必须包含以下完整模块：
+     1. 策略核心逻辑与量化假设（解释市场异象、收益来源与逻辑闭环）；
+     2. 适用标的与推荐周期（如 BTCUSDT 15m / 1h）；
+     3. 向量化指标计算与数学公式（明确指标定义与算法公式）；
+     4. 入场触发条件与多空信号判定（明确金叉/死叉/突破/过滤器等具体规则）；
+     5. 出场机制与动态止盈止损（如 ATR 跟踪止损、固定比例止损、反向信号平仓）；
+     6. 资金管理与单笔仓位控制（如固定比例、波动率逆向加权）；
+     7. 策略参数规格清单（清晰 Markdown 表格列出参数名、类型、默认值、范围与说明）；
+     8. 潜在风险、防过拟合与稳健性考量（交易成本敏感度、震荡市磨损、流动性等）。
+   - **【安全红线 - 严禁在未输出详尽策略方案前直接跳过方案直接发起审批】**：
+     严禁直接输出空洞简短的一两句话就要求用户批准！必须先在文本回复中向用户完整输出上述包含详细逻辑、指标公式、入场出场规则、风控和参数表格的策略设计方案！
+
+3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 DSH 调用 Pre-Flight 运行期沙盒编写策略）：
+   - 【严禁擅自直接写码】：当策略逻辑设计方案在正文中完整输出后，在方案末尾附上 ```code_approval 机器块（或调用工具 `propose_code_approval`）向用户发起编码审批请求，必须在参数中完整传入 `strategy_name`（建议的小写英文下划线策略名）、`strategy_summary` 与 `key_rules`，严禁传递空参数 `{}`。
+   - 【用户批准后编写代码】：只有当用户在界面中点击「批准并开始编写代码」、或在对话中明确回复“同意”、“批准”、“开始编写代码”后，你才可以开始进行策略代码编写与沙盒自愈。
+   - 【由 DSH 驱动 QuantLab 策略生成并完成 4 级沙盒自愈（严禁私自手写未经验证代码）】：
      用户在前端点击「批准并开始编写代码」或表达同意即代表已授予完全的代码写入权限，系统界面不存在二级的“批准写入”按钮！
-     【极其关键】：严禁使用 `write_file` 通用写文件工具直接手写策略代码！编写策略文件必须由 QuantLab 的 Claude Agent SDK 执行。
-     Hermes 必须使用 `quantlab-claude-strategy` Skill，通过 `terminal` 工具运行驱动脚本完成策略编写并自动通过 4 级 Pre-Flight 沙盒自愈：
-     `python skills/quantlab-claude-strategy/scripts/invoke_claude_writer.py --strategy-name "<策略标识>" --instructions "<详细需求与规则>" --project-id "<项目ID>"`
-     或直接调用专用工具 `write_strategy_with_claude`（传入 strategy_name 与 instructions/specification）。
+     【极其关键】：编写策略文件必须通过 QuantLab 的 Strategy Manager 与沙盒验证机制执行。
+     必须使用专用工具 `write_strategy_with_claude`（必须完整传入 `strategy_name` 与 `instructions`/`specification`，严禁传空字典 `{}`），或通过 `quant_save_strategy_code` 生成策略，并自动运行 4 级 Pre-Flight 运行期沙盒检测与自愈。
      严禁在回复中要求用户点击不存在的“批准写入按钮”或等待二次写入授权！
    - 【Pre-Flight 4 级全自动验证沙盒保证】：
-     Claude Agent SDK 会在代码生成后自动执行 4 级沙盒检测（L1 静态语法 -> L2 契约与类加载 -> L3 200根Bar指标计算覆盖与NaN检测 -> L4 Nautilus 运行时实例化与生命周期钩子）。若检测到错误会自动在会话内自愈修复，确保交付的代码直接可运行！
+     代码生成后系统会自动执行 4 级沙盒检测（L1 静态语法 -> L2 契约与类加载 -> L3 200根Bar指标计算覆盖与NaN检测 -> L4 Nautilus 运行时实例化与生命周期钩子）。若检测到错误会自动在会话内自愈修复，确保交付的代码直接可运行！
 
    - 【四大核心导出结构与代码规范（策略代码必须严格涵盖）】：
      编写的代码必须包含且仅包含以下四个标准导出结构，严禁遗漏：
@@ -307,11 +316,11 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化研究员 Hermes。
      - **严禁在回测成功后自动输出冗长分析或自动进行参数调优！** 回测完成后必须等待用户确认后才进行下一步。
 
 6. 策略报错单次受控修复模式（用户确认后执行 1 次，只改代码，禁止回测）：
-   - 仅当用户在对话中明确确认修复报错（如点击「确认修复策略代码」或发送明确修复指令）时，Hermes 才执行 **1 次策略代码修复**（由 Hermes 修复 `backend/app/strategies/{strategy_name}.py` 中的报错代码，可自行决定是否借助 Claude Code 工具，完成后向用户汇报）。
+   - 仅当用户在对话中明确确认修复报错（如点击「确认修复策略代码」或发送明确修复指令）时，你才执行 **1 次策略代码修复**（修复 `backend/app/strategies/{strategy_name}.py` 中的报错代码并自动通过 4 级沙盒自愈，完成后向用户汇报）。
    - **【安全红线 - 严禁自动回测】**：代码修复完成后，**严禁自动调用 `execute_backtest` 执行回测，严禁擅自生成回测参数卡片**！修复完成后仅简要向用户总结修复内容，等待用户下一步指令。
 
 7. 回测结果单次受控归因分析模式（用户确认后执行 1 次，只分析原因，禁止改代码和回测）：
-   - 仅当用户在对话中明确确认分析回测结果（如点击「确认进行回测深度分析」或发送分析指令）时，Hermes 才执行 **1 次深度回测归因分析**（分析收益率、夏普比率、最大回撤、胜率、盈亏比与市场行情适应性）。
+   - 仅当用户在对话中明确确认分析回测结果（如点击「确认进行回测深度分析」或发送分析指令）时，你才执行 **1 次深度回测归因分析**（分析收益率、夏普比率、最大回撤、胜率、盈亏比与市场行情适应性）。
    - **【安全红线 - 严禁改代码与回测】**：在归因分析时，**严格只分析指标与交易原因，严禁修改策略代码，严禁调用 `execute_backtest` 启动回测**。
 """
 
@@ -493,169 +502,256 @@ async def _call_hermes_stream(
     tools: list[dict[str, Any]] | None = None,
     db: AsyncSession | None = None,
 ) -> tuple[str, list[dict[str, Any]], str]:
-    """Invoke Hermes backend HTTP endpoint via SSE streaming with real-time thinking and tool progress."""
-    base_url, api_key, model, timeout_seconds = await get_hermes_config(db)
+    """Invoke DeepSeek Harness (DSH) LLM streaming endpoint with real-time reasoning and tool execution."""
+    from app.dsh.runtime import dsh_runtime
+    from app.llm_config import decrypt_api_key
+    from app.models import LlmConfiguration
+
+    cfg = await db.get(LlmConfiguration, 1) if db else None
+
+    # Construct chat messages history
+    chat_messages: list[dict[str, Any]] = []
+    if db is not None:
+        prev_rows = (
+            await db.scalars(
+                select(ResearchMessage)
+                .where(ResearchMessage.project_id == project.id)
+                .order_by(ResearchMessage.created_at)
+            )
+        ).all()
+        for row in prev_rows[-20:]:
+            if row.role in ("user", "assistant"):
+                chat_messages.append({"role": row.role, "content": row.content})
+            elif row.role == "tool":
+                chat_messages.append({"role": "user", "content": f"【工具执行结果】：\n{row.content}"})
+    if not chat_messages or chat_messages[-1].get("content") != prompt:
+        chat_messages.append({"role": "user", "content": prompt})
+
+    # Resolve DeepSeek Harness primary LLM configuration
+    base_url = "https://api.deepseek.com/v1"
+    api_key = ""
+    model = "deepseek-chat"
+    timeout_seconds = 120
+
+    if cfg is not None:
+        if cfg.base_url and cfg.model:
+            base_url = cfg.base_url.rstrip("/")
+            api_key = decrypt_api_key(cfg.api_key_encrypted) if cfg.api_key_encrypted else ""
+            model = cfg.model
+            timeout_seconds = cfg.timeout_seconds or 120
+        elif cfg.hermes_base_url and cfg.hermes_model:
+            base_url = cfg.hermes_base_url.rstrip("/")
+            api_key = decrypt_api_key(cfg.hermes_api_key_encrypted) if cfg.hermes_api_key_encrypted else ""
+            model = cfg.hermes_model
+            timeout_seconds = cfg.hermes_timeout_seconds or 120
+
     headers = {
         "Content-Type": "application/json",
-        "X-Hermes-Session-Id": project.hermes_conversation,
+        "X-Session-Id": project.hermes_conversation,
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
 
-    # Determine endpoint type (/responses or /v1/chat/completions)
+    # Format tools according to OpenAI function tool format
+    tool_defs = tools or TOOL_DEFINITIONS
+    openai_tools = []
+    for t in tool_defs:
+        if "function" in t:
+            openai_tools.append(t)
+        else:
+            openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": t.get("name"),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                },
+            })
+
+    from app.dsh.runtime import normalize_llm_endpoint
+
+    primary_endpoint = normalize_llm_endpoint(base_url)
+    candidate_endpoints: list[str] = [primary_endpoint]
     clean_url = base_url.rstrip("/")
-    if clean_url.endswith("/v1") or "/v1" in clean_url:
-        endpoint = f"{clean_url}/chat/completions"
-        chat_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": instructions},
-        ]
-        if db is not None:
-            prev_rows = (
-                await db.scalars(
-                    select(ResearchMessage)
-                    .where(ResearchMessage.project_id == project.id)
-                    .order_by(ResearchMessage.created_at)
-                )
-            ).all()
-            for row in prev_rows[-20:]:
-                if row.role in ("user", "assistant"):
-                    chat_messages.append({"role": row.role, "content": row.content})
-                elif row.role == "tool":
-                    chat_messages.append({"role": "user", "content": f"【工具执行结果】：\n{row.content}"})
-        if not chat_messages or chat_messages[-1].get("content") != prompt:
-            chat_messages.append({"role": "user", "content": prompt})
-
-        body = {
-            "model": model,
-            "messages": chat_messages,
-            "tools": tools or TOOL_DEFINITIONS,
-            "stream": True,
-        }
-    else:
-        endpoint = f"{clean_url}/responses"
-        body = {
-            "model": model,
-            "conversation": project.hermes_conversation,
-            "input": prompt,
-            "instructions": instructions,
-            "tools": tools or TOOL_DEFINITIONS,
-            "store": True,
-            "stream": True,
-        }
+    if f"{clean_url}/v1/chat/completions" not in candidate_endpoints:
+        candidate_endpoints.append(f"{clean_url}/v1/chat/completions")
+    if f"{clean_url}/chat/completions" not in candidate_endpoints:
+        candidate_endpoints.append(f"{clean_url}/chat/completions")
+    if f"{clean_url}/v1/messages" not in candidate_endpoints:
+        candidate_endpoints.append(f"{clean_url}/v1/messages")
+    if f"{clean_url}/responses" not in candidate_endpoints:
+        candidate_endpoints.append(f"{clean_url}/responses")
 
     timeout = httpx.Timeout(timeout_seconds)
     full_text_chunks: list[str] = []
     reasoning_chunks: list[str] = []
     tool_calls_map: dict[int, dict[str, Any]] = {}
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
-                if resp.status_code != 200:
-                    err_body = await resp.aread()
-                    raise HTTPException(
-                        resp.status_code,
-                        f"Hermes Agent 调用失败 ({resp.status_code}): {err_body.decode('utf-8', errors='replace')}",
-                    )
+    _set_thinking_status(
+        project.id,
+        "THINKING",
+        "DeepSeek Harness (DSH) 正在深度思考量化假设与指标计算规则...",
+    )
 
-                cur_event = ""
-                async for raw_line in resp.aiter_lines():
-                    if not raw_line:
-                        continue
-                    if raw_line.startswith("event:"):
-                        cur_event = raw_line[6:].strip()
-                        continue
-                    if not raw_line.startswith("data:"):
-                        continue
+    last_stream_err = ""
+    stream_success = False
+    for endpoint in candidate_endpoints:
+        if endpoint.endswith("/responses"):
+            body = {
+                "model": model,
+                "conversation": project.hermes_conversation,
+                "input": prompt,
+                "instructions": instructions,
+                "tools": openai_tools,
+                "store": True,
+                "stream": True,
+            }
+        elif endpoint.endswith("/messages"):
+            body = {
+                "model": model,
+                "max_tokens": 4096,
+                "messages": chat_messages,
+                "system": instructions,
+                "stream": True,
+                "temperature": 0.2,
+            }
+        else:
+            body = {
+                "model": model,
+                "messages": [{"role": "system", "content": instructions}, *chat_messages],
+                "tools": openai_tools,
+                "stream": True,
+                "temperature": 0.2,
+            }
 
-                    data_str = raw_line[5:].strip()
-                    if data_str == "[DONE]":
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
+                    if resp.status_code == 404 and len(candidate_endpoints) > 1:
+                        err_body = await resp.aread()
+                        last_stream_err = f"404: {err_body.decode('utf-8', errors='replace')}"
+                        continue
+                    if resp.status_code != 200:
+                        err_body = await resp.aread()
+                        logger.warning("DSH LLM Stream API (%s) 返回非200状态码 (%s): %s", endpoint, resp.status_code, err_body)
                         break
 
-                    # Handle hermes.tool.progress events
-                    if cur_event.startswith("hermes.tool"):
+                    cur_event = ""
+                    async for raw_line in resp.aiter_lines():
+                        if not raw_line:
+                            continue
+                        if raw_line.startswith("event:"):
+                            cur_event = raw_line[6:].strip()
+                            continue
+                        if not raw_line.startswith("data:"):
+                            continue
+
+                        data_str = raw_line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+
+                        # Handle custom tool progress events
+                        if cur_event.startswith("hermes.tool") or cur_event.startswith("dsh.tool"):
+                            try:
+                                t_info = json.loads(data_str)
+                                t_tool = t_info.get("tool") or t_info.get("label") or "量化工具"
+                                t_status = t_info.get("status", "running")
+                                _set_thinking_status(
+                                    project.id,
+                                    "TOOL_RUNNING",
+                                    f"DeepSeek Harness 正在调度工具: {t_tool} ({t_status})...",
+                                    thought="".join(reasoning_chunks),
+                                )
+                            except Exception:
+                                pass
+                            cur_event = ""
+                            continue
+
                         try:
-                            t_info = json.loads(data_str)
-                            t_tool = t_info.get("tool") or t_info.get("label") or "技能"
-                            t_status = t_info.get("status", "running")
-                            _set_thinking_status(
-                                project.id,
-                                "TOOL_RUNNING",
-                                f"Hermes 正在调度工具: {t_tool} ({t_status})...",
-                                thought="".join(reasoning_chunks),
-                            )
+                            chunk = json.loads(data_str)
                         except Exception:
-                            pass
-                        cur_event = ""
-                        continue
+                            continue
 
-                    try:
-                        chunk = json.loads(data_str)
-                    except Exception:
-                        continue
+                        choices = chunk.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            if delta.get("reasoning_content"):
+                                r_c = str(delta["reasoning_content"])
+                                reasoning_chunks.append(r_c)
+                                _set_thinking_status(
+                                    project.id,
+                                    "THINKING",
+                                    "DeepSeek Harness (DSH) 正在深度思考量化假设与指标计算规则...",
+                                    thought="".join(reasoning_chunks),
+                                )
+                            elif delta.get("thought"):
+                                r_c = str(delta["thought"])
+                                reasoning_chunks.append(r_c)
+                                _set_thinking_status(
+                                    project.id,
+                                    "THINKING",
+                                    "DeepSeek Harness (DSH) 正在深度思考量化假设与指标计算规则...",
+                                    thought="".join(reasoning_chunks),
+                                )
 
-                    choices = chunk.get("choices", [])
-                    if choices:
-                        delta = choices[0].get("delta", {})
-                        if delta.get("reasoning_content"):
-                            r_c = str(delta["reasoning_content"])
-                            reasoning_chunks.append(r_c)
-                            _set_thinking_status(
-                                project.id,
-                                "THINKING",
-                                "Hermes 正在深度思考量化假设与指标计算规则...",
-                                thought="".join(reasoning_chunks),
-                            )
-                        elif delta.get("thought"):
-                            r_c = str(delta["thought"])
-                            reasoning_chunks.append(r_c)
-                            _set_thinking_status(
-                                project.id,
-                                "THINKING",
-                                "Hermes 正在深度思考量化假设与指标计算规则...",
-                                thought="".join(reasoning_chunks),
-                            )
+                            if delta.get("content"):
+                                c = str(delta["content"])
+                                full_text_chunks.append(c)
+                                _set_thinking_status(
+                                    project.id,
+                                    "GENERATING",
+                                    "DeepSeek Harness 正在组织方案与调度指令...",
+                                    thought="".join(reasoning_chunks),
+                                )
 
-                        if delta.get("content"):
-                            c = str(delta["content"])
-                            full_text_chunks.append(c)
-                            _set_thinking_status(
-                                project.id,
-                                "GENERATING",
-                                "Hermes 正在组织方案与调度指令...",
-                                thought="".join(reasoning_chunks),
-                            )
+                            for tc in delta.get("tool_calls", []):
+                                idx = tc.get("index", 0)
+                                if idx not in tool_calls_map:
+                                    tool_calls_map[idx] = {
+                                        "id": tc.get("id", ""),
+                                        "name": tc.get("function", {}).get("name", ""),
+                                        "arguments": "",
+                                    }
+                                if tc.get("id"):
+                                    tool_calls_map[idx]["id"] = tc["id"]
+                                if tc.get("function", {}).get("name"):
+                                    tool_calls_map[idx]["name"] = tc["function"]["name"]
+                                if tc.get("function", {}).get("arguments"):
+                                    tool_calls_map[idx]["arguments"] += tc["function"]["arguments"]
 
-                        for tc in delta.get("tool_calls", []):
-                            idx = tc.get("index", 0)
-                            if idx not in tool_calls_map:
-                                tool_calls_map[idx] = {
-                                    "id": tc.get("id", ""),
-                                    "name": tc.get("function", {}).get("name", ""),
-                                    "arguments": "",
-                                }
-                            if tc.get("id"):
-                                tool_calls_map[idx]["id"] = tc["id"]
-                            if tc.get("function", {}).get("name"):
-                                tool_calls_map[idx]["name"] = tc["function"]["name"]
-                            if tc.get("function", {}).get("arguments"):
-                                tool_calls_map[idx]["arguments"] += tc["function"]["arguments"]
+                        for item in chunk.get("output", []):
+                            k = item.get("type")
+                            if k in ("thought", "reasoning"):
+                                for part in item.get("content", []):
+                                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                        reasoning_chunks.append(part["text"])
+                                    elif isinstance(part, str):
+                                        reasoning_chunks.append(part)
+                            elif k == "message":
+                                for part in item.get("content", []):
+                                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                        full_text_chunks.append(part["text"])
 
-                    for item in chunk.get("output", []):
-                        k = item.get("type")
-                        if k in ("thought", "reasoning"):
-                            for part in item.get("content", []):
-                                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                                    reasoning_chunks.append(part["text"])
-                                elif isinstance(part, str):
-                                    reasoning_chunks.append(part)
-                        elif k == "message":
-                            for part in item.get("content", []):
-                                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                                    full_text_chunks.append(part["text"])
-    except httpx.HTTPError as exc:
-        logger.error("Hermes 流式调用失败：%s", exc)
-        raise HTTPException(502, f"Hermes Agent 调用失败：{exc}") from exc
+                    stream_success = True
+                    break
+        except Exception as exc:
+            last_stream_err = str(exc)
+            logger.warning("DeepSeek Harness 流式请求端点 (%s) 异常: %s", endpoint, exc)
+            continue
+
+    if not stream_success:
+        logger.info("流式传输未完成，执行 DSH runtime 非流式保底调用...")
+        content, tool_calls, reasoning = await dsh_runtime.call_llm(
+            messages=chat_messages,
+            system_prompt=instructions,
+            tools=tool_defs,
+            db_config=cfg,
+        )
+        if not content.startswith("[API Error") and not content.startswith("[LLM Exception"):
+            return content, tool_calls, reasoning
+        raise HTTPException(502, f"DeepSeek Harness 调用失败：{content or last_stream_err}")
 
     full_text = "".join(full_text_chunks).strip()
     reasoning_content = "".join(reasoning_chunks).strip()
@@ -694,8 +790,11 @@ async def _call_hermes_stream(
 
 
 async def _sync_hermes_session_messages(project: ResearchProject, db: AsyncSession) -> None:
-    """Synchronize all messages, thoughts, and server-side tool calls from Hermes session into QuantLab DB."""
-    base_url, api_key, model, _ = await get_hermes_config(db)
+    """Synchronize all messages, thoughts, and server-side tool calls from session into QuantLab DB."""
+    try:
+        base_url, api_key, model, _ = await get_hermes_config(db)
+    except Exception:
+        return
     root_url = base_url.replace("/v1", "").rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
@@ -846,8 +945,11 @@ async def _poll_hermes_background_delegation(
     max_wait_seconds: int = 45,
     poll_interval: float = 2.0,
 ) -> tuple[str | None, str | None]:
-    """Poll Hermes Agent session messages and disk files until background delegation completes."""
-    base_url, api_key, model, _ = await get_hermes_config(db)
+    """Poll Agent session messages and disk files until background delegation completes."""
+    try:
+        base_url, api_key, model, _ = await get_hermes_config(db)
+    except Exception:
+        return None, None
     root_url = base_url.replace("/v1", "").rstrip("/")
     endpoint = f"{root_url}/api/sessions/{project.hermes_conversation}/messages"
     headers = {}
@@ -979,7 +1081,7 @@ async def run_hermes_agent_cycle(
             _set_thinking_status(
                 project.id,
                 "THINKING",
-                f"Hermes 正在深度研讨量化假设与指标计算规则（轮次 {turn}）...",
+                f"DSH Quant Lead 正在统筹量化假设与指标计算规则（轮次 {turn}）...",
             )
             text, tool_calls, reasoning_content = await _call_hermes_stream(project, current_prompt, db=db)
 
@@ -987,7 +1089,7 @@ async def run_hermes_agent_cycle(
                 _set_thinking_status(
                     project.id,
                     "THINKING",
-                    "Hermes 思考完成，正在组织研讨方案与调度指令...",
+                    "DSH Quant Lead 思考完成，正在组织研讨方案与调度指令...",
                     thought=reasoning_content,
                 )
 
@@ -1151,7 +1253,7 @@ async def run_hermes_agent_cycle(
                     _set_thinking_status(
                         project.id,
                         "TOOL_RUNNING",
-                        f"Hermes 正在调用工具：{tool_name}...",
+                        f"DeepSeek Harness 正在调用工具：{tool_name}...",
                     )
 
                 # Record tool invocation message
@@ -1188,6 +1290,8 @@ async def run_hermes_agent_cycle(
                     if tool_name == "propose_code_approval"
                     else "backtest_params"
                     if tool_name == "propose_backtest_params"
+                    else "backtest_result"
+                    if tool_name == "execute_backtest"
                     else "tool_output"
                 )
                 meta = {
@@ -1196,8 +1300,30 @@ async def run_hermes_agent_cycle(
                 }
                 if tool_name == "propose_code_approval":
                     meta["code_approval"] = tool_args
+                    strat_name = tool_args.get("strategy_name", "custom_strategy")
+                    strat_summary = tool_args.get("strategy_summary", "")
+                    key_rules = tool_args.get("key_rules", [])
+                    param_specs = tool_args.get("parameter_specs", {})
+
+                    rules_md = "\n".join([f"- {r}" for r in key_rules]) if key_rules else "- 待细化"
+                    params_rows = ""
+                    if isinstance(param_specs, dict) and param_specs:
+                        params_rows = (
+                            "\n\n**预设参数清单**：\n| 参数名 | 默认值 |\n| :--- | :--- |\n"
+                            + "\n".join([f"| `{k}` | `{v}` |" for k, v in param_specs.items()])
+                        )
+
+                    res_content = (
+                        f"### 📋 量化策略设计方案：`{strat_name}`\n\n"
+                        f"**策略核心构想**：\n{strat_summary}\n\n"
+                        f"**核心交易规则**：\n{rules_md}"
+                        f"{params_rows}\n\n"
+                        f"*(策略设计方案已就绪，请核对下方方案卡片并确认是否批准编写代码)*"
+                    )
                 elif tool_name == "propose_backtest_params":
                     meta["backtest_params"] = tool_args
+                elif tool_name == "execute_backtest":
+                    meta["backtest_result"] = result
 
                 out_msg = ResearchMessage(
                     project_id=project.id,
@@ -1247,7 +1373,7 @@ async def run_hermes_agent_cycle(
 
 
 async def _run_hermes_background(project_id: str, prompt: str) -> None:
-    """Run Hermes agent cycle in a background task decoupled from HTTP request lifecycle."""
+    """Run DSH agent cycle in a background task decoupled from HTTP request lifecycle."""
     lock = _get_project_lock(project_id)
     async with lock:
         async with SessionLocal() as db:
@@ -1259,12 +1385,12 @@ async def _run_hermes_background(project_id: str, prompt: str) -> None:
                     project, prompt, db=db, record_user_prompt=False
                 )
             except Exception as exc:
-                logger.error("Hermes Agent 运行异常 (project=%s): %s", project_id, exc, exc_info=True)
+                logger.error("DSH Agent 运行异常 (project=%s): %s", project_id, exc, exc_info=True)
                 try:
                     err_msg = ResearchMessage(
                         project_id=project.id,
                         role="assistant",
-                        content=f"⚠️ Hermes 处理过程中遇到异常：{exc}",
+                        content=f"⚠️ DeepSeek Harness 处理过程中遇到异常：{exc}",
                         message_type="message",
                     )
                     db.add(err_msg)
@@ -1581,5 +1707,70 @@ async def write_strategy_endpoint(
             status_code=400,
             detail=res.get("error", "Strategy generation failed"),
         )
+    return res
+
+
+@router.post("/{project_id}/dsh/run")
+async def run_dsh_pipeline_endpoint(
+    project_id: str,
+    data: ResearchMessageCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Execute the full DeepSeek Harness (DSH) Star-Topology Multi-Agent workflow."""
+    project = await _project(project_id, db)
+    from app.dsh.orchestrator import DSHOrchestrator
+    from app.models import LlmConfiguration
+
+    cfg = await db.get(LlmConfiguration, 1)
+    orchestrator = DSHOrchestrator(session_id=project.id, db_config=cfg)
+
+    # Record User message
+    user_msg = ResearchMessage(
+        project_id=project.id,
+        role="user",
+        content=data.content,
+        message_type="message",
+    )
+    db.add(user_msg)
+    await db.commit()
+
+    async def _handle_agent_event(event):
+        try:
+            async with SessionLocal() as s:
+                m_type = "thought" if event.event_type == "thought" else ("tool" if event.agent_role == "tool" else "message")
+                m = ResearchMessage(
+                    project_id=project.id,
+                    role="assistant" if event.agent_role in ("lead", "researcher", "developer", "reviewer") else event.agent_role,
+                    content=f"【{event.agent_role.upper()}】: {event.content}" if event.agent_role != "lead" else event.content,
+                    message_type=m_type,
+                    metadata_json={
+                        "agent_role": event.agent_role,
+                        "event_type": event.event_type,
+                        **event.metadata,
+                    },
+                )
+                s.add(m)
+                await s.commit()
+        except Exception:
+            pass
+
+    res = await orchestrator.execute_task(
+        user_prompt=data.content,
+        project_id=project.id,
+        db=db,
+        on_event=None,
+    )
+
+    if res.get("strategy_name"):
+        strat = await db.scalar(select(Strategy).where(Strategy.slug == res["strategy_name"]))
+        if strat:
+            project.strategy_id = strat.id
+            await db.commit()
+
+    if res.get("backtest", {}).get("run_id"):
+        project.latest_backtest_id = res["backtest"]["run_id"]
+        project.status = ResearchStatus.RESULT_REVIEW
+        await db.commit()
+
     return res
 

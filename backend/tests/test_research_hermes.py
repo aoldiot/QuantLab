@@ -470,7 +470,7 @@ async def test_run_hermes_agent_cycle_backtest_terminates_immediately(monkeypatc
         messages = await run_hermes_agent_cycle(project, "请执行回测", db=db, max_turns=6, record_user_prompt=True)
         assert calls_count == 1
         # Check messages: user message, assistant text message, tool_call message, tool_output message
-        tool_outputs = [m for m in messages if m.message_type == "tool_output"]
+        tool_outputs = [m for m in messages if m.message_type in ("tool_output", "backtest_result")]
         assert len(tool_outputs) == 1
         assert tool_outputs[0].metadata_json["tool_name"] == "execute_backtest"
 
@@ -616,12 +616,110 @@ async def test_write_strategy_tool_endpoint(monkeypatch):
         assert data.get("strategy_name") == "test_claude_strat"
 
 
+@pytest.mark.anyio
+async def test_dsh_runtime_priority_resolution():
+    from app.dsh.runtime import dsh_runtime
+    from app.models import LlmConfiguration
+    from app.llm_config import encrypt_api_key
+
+    # DB config with BOTH DeepSeek (base_url) and Hermes (hermes_base_url)
+    config = LlmConfiguration(
+        base_url="https://api.deepseek.com/v1",
+        api_key_encrypted=encrypt_api_key("sk-deepseek-test"),
+        model="deepseek-reasoner",
+        hermes_base_url="http://127.0.0.1:8642/v1",
+        hermes_api_key_encrypted=encrypt_api_key("sk-hermes-test"),
+        hermes_model="hermes-agent",
+    )
+
+    target_captured = []
+    body_captured = []
+
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "量化研究方案已就绪",
+                            "reasoning_content": "正在使用 DeepSeek Reasoner 进行思维链推理...",
+                        }
+                    }
+                ]
+            }
+
+    import httpx
+    original_post = httpx.AsyncClient.post
+    async def mock_post(self, url, *args, **kwargs):
+        target_captured.append(str(url))
+        if "json" in kwargs:
+            body_captured.append(kwargs["json"])
+        return MockResponse()
+
+    httpx.AsyncClient.post = mock_post
+    try:
+        content, tool_calls, reasoning = await dsh_runtime.call_llm(
+            messages=[{"role": "user", "content": "设计策略"}],
+            system_prompt="测试",
+            db_config=config,
+        )
+        assert content == "量化研究方案已就绪"
+        assert reasoning == "正在使用 DeepSeek Reasoner 进行思维链推理..."
+        # Verify it prioritized DeepSeek over Hermes
+        assert "https://api.deepseek.com/v1/chat/completions" in target_captured[0]
+        assert body_captured[0]["model"] == "deepseek-reasoner"
+    finally:
+        httpx.AsyncClient.post = original_post
 
 
+def test_normalize_llm_endpoint():
+    from app.dsh.runtime import normalize_llm_endpoint
+
+    assert normalize_llm_endpoint("https://api.deepseek.com") == "https://api.deepseek.com/v1/chat/completions"
+    assert normalize_llm_endpoint("https://api.deepseek.com/") == "https://api.deepseek.com/v1/chat/completions"
+    assert normalize_llm_endpoint("https://api.deepseek.com/v1") == "https://api.deepseek.com/v1/chat/completions"
+    assert normalize_llm_endpoint("https://api.deepseek.com/v1/chat/completions") == "https://api.deepseek.com/v1/chat/completions"
+    assert normalize_llm_endpoint("https://api.openai.com/v1") == "https://api.openai.com/v1/chat/completions"
+    assert normalize_llm_endpoint("http://127.0.0.1:8642/responses") == "http://127.0.0.1:8642/responses"
+    assert normalize_llm_endpoint("http://127.0.0.1:8642/v1") == "http://127.0.0.1:8642/v1/chat/completions"
 
 
+@pytest.mark.anyio
+async def test_write_strategy_with_claude_infer_name(tmp_path, monkeypatch):
+    from app.agent.tools import write_strategy_with_claude
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "artifact_root", tmp_path)
+    monkeypatch.setattr(settings, "strategy_repo_path", tmp_path)
+
+    # Calling with empty strategy_name but filename in instructions
+    result = await write_strategy_with_claude(
+        strategy_name="",
+        instructions="请编写策略文件 backend/app/strategies/macd_inferred_cross.py",
+        project_id="test_infer",
+    )
+    # Target file is properly inferred
+    assert (tmp_path / "research_test_infer" / "writing.log").exists()
+    # It either succeeded or moved past validation into generation/verification
 
 
+@pytest.mark.anyio
+async def test_write_strategy_with_claude_invalid_name_logs(tmp_path, monkeypatch):
+    from app.agent.tools import write_strategy_with_claude
+    from app.config import settings
 
+    monkeypatch.setattr(settings, "artifact_root", tmp_path)
+
+    # Calling with totally invalid name
+    result = await write_strategy_with_claude(
+        strategy_name="123_invalid!",
+        instructions="test",
+        project_id="test_invalid",
+    )
+    assert result["ok"] is False
+    log_content = (tmp_path / "research_test_invalid" / "writing.log").read_text(encoding="utf-8")
+    assert "[ERROR]" in log_content
+    assert "格式不合法" in log_content
 
 

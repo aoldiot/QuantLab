@@ -171,5 +171,57 @@ def test_scan_catalog_summary_pagination(tmp_path):
         assert "items" in filtered_summary
 
 
+def test_load_chart_and_indicators(tmp_path):
+    import json
+    import pandas as pd
+    from app.backtests.chart_data import load_chart, _parse_timeframe
+
+    # Test timeframe parsing helper
+    assert _parse_timeframe("BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL") == "1h"
+    assert _parse_timeframe("BTCUSDT-PERP.BINANCE-15-MINUTE-LAST-EXTERNAL") == "15m"
+    assert _parse_timeframe("BTCUSDT-PERP.BINANCE-4-HOUR-LAST-EXTERNAL") == "4h"
+    assert _parse_timeframe("BTCUSDT-PERP.BINANCE-1-DAY-LAST-EXTERNAL") == "1d"
+
+    # Create mock artifact directory with bars and indicators
+    artifact_dir = tmp_path / "run_test"
+    artifact_dir.mkdir()
+
+    timestamps = [1700000000 + i * 3600 for i in range(10)]
+    bars_df = pd.DataFrame({
+        "ts_init": [t * 1_000_000_000 for t in timestamps],
+        "symbol": ["BTCUSDT-PERP.BINANCE"] * 10,
+        "bar_type": ["BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL"] * 10,
+        "open": [100.0 + i for i in range(10)],
+        "high": [105.0 + i for i in range(10)],
+        "low": [95.0 + i for i in range(10)],
+        "close": [102.0 + i for i in range(10)],
+        "volume": [1000.0] * 10,
+    })
+    bars_df.to_parquet(artifact_dir / "bars.parquet")
+
+    ind_df = pd.DataFrame({
+        "ts_init": [t * 1_000_000_000 for t in timestamps],
+        "symbol": ["BTCUSDT-PERP.BINANCE"] * 10,
+        "bar_type": ["BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL"] * 10,
+        "sma": [100.0 + i for i in range(10)],
+    })
+    ind_df.to_parquet(artifact_dir / "indicators.parquet")
+
+    plot_config = {
+        "main_plot": {"sma": {"type": "line", "color": "#00ff00"}},
+        "subplots": {},
+    }
+    (artifact_dir / "plot_config.json").write_text(json.dumps(plot_config), encoding="utf-8")
+
+    # Load chart without explicit timeframe
+    chart = load_chart(artifact_dir, symbol=None, start=None, end=None)
+    assert chart["symbol"] == "BTCUSDT-PERP.BINANCE"
+    assert chart["timeframe"] == "1h"
+    assert len(chart["bars"]) == 10
+    assert "sma" in chart["indicator_series"]
+    assert len(chart["indicator_series"]["sma"]) == 10
+
+
+
 
 

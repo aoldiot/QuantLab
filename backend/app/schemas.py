@@ -236,3 +236,64 @@ class ResearchWriteStrategyRequest(BaseModel):
     error_context: str | None = Field(default=None, max_length=50_000)
     project_id: str | None = None
 
+
+class DashboardRecentRun(BaseModel):
+    id: str
+    name: str
+    status: str
+    stage: str
+    progress: int
+    strategy_name: str | None = None
+    venue: str | None = None
+    timeframes: list[str] = []
+    symbols: list[str] = []
+    total_return: float | None = None
+    sharpe: float | None = None
+    created_at: datetime
+
+
+class StrategyStats(BaseModel):
+    total_strategies: int
+    registered_strategies: int
+    draft_strategies: int
+    categories: dict[str, int]
+
+
+class BacktestStats(BaseModel):
+    total_runs: int
+    running_runs: int
+    completed_runs: int
+    failed_runs: int
+    canceled_runs: int
+    win_rate: float | None = None
+    avg_return: float | None = None
+    avg_sharpe: float | None = None
+    recent_runs: list[DashboardRecentRun]
+
+
+class ResearchStats(BaseModel):
+    total_projects: int
+    active_projects: int
+    archived_projects: int
+
+
+class CatalogStats(BaseModel):
+    total_symbols: int
+    total_bars: int
+    total_size_bytes: int
+    available_timeframes: list[str]
+
+
+class SystemHealthStats(BaseModel):
+    llm_configured: bool
+    db_ok: bool
+    engine_status: str
+
+
+class DashboardStatsOut(BaseModel):
+    strategies: StrategyStats
+    backtests: BacktestStats
+    research: ResearchStats
+    catalog: CatalogStats
+    system: SystemHealthStats
+

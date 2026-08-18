@@ -185,9 +185,13 @@ def collect(engine, backtest_result, venue: str, artifact_dir: Path, strategy_mo
         "total_return": round((equity.iloc[-1] / equity.iloc[0] - 1) * 100, 4),
         "max_drawdown": round(float(drawdown.min()), 4),
         "sharpe": round(sharpe, 4) if sharpe is not None else None,
+        "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
         "win_rate": round(float((pnl > 0).mean() * 100), 4) if len(pnl) else None,
         "profit_factor": round(profit_factor, 4) if profit_factor is not None else None,
-        "trades": int(len(closed)), "orders": int(backtest_result.total_orders), "events": int(backtest_result.total_events),
+        "trades": int(len(closed)),
+        "total_trades": int(len(closed)),
+        "orders": int(backtest_result.total_orders),
+        "events": int(backtest_result.total_events),
     }
     contribution = []
     if not closed.empty and {"instrument_id", "realized_pnl"}.issubset(closed.columns):

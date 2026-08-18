@@ -3845,22 +3845,34 @@ body:has(.research-page) {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(56, 189, 248, 0.1) !important;
 }
 
-.modal-head-title-row {
+.backtest-modal-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   margin-bottom: 16px;
+  padding-right: 36px;
 }
 
-.modal-title-with-badge {
+.backtest-modal-header .modal-title-with-badge {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 4px;
+  flex-wrap: wrap;
 }
 
-.modal-title-with-badge h2 {
-  font-size: 17px;
+.backtest-modal-header .modal-title-with-badge h2 {
+  font-size: 18px;
   font-weight: 700;
   color: #f8fafc;
   margin: 0;
+  white-space: nowrap;
+}
+
+.backtest-modal-header .modal-subtitle {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #94a3b8;
 }
 
 .modal-title-icon {
@@ -4011,6 +4023,35 @@ body:has(.research-page) {
   gap: 12px;
 }
 
+.integrity-checkbox-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.checkbox-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 13px;
+  color: #e2e8f0;
+  flex: 1;
+  min-width: 240px;
+}
+
+.checkbox-toggle-label input[type="checkbox"] {
+  cursor: pointer;
+}
+
 .catalog-check-bar {
   display: flex;
   align-items: center;
@@ -4131,11 +4172,32 @@ body:has(.research-page) {
 }
 
 .backtest-modal-actions {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  margin-top: 18px !important;
+  padding-top: 14px !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+  flex-wrap: wrap !important;
+}
+
+.backtest-modal-actions .modal-actions-right {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 10px;
-  margin-top: 8px;
+  margin-left: auto;
+}
+
+.backtest-modal-actions button {
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+.backtest-modal-actions .adv-config-btn {
+  font-size: 13px;
+  gap: 6px;
 }
 
 .execute-confirm-btn {
@@ -4143,10 +4205,93 @@ body:has(.research-page) {
   font-weight: 600 !important;
   box-shadow: 0 2px 10px rgba(2, 132, 199, 0.35);
   gap: 6px;
+  white-space: nowrap !important;
 }
 
 .execute-confirm-btn:hover {
   background: linear-gradient(135deg, #0369a1, #075985) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Backtest Result In-Dialog Card
+   -------------------------------------------------------------------------- */
+.backtest-result-card-wrap {
+  width: 100%;
+  margin: 12px 0;
+}
+
+.backtest-main-result-card {
+  background: linear-gradient(145deg, #0f1c2b, #0c1724);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 0 20px rgba(56, 189, 248, 0.08);
+}
+
+.result-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.result-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  color: #f1f5f9;
+}
+
+.backtest-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.backtest-metrics-grid .metric-box {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.backtest-metrics-grid .metric-box .label {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.backtest-metrics-grid .metric-box .value {
+  font-size: 16px;
+  font-weight: 700;
+  color: #f8fafc;
+  font-family: monospace;
+}
+
+.backtest-metrics-grid .metric-box .value.pos {
+  color: #22c55e;
+}
+
+.backtest-metrics-grid .metric-box .value.neg {
+  color: #ef4444;
+}
+
+.backtest-metrics-grid .metric-box.action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+}
+
+.detail-link-btn {
+  width: 100%;
+  justify-content: center;
 }
 
 /* --------------------------------------------------------------------------

@@ -24,7 +24,16 @@ from .db import SessionLocal, get_db
 from .git_config import router as git_config_router
 from .git_versions import code_hash, manifest_hash
 from .llm_config import router as llm_config_router
-from .models import BacktestRun, ResearchProject, ResearchStatus, RunStatus, Strategy, StrategyStatus, StrategyVersion
+from .models import (
+    BacktestRun,
+    LlmConfiguration,
+    ResearchProject,
+    ResearchStatus,
+    RunStatus,
+    Strategy,
+    StrategyStatus,
+    StrategyVersion,
+)
 from .research import router as research_router
 from .runner import append_log, get_backtest_logs
 from .schemas import (
@@ -35,6 +44,13 @@ from .schemas import (
     CatalogCheckRequest,
     CatalogCheckResponse,
     CatalogMissingDetail,
+    DashboardRecentRun,
+    DashboardStatsOut,
+    BacktestStats,
+    CatalogStats,
+    ResearchStats,
+    StrategyStats,
+    SystemHealthStats,
     StrategyCreate,
     StrategyOut,
     StrategyUpdate,
@@ -42,7 +58,8 @@ from .schemas import (
     StrategyVersionOut,
 )
 from .strategy_contract import load_manifest
-
+from .strategy_files import list_files
+from .data_downloads import scan_catalog_summary
 from .strategy_files import router as strategy_files_router
 
 
@@ -128,6 +145,152 @@ app.include_router(research_router)
 
 @app.get("/api/health")
 async def health(): return {"status": "ok"}
+
+
+@app.get("/api/dashboard/stats", response_model=DashboardStatsOut)
+async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
+    # 1. Strategies stats
+    files = list_files()
+    db_strategies = (await db.scalars(select(Strategy))).unique().all()
+    for s in db_strategies:
+        await db.refresh(s, ["versions"])
+
+    registered_count = len(db_strategies)
+    total_files_count = len(files)
+    db_modules = {s.slug for s in db_strategies}
+    drafts_count = len([f for f in files if f["name"] not in db_modules])
+
+    cat_counts: dict[str, int] = {}
+    for f in files:
+        cat = f.get("draft_category") or "未分类"
+        matched = next((s for s in db_strategies if s.slug == f["name"]), None)
+        if matched and matched.category:
+            cat = matched.category
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+    # 2. Backtest stats
+    runs = (await db.scalars(select(BacktestRun).order_by(BacktestRun.created_at.desc()))).all()
+    total_runs = len(runs)
+    running_runs = len([r for r in runs if r.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.ANALYZING}])
+    completed_runs = len([r for r in runs if r.status == RunStatus.COMPLETED])
+    failed_runs = len([r for r in runs if r.status == RunStatus.FAILED])
+    canceled_runs = len([r for r in runs if r.status == RunStatus.CANCELED])
+
+    completed_returns = []
+    completed_sharpes = []
+    for r in runs:
+        if r.status == RunStatus.COMPLETED and r.metrics:
+            ret = r.metrics.get("total_return")
+            if ret is not None:
+                try:
+                    completed_returns.append(float(ret))
+                except (ValueError, TypeError):
+                    pass
+            shp = r.metrics.get("sharpe")
+            if shp is not None:
+                try:
+                    completed_sharpes.append(float(shp))
+                except (ValueError, TypeError):
+                    pass
+
+    win_rate = round(len([ret for ret in completed_returns if ret > 0]) / len(completed_returns) * 100, 1) if completed_returns else None
+    avg_return = round(sum(completed_returns) / len(completed_returns), 2) if completed_returns else None
+    avg_sharpe = round(sum(completed_sharpes) / len(completed_sharpes), 2) if completed_sharpes else None
+
+    version_map: dict[str, str] = {}
+    for s in db_strategies:
+        for v in s.versions:
+            version_map[v.id] = s.name
+
+    recent_runs = []
+    for r in runs[:6]:
+        strat_name = version_map.get(r.strategy_version_id, "已删除策略")
+        cfg = r.config or {}
+        symbols = cfg.get("symbols", []) if isinstance(cfg.get("symbols"), list) else []
+        timeframes = cfg.get("timeframes", []) if isinstance(cfg.get("timeframes"), list) else []
+        venue = cfg.get("venue")
+        metrics = r.metrics or {}
+        total_ret = None
+        sharpe_val = None
+        if metrics.get("total_return") is not None:
+            try:
+                total_ret = float(metrics["total_return"])
+            except (ValueError, TypeError):
+                pass
+        if metrics.get("sharpe") is not None:
+            try:
+                sharpe_val = float(metrics["sharpe"])
+            except (ValueError, TypeError):
+                pass
+
+        recent_runs.append(DashboardRecentRun(
+            id=r.id,
+            name=r.name,
+            status=r.status.value,
+            stage=r.stage,
+            progress=r.progress,
+            strategy_name=strat_name,
+            venue=venue,
+            timeframes=timeframes,
+            symbols=symbols,
+            total_return=total_ret,
+            sharpe=sharpe_val,
+            created_at=r.created_at,
+        ))
+
+    # 3. Research projects
+    projects = (await db.scalars(select(ResearchProject))).all()
+    total_projects = len(projects)
+    active_projects = len([p for p in projects if p.status != ResearchStatus.ARCHIVED])
+    archived_projects = len([p for p in projects if p.status == ResearchStatus.ARCHIVED])
+
+    # 4. Catalog stats
+    cat_summary = scan_catalog_summary(settings.catalog_path, page=1, page_size=0)
+    total_symbols = cat_summary.get("all_symbols_count", 0)
+    total_bars = cat_summary.get("all_bars_count", 0)
+    total_size_bytes = cat_summary.get("all_size_bytes", 0)
+    available_timeframes = cat_summary.get("available_timeframes", [])
+
+    # 5. System stats
+    llm_conf = await db.get(LlmConfiguration, 1)
+    llm_configured = bool(llm_conf and llm_conf.model and (llm_conf.api_key_encrypted or llm_conf.auth_type == "none"))
+    engine_status = "BUSY" if running_runs > 0 else "IDLE"
+
+    return DashboardStatsOut(
+        strategies=StrategyStats(
+            total_strategies=max(total_files_count, registered_count),
+            registered_strategies=registered_count,
+            draft_strategies=drafts_count,
+            categories=cat_counts,
+        ),
+        backtests=BacktestStats(
+            total_runs=total_runs,
+            running_runs=running_runs,
+            completed_runs=completed_runs,
+            failed_runs=failed_runs,
+            canceled_runs=canceled_runs,
+            win_rate=win_rate,
+            avg_return=avg_return,
+            avg_sharpe=avg_sharpe,
+            recent_runs=recent_runs,
+        ),
+        research=ResearchStats(
+            total_projects=total_projects,
+            active_projects=active_projects,
+            archived_projects=archived_projects,
+        ),
+        catalog=CatalogStats(
+            total_symbols=total_symbols,
+            total_bars=total_bars,
+            total_size_bytes=total_size_bytes,
+            available_timeframes=available_timeframes,
+        ),
+        system=SystemHealthStats(
+            llm_configured=llm_configured,
+            db_ok=True,
+            engine_status=engine_status,
+        ),
+    )
 
 
 def version_key(version: str) -> tuple:
@@ -381,9 +544,7 @@ async def get_backtest_chart(run_id: str, symbol: str | None = None, start: int 
     if artifact_dir.parent != settings.artifact_root.resolve():
         raise HTTPException(400, "无效回测路径")
     try:
-        configured = r.config.get("timeframes") or []
-        primary_timeframe = timeframe or (configured[0] if configured else None)
-        return load_chart(artifact_dir, symbol, start, end, min(max(limit, 100), 10000), primary_timeframe)
+        return load_chart(artifact_dir, symbol, start, end, min(max(limit, 100), 10000), timeframe)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

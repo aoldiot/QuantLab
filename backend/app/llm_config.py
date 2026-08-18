@@ -292,3 +292,18 @@ async def test_hermes_configuration(db: AsyncSession = Depends(get_db)):
         raise HTTPException(502, f"Hermes 连接失败：{exc}") from exc
 
     return {"ok": True, "message": result_text[:500] or "Hermes 连接成功"}
+
+
+@router.post("/test-dsh")
+async def test_dsh_configuration(db: AsyncSession = Depends(get_db)):
+    """Test DeepSeek Harness LLM connectivity and Tool Calling capability."""
+    config = await db.get(LlmConfiguration, 1)
+    from app.dsh.runtime import dsh_runtime
+    res_text, tool_calls, reasoning = await dsh_runtime.call_llm(
+        messages=[{"role": "user", "content": "请测试连接并只回复 quantlab-dsh-ok"}],
+        system_prompt="你是 QuantLab DSH 测试助手。严格只回复 quantlab-dsh-ok",
+        db_config=config,
+    )
+    if "[API Error" in res_text or "[LLM Exception]" in res_text:
+        raise HTTPException(502, f"DeepSeek Harness 测试连接失败: {res_text}")
+    return {"ok": True, "message": res_text or "DSH LLM 连接正常", "reasoning": reasoning}
