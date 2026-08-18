@@ -28,7 +28,16 @@ logger = logging.getLogger(__name__)
 
 NAUTILUS_DEVELOPER_GUIDE = """
 【NautilusTrader 策略开发核心速查表与规范】
-1. 依赖与模块导入规范：
+1. 策略命名与文件规范（严禁使用简陋的 Strategy/Custom/CustomStrategy）：
+- 必须根据策略的核心量化逻辑、指标、标的与交易模式命名为具体的蛇形英文标识符 (slug)，例如：
+  - `volatility_squeeze_breakout`（波动率挤压突破策略）
+  - `btc_ema_atr_trend`（BTC EMA ATR 趋势策略）
+  - `eth_rsi_mean_reversion`（ETH RSI 均值回归策略）
+  - `bollinger_momentum_breakout`（布林带动量突破策略）
+- 严禁直接使用空泛的 "Strategy", "MyStrategy", "CustomStrategy", "TradingStrategy"！
+- 策略配置类与策略类必须采用 PascalCase 风格且与标识符对应：例如 `VolatilitySqueezeBreakoutConfig` 与 `VolatilitySqueezeBreakoutStrategy`。
+
+2. 依赖与模块导入规范：
 ```python
 from decimal import Decimal
 import pandas as pd
@@ -43,7 +52,7 @@ from nautilus_trader.trading.strategy import Strategy
 from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
 ```
 
-2. 核心四大导出结构规范（严禁遗漏任何一项）：
+3. 核心四大导出结构规范（严禁遗漏任何一项）：
 - 结构 1：`StrategyConfig` 子类（继承自 `StrategyConfig, frozen=True`）：
   ```python
   class XxxConfig(StrategyConfig, frozen=True):
@@ -559,7 +568,7 @@ async def write_strategy_code(
         except Exception:
             pass
 
-    max_self_heal_turns = 2
+    max_self_heal_turns = 6
     eval_file = work_dir / f"{strategy_name}_staging.py"
     if existing_code:
         eval_file.write_text(existing_code, encoding="utf-8")

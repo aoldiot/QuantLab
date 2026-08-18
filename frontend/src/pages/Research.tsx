@@ -2037,11 +2037,9 @@ export default function Research(){
       if(res.ok&&res.code){
         setStrategyCode(res.code)
         if(res.strategy_name)setStrategyName(res.strategy_name)
-      }else{
-        setStrategyCode('')
       }
     }catch{
-      setStrategyCode('')
+      // Preserve existing state on network jitter
     }
   }
 

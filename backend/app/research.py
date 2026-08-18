@@ -38,7 +38,7 @@ from .schemas import (
     ResearchWriteStrategyRequest,
 )
 from .strategy_contract import sanitize_strategy_slug
-from .strategy_files import _path, save_strategy_code
+from .strategy_files import _path, save_strategy_code, PERSISTENT_STRATEGY_DIR, STRATEGY_DIR
 
 
 router = APIRouter(prefix="/api/research", tags=["strategy-research"])
@@ -849,36 +849,43 @@ async def _sync_strategy_code_if_present(
                 and "calculate_indicators" in block
                 and "Strategy" in block
             ):
-                slug_m = re.search(r'slug\s*=\s*["\']([a-z0-9_]+)["\']', block)
-                if slug_m:
-                    s_slug = slug_m.group(1).lower()
-                    try:
-                        ast.parse(block)
-                        save_strategy_code(s_slug, block)
-                        await ensure_strategy_db_record(s_slug, db, project_id=project.id)
-                        return s_slug
-                    except Exception:
-                        pass
-
-    strat_dir = settings.strategy_repo_path.resolve() / "backend/app/strategies"
-    if strat_dir.exists():
-        for py_file in strat_dir.glob("*.py"):
-            if py_file.name.startswith("__"):
-                continue
-            if (datetime.now().timestamp() - py_file.stat().st_mtime) < 120:
+                slug_m = re.search(r'slug\s*=\s*["\']([a-zA-Z0-9_\-]+)["\']', block)
+                s_slug = sanitize_strategy_slug(slug_m.group(1)) if slug_m else "custom_strategy"
                 try:
-                    c_text = py_file.read_text(encoding="utf-8")
-                    if (
-                        len(c_text) > 500
-                        and "STRATEGY_MANIFEST" in c_text
-                        and "StrategyConfig" in c_text
-                        and "calculate_indicators" in c_text
-                    ):
-                        s_slug = py_file.stem
-                        await ensure_strategy_db_record(s_slug, db, project_id=project.id)
-                        return s_slug
+                    ast.parse(block)
+                    save_strategy_code(s_slug, block)
+                    strat_rec = await ensure_strategy_db_record(s_slug, db, project_id=project.id)
+                    if strat_rec and strat_rec[0]:
+                        project.strategy_id = strat_rec[0].id
+                        project.updated_at = datetime.now(UTC)
+                        await db.commit()
+                    return s_slug
                 except Exception:
                     pass
+
+    for p_dir in (STRATEGY_DIR, PERSISTENT_STRATEGY_DIR):
+        if p_dir.exists():
+            for py_file in p_dir.glob("*.py"):
+                if py_file.name.startswith("__"):
+                    continue
+                if (datetime.now().timestamp() - py_file.stat().st_mtime) < 180:
+                    try:
+                        c_text = py_file.read_text(encoding="utf-8")
+                        if (
+                            len(c_text) > 500
+                            and "STRATEGY_MANIFEST" in c_text
+                            and "StrategyConfig" in c_text
+                            and "calculate_indicators" in c_text
+                        ):
+                            s_slug = sanitize_strategy_slug(py_file.stem)
+                            strat_rec = await ensure_strategy_db_record(s_slug, db, project_id=project.id)
+                            if strat_rec and strat_rec[0]:
+                                project.strategy_id = strat_rec[0].id
+                                project.updated_at = datetime.now(UTC)
+                                await db.commit()
+                            return s_slug
+                    except Exception:
+                        pass
     return None
 
 
@@ -1108,6 +1115,14 @@ async def run_research_agent_cycle(
 
                 if tool_name in ("write_strategy_with_claude", "write_strategy_code"):
                     write_strategy_result = result
+                    if result and result.get("ok"):
+                        strat_slug = result.get("strategy_name")
+                        if strat_slug:
+                            strat_rec = await ensure_strategy_db_record(strat_slug, db, project_id=project.id)
+                            if strat_rec and strat_rec[0]:
+                                project.strategy_id = strat_rec[0].id
+                                project.updated_at = datetime.now(UTC)
+                                await db.commit()
 
                 # If backtest was triggered, record latest_backtest_id
                 if tool_name == "execute_backtest" and result.get("run_id"):
@@ -1418,13 +1433,28 @@ async def get_project_strategy(
     project = await _project(project_id, db)
 
     target_name = strategy_name
+
+    # 1. If project has strategy_id linked, check DB Strategy & StrategyVersion first
     if not target_name and project.strategy_id:
         strat = await db.get(Strategy, project.strategy_id)
         if strat:
             target_name = strat.slug
+            res = get_strategy_code_tool(target_name)
+            if res.get("ok") and res.get("code"):
+                return res
+            # Fallback to DB StrategyVersion.code
+            await db.refresh(strat, ["versions"])
+            for v in sorted(strat.versions, key=lambda x: x.created_at or datetime.min, reverse=True):
+                if v.code and v.code.strip():
+                    save_strategy_code(strat.slug, v.code)
+                    return {
+                        "ok": True,
+                        "strategy_name": strat.slug,
+                        "code": v.code,
+                    }
 
+    # 2. Search messages for strategy_name
     if not target_name:
-        # Search messages for strategy_name in tool_calls, tool_outputs, backtest_params, or code_approval
         tool_msgs = (
             await db.scalars(
                 select(ResearchMessage)
@@ -1458,7 +1488,7 @@ async def get_project_strategy(
                     target_name = s_name
                     break
 
-    # If target_name found, try to read from disk or persistent storage with flexible slug variations
+    # 3. If target_name found, try disk or DB versions with candidate variations
     if target_name:
         clean_slug = sanitize_strategy_slug(target_name)
         candidates = list(dict.fromkeys(filter(None, [
@@ -1470,11 +1500,59 @@ async def get_project_strategy(
         ])))
         for c_name in candidates:
             res = get_strategy_code_tool(c_name)
-            if res.get("ok"):
-                await ensure_strategy_db_record(c_name, db, project_id=project.id)
+            if res.get("ok") and res.get("code"):
+                strat_rec = await ensure_strategy_db_record(c_name, db, project_id=project.id)
+                if strat_rec and strat_rec[0] and not project.strategy_id:
+                    project.strategy_id = strat_rec[0].id
+                    project.updated_at = datetime.now(UTC)
+                    await db.commit()
                 return res
 
-    # If still not found, check assistant messages for python code blocks containing STRATEGY_MANIFEST
+        # Fallback to query Strategy table in DB
+        db_strat = await db.scalar(select(Strategy).where(Strategy.slug.in_(candidates)))
+        if db_strat:
+            await db.refresh(db_strat, ["versions"])
+            for v in sorted(db_strat.versions, key=lambda x: x.created_at or datetime.min, reverse=True):
+                if v.code and v.code.strip():
+                    save_strategy_code(clean_slug, v.code)
+                    if not project.strategy_id:
+                        project.strategy_id = db_strat.id
+                        project.updated_at = datetime.now(UTC)
+                        await db.commit()
+                    return {
+                        "ok": True,
+                        "strategy_name": db_strat.slug,
+                        "code": v.code,
+                    }
+
+    # 4. Fallback search across STRATEGY_DIR and PERSISTENT_STRATEGY_DIR for recent or matching strategy files
+    for p_dir in (STRATEGY_DIR, PERSISTENT_STRATEGY_DIR):
+        if p_dir.exists():
+            cand_files = sorted(
+                [f for f in p_dir.glob("*.py") if not f.name.startswith("__")],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True,
+            )
+            for f in cand_files:
+                f_slug = sanitize_strategy_slug(f.stem)
+                if (
+                    (project.title and f_slug in sanitize_strategy_slug(project.title))
+                    or (f.stat().st_mtime > project.created_at.timestamp() - 600)
+                ):
+                    c_text = f.read_text(encoding="utf-8")
+                    if len(c_text) > 500 and "STRATEGY_MANIFEST" in c_text:
+                        strat_rec = await ensure_strategy_db_record(f_slug, db, project_id=project.id)
+                        if strat_rec and strat_rec[0] and not project.strategy_id:
+                            project.strategy_id = strat_rec[0].id
+                            project.updated_at = datetime.now(UTC)
+                            await db.commit()
+                        return {
+                            "ok": True,
+                            "strategy_name": f_slug,
+                            "code": c_text,
+                        }
+
+    # 5. Fallback search in assistant messages for Python code blocks
     asst_msgs = (
         await db.scalars(
             select(ResearchMessage)
@@ -1496,20 +1574,23 @@ async def get_project_strategy(
                 and "calculate_indicators" in code_block
                 and "Strategy" in code_block
             ):
-                slug_match = re.search(r'slug\s*=\s*["\']([a-z0-9_]+)["\']', code_block)
-                if slug_match:
-                    derived_slug = slug_match.group(1).lower()
-                    try:
-                        ast.parse(code_block)
-                        save_strategy_code(derived_slug, code_block)
-                        await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
-                        return {
-                            "ok": True,
-                            "strategy_name": derived_slug,
-                            "code": code_block,
-                        }
-                    except Exception:
-                        pass
+                slug_match = re.search(r'slug\s*=\s*["\']([a-zA-Z0-9_\-]+)["\']', code_block)
+                derived_slug = sanitize_strategy_slug(slug_match.group(1)) if slug_match else "custom_strategy"
+                try:
+                    ast.parse(code_block)
+                    save_strategy_code(derived_slug, code_block)
+                    strat_rec = await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
+                    if strat_rec and strat_rec[0] and not project.strategy_id:
+                        project.strategy_id = strat_rec[0].id
+                        project.updated_at = datetime.now(UTC)
+                        await db.commit()
+                    return {
+                        "ok": True,
+                        "strategy_name": derived_slug,
+                        "code": code_block,
+                    }
+                except Exception:
+                    pass
 
     return {"ok": False, "message": "尚未生成策略代码"}
 
