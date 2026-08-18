@@ -65,15 +65,16 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
           prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
 
           is_long = self.portfolio.is_net_long(self.instrument_id)
-          is_flat = self.portfolio.is_net_flat(self.instrument_id)
+          is_flat = self.portfolio.is_flat(self.instrument_id)
 
           if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
               if not is_flat:
                   self.close_all_positions(self.instrument_id)
+              qty = self.instrument.make_qty(self.config.trade_size) if hasattr(self, "instrument") and self.instrument else self.trade_size
               order = self.order_factory.market(
                   instrument_id=self.instrument_id,
                   order_side=OrderSide.BUY,
-                  quantity=self.trade_size,
+                  quantity=qty,
               )
               self.submit_order(order)
           elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
@@ -117,6 +118,14 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
         }
     }
     ```
+
+4. NautilusTrader API 常见禁忌与标准用法（CRITICAL）：
+- ❌ 严禁调用 `self.portfolio.account_balance()`（Portfolio 无此方法！如需获取账户净值请使用 `self.portfolio.equity(self.instrument_id.venue)`）。
+- ❌ 严禁调用 `self.portfolio.is_net_flat(...)`（正确方法为 `self.portfolio.is_flat(self.instrument_id)`）。
+- ❌ 严禁调用 `self.portfolio.position(...)`（正确方法为 `self.portfolio.net_position(self.instrument_id)` 或 `self.portfolio.is_flat(...)`）。
+- ❌ 严禁调用 `self.close_position(self.instrument_id)`（平仓标的必须使用 `self.close_all_positions(self.instrument_id)`）。
+- ❌ 严禁调用 `self.instrument.round_quantity(...)`（正确方法为 `self.instrument.make_qty(...)`，直接返回规范精度 Quantity）。
+- ❌ 严禁向订单 `quantity` 传递裸 float/int（必须使用 `Quantity` 或 `self.instrument.make_qty(...)`）。
 """
 
 QUANT_LEAD_SYSTEM_PROMPT = """你是 QuantLab 的首席量化负责人 (Quant Lead)。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -132,16 +133,17 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
               prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
 
               is_long = self.portfolio.is_net_long(self.instrument_id)
-              is_flat = self.portfolio.is_net_flat(self.instrument_id)
+              is_flat = self.portfolio.is_flat(self.instrument_id)
 
               # 金叉做多
               if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
                   if not is_flat:
                       self.close_all_positions(self.instrument_id)
+                  qty = self.instrument.make_qty(self.config.trade_size) if hasattr(self, "instrument") and self.instrument else self.trade_size
                   order = self.order_factory.market(
                       instrument_id=self.instrument_id,
                       order_side=OrderSide.BUY,
-                      quantity=self.trade_size,
+                      quantity=qty,
                   )
                   self.submit_order(order)
               # 死叉平多
@@ -231,75 +233,13 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
      }
      ```
 
-             )
-             self.submit_order(order)
-
-         def close_position(self):
-             position = next(iter(self.cache.positions()), None)
-             if position is None:
-                 return
-             order_side = OrderSide.SELL if position.side == PositionSide.LONG else OrderSide.BUY
-             order = self.order_factory.market(
-                 instrument_id=self.instrument_id,
-                 order_side=order_side,
-                 quantity=position.quantity,
-             )
-             self.submit_order(order)
-
-
-     def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
-         df = df.copy()
-         for col in ['open', 'high', 'low', 'close', 'volume']:
-             if col in df.columns:
-                 df[col] = pd.to_numeric(df[col], errors='coerce')
-
-         fast_p = int(parameters.get('fast_period', 12))
-         slow_p = int(parameters.get('slow_period', 26))
-         atr_p = int(parameters.get('atr_period', 14))
-
-         df['fast_ma'] = df['close'].rolling(window=fast_p).mean()
-         df['slow_ma'] = df['close'].rolling(window=slow_p).mean()
-         tr = np.maximum(
-             df['high'] - df['low'],
-             np.maximum(abs(df['high'] - df['close'].shift(1)), abs(df['low'] - df['close'].shift(1)))
-         )
-         df['atr'] = tr.rolling(window=atr_p).mean()
-         return df
-
-
-     STRATEGY_MANIFEST = StrategyManifest(
-         slug="btc_ema_atr",
-         name="BTC EMA+ATR趋势跟踪",
-         description="双均线交叉结合ATR的趋势策略",
-         version="1.0.0",
-         category="trend",
-         strategy_path="app.strategies.btc_ema_atr:BtcEmaAtrStrategy",
-         config_path="app.strategies.btc_ema_atr:BtcEmaAtrConfig",
-         parameters={
-             "fast_period": ParameterSpec(title="快线周期", type="integer", default=12, minimum=2, maximum=100),
-             "slow_period": ParameterSpec(title="慢线周期", type="integer", default=26, minimum=5, maximum=200),
-             "atr_period": ParameterSpec(title="ATR周期", type="integer", default=14, minimum=2, maximum=50),
-             "position_size_pct": ParameterSpec(title="单仓资金占比", type="number", default=0.1, minimum=0.01, maximum=1.0),
-         },
-         timeframes=("15m", "1h", "4h", "1d"),
-         primary_timeframe="1h",
-         plot_config={
-             "main_plot": {
-                 "close": {"type": "line", "color": "#ffffff"},
-                 "fast_ma": {"type": "line", "color": "#ffaa00"},
-                 "slow_ma": {"type": "line", "color": "#00aaff"},
-             },
-             "subplots": {
-                 "ATR": {
-                     "atr": {"type": "line", "color": "#ff55ff"}
-                 }
-             }
-         },
-         mode=StrategyMode.SINGLE_INSTRUMENT,
-         supports_short=True,
-         requires_funding=True,
-     )
-     ```
+   - 【NautilusTrader API 常见禁忌与标准用法（CRITICAL）】：
+     - ❌ 严禁调用 `self.portfolio.account_balance()`（Portfolio 无此方法！如需获取账户净值请使用 `self.portfolio.equity(self.instrument_id.venue)`）。
+     - ❌ 严禁调用 `self.portfolio.is_net_flat(...)`（正确方法为 `self.portfolio.is_flat(self.instrument_id)`）。
+     - ❌ 严禁调用 `self.portfolio.position(...)`（正确方法为 `self.portfolio.net_position(self.instrument_id)` 或 `self.portfolio.is_flat(...)`）。
+     - ❌ 严禁调用 `self.close_position(self.instrument_id)`（平仓标的必须使用 `self.close_all_positions(self.instrument_id)`）。
+     - ❌ 严禁调用 `self.instrument.round_quantity(...)`（正确方法为 `self.instrument.make_qty(...)`，直接返回规范精度 Quantity）。
+     - ❌ 严禁向订单 `quantity` 传递裸 float/int（必须使用 `Quantity` 或 `self.instrument.make_qty(...)`）。
 
    - 【策略代码生成与规范】：必须由 Claude Agent SDK 编写策略文件并确保通过 4 级 Pre-Flight 运行期沙盒校验。
    - 代码编写完成后，向用户汇报策略编写完成情况与 4 级验证摘要，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。

@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 
 from ..strategy_contract import (
@@ -113,6 +115,126 @@ def verify_strategy_source(source_code: str, strategy_name: str = "temp_strategy
             temp_path.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _check_nautilus_ast_rules(tree: ast.AST) -> list[str]:
+    """Check for forbidden or commonly hallucinated NautilusTrader API calls."""
+    errors: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            # Check self.portfolio.xxx attributes/calls
+            if isinstance(node.value, ast.Attribute) and node.value.attr == "portfolio":
+                if node.attr in ("account_balance", "balance", "get_balance"):
+                    errors.append(
+                        f"第 {node.lineno} 行: 禁止调用 self.portfolio.{node.attr}()。NautilusTrader Portfolio 没有 {node.attr} 方法。如需获取账户净值请使用 self.portfolio.equity(self.instrument_id.venue)，或使用配置参数 self.config.trade_size 结合 self.instrument.make_qty(...) 进行下单。"
+                    )
+                elif node.attr == "is_net_flat":
+                    errors.append(
+                        f"第 {node.lineno} 行: 禁止调用 self.portfolio.is_net_flat()。NautilusTrader Portfolio 没有 is_net_flat 方法，请替换为 self.portfolio.is_flat(self.instrument_id)。"
+                    )
+                elif node.attr == "position":
+                    errors.append(
+                        f"第 {node.lineno} 行: 禁止调用 self.portfolio.position()。NautilusTrader 没有 self.portfolio.position 方法，请使用 self.portfolio.net_position(self.instrument_id) 或 self.portfolio.is_flat/is_net_long/is_net_short。"
+                    )
+            # Check self.instrument.xxx attributes/calls
+            elif isinstance(node.value, ast.Attribute) and node.value.attr == "instrument":
+                if node.attr in ("round_quantity", "round_qty"):
+                    errors.append(
+                        f"第 {node.lineno} 行: 禁止调用 self.instrument.{node.attr}()。NautilusTrader Instrument 没有 {node.attr} 方法，请使用 self.instrument.make_qty(...) 直接生成规范精度的 Quantity 对象。"
+                    )
+                elif node.attr in ("round_price",):
+                    errors.append(
+                        f"第 {node.lineno} 行: 禁止调用 self.instrument.{node.attr}()。NautilusTrader Instrument 没有 {node.attr} 方法，请使用 self.instrument.make_price(...)。"
+                    )
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "close_position":
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
+                    errors.append(
+                        f"第 {node.lineno} 行: Strategy.close_position 只能接收 Position 实例对象。若要按标的平仓全部头寸，请使用 self.close_all_positions(self.instrument_id)。"
+                    )
+    return errors
+
+
+def _simulate_strategy_execution(
+    strategy_cls: type[Strategy],
+    config_instance: Any,
+    manifest: StrategyManifest,
+) -> tuple[bool, str | None, str | None]:
+    """Run an in-memory NautilusTrader BacktestEngine with synthetic bars to verify on_start() and on_bar() execution."""
+    from nautilus_trader.backtest.engine import BacktestEngine, BacktestEngineConfig
+    from nautilus_trader.config import LoggingConfig
+    from nautilus_trader.model.currencies import USDT
+    from nautilus_trader.model.data import Bar, BarSpecification, BarType
+    from nautilus_trader.model.enums import AccountType, BarAggregation, OmsType, PriceType
+    from nautilus_trader.model.identifiers import TraderId, Venue
+    from nautilus_trader.model.objects import Money
+    from nautilus_trader.test_kit.providers import TestInstrumentProvider
+
+    try:
+        engine = BacktestEngine(
+            config=BacktestEngineConfig(
+                trader_id=TraderId("SIM-001"),
+                logging=LoggingConfig(log_level="ERROR"),
+            )
+        )
+        engine.add_venue(
+            venue=Venue("BINANCE"),
+            oms_type=OmsType.HEDGING,
+            account_type=AccountType.MARGIN,
+            base_currency=USDT,
+            starting_balances=[Money(100000, USDT)],
+        )
+        test_instrument = TestInstrumentProvider.btcusdt_binance()
+        engine.add_instrument(test_instrument)
+
+        strat = strategy_cls(config_instance)
+        engine.add_strategy(strat)
+
+        bar_type = getattr(config_instance, "bar_type", None)
+        if bar_type is None and hasattr(config_instance, "bar_types") and config_instance.bar_types:
+            bar_type = config_instance.bar_types[0]
+        if bar_type is None:
+            bar_type = BarType(test_instrument.id, BarSpecification(1, BarAggregation.HOUR, PriceType.LAST))
+
+        bars = []
+        base_ts = 1704067200000000000
+        prices = [50000.0, 50200.0, 49800.0, 50500.0, 51000.0, 50800.0, 51200.0, 49500.0]
+        for i, p in enumerate(prices):
+            ts = base_ts + i * 3600 * 1_000_000_000
+            bar = Bar(
+                bar_type,
+                test_instrument.make_price(p),
+                test_instrument.make_price(p + 100),
+                test_instrument.make_price(p - 100),
+                test_instrument.make_price(p + 50),
+                test_instrument.make_qty(10),
+                ts,
+                ts,
+            )
+            bars.append(bar)
+
+        engine.add_data(bars)
+        engine.run()
+        return True, None, None
+    except Exception as exc:
+        import traceback
+
+        tb = traceback.format_exc()
+        lines = [line.strip() for line in tb.splitlines() if line.strip()]
+        error_msg = str(exc)
+        suggestion = "请检查策略在 on_start 和 on_bar 中的 API 调用、持仓状态判断、下单数量转换及变量定义。"
+        if "account_balance" in error_msg:
+            suggestion = "NautilusTrader Portfolio 没有 account_balance 方法！请使用 self.portfolio.equity(self.instrument_id.venue) 获取账户净值，或使用 self.instrument.make_qty(self.config.trade_size) 进行下单。"
+        elif "is_net_flat" in error_msg:
+            suggestion = "NautilusTrader Portfolio 没有 is_net_flat 方法！请使用 self.portfolio.is_flat(self.instrument_id)。"
+        elif "round_quantity" in error_msg:
+            suggestion = "NautilusTrader Instrument 没有 round_quantity 方法！请使用 self.instrument.make_qty(...)。"
+        elif "close_position" in error_msg:
+            suggestion = "平仓指定标的请使用 self.close_all_positions(self.instrument_id)。"
+        elif "quantity" in error_msg and "Quantity" in error_msg:
+            suggestion = "下单数量 quantity 必须为 nautilus_trader.model.objects.Quantity 类型，请使用 self.instrument.make_qty(...)。"
+        detail = f"{error_msg} ({lines[-2] if len(lines) >= 2 else ''})"
+        return False, detail, suggestion
 
 
 def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None) -> VerificationResult:
@@ -255,21 +377,25 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
     if not has_strategy_class:
         l1_errors.append("缺少继承自 Strategy 的策略类声明 (例如 class XxxStrategy(Strategy) 或 class Xxx(Strategy))")
 
+    ast_rule_errors = _check_nautilus_ast_rules(tree)
+    if ast_rule_errors:
+        l1_errors.extend(ast_rule_errors)
+
     if l1_errors:
         step = VerificationStepResult(
             level="L1",
-            name="核心导出结构检查",
+            name="核心导出结构与 AST 规范检查",
             ok=False,
             message="；".join(l1_errors),
         )
         steps.append(step)
         return VerificationResult(
             ok=False,
-            summary="缺少核心导出结构 (L1 结构检查失败)",
+            summary="静态 AST 结构或 Nautilus 规范未通过 (L1 静态检查失败)",
             steps=steps,
             failed_level="L1",
             error_message="；".join(l1_errors),
-            suggestion="策略代码必须导出 StrategyConfig 子类、Strategy 子类、calculate_indicators 函数和 STRATEGY_MANIFEST 对象。",
+            suggestion="请检查 NautilusTrader 语法规范，消除非法 API 调用与缺少的核心导出结构。",
         )
 
     steps.append(
@@ -794,16 +920,18 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
             )
 
         # Try instantiating StrategyConfig with default parameters
+        test_inst_id = InstrumentId.from_str("BTCUSDT.BINANCE")
+        test_bar_type = BarType.from_str("BTCUSDT.BINANCE-1-HOUR-LAST-EXTERNAL")
         test_config_kwargs = {
             **default_parameters,
         }
         if manifest.mode == StrategyMode.PORTFOLIO:
-            test_config_kwargs["instrument_ids"] = ["BTCUSDT-PERP.BINANCE"]
-            test_config_kwargs["bar_types"] = ["BTCUSDT-PERP.BINANCE-15-MINUTE-LAST-EXTERNAL"]
+            test_config_kwargs["instrument_ids"] = [test_inst_id]
+            test_config_kwargs["bar_types"] = [test_bar_type]
             test_config_kwargs["order_id_tag"] = "001"
         else:
-            test_config_kwargs["instrument_id"] = "BTCUSDT-PERP.BINANCE"
-            test_config_kwargs["bar_type"] = "BTCUSDT-PERP.BINANCE-15-MINUTE-LAST-EXTERNAL"
+            test_config_kwargs["instrument_id"] = test_inst_id
+            test_config_kwargs["bar_type"] = test_bar_type
             test_config_kwargs["order_id_tag"] = "001"
 
         try:
@@ -1107,12 +1235,35 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
                 suggestion="在 Strategy 子类中定义 on_bar(self, bar: Bar) 方法。",
             )
 
+        # Run in-memory event-driven backtest simulation with synthetic bars
+        sim_ok, sim_err, sim_suggestion = _simulate_strategy_execution(
+            strategy_cls=strategy_cls,
+            config_instance=instantiated_config,
+            manifest=manifest,
+        )
+        if not sim_ok:
+            step = VerificationStepResult(
+                level="L4",
+                name="运行时沙盒事件驱动模拟 (on_start/on_bar)",
+                ok=False,
+                message=f"策略在合成 Bar 事件驱动测试中抛出异常: {sim_err}",
+            )
+            steps.append(step)
+            return VerificationResult(
+                ok=False,
+                summary="Strategy 事件循环执行异常 (L4 运行契约失败)",
+                steps=steps,
+                failed_level="L4",
+                error_message=sim_err,
+                suggestion=sim_suggestion or "检查 on_start 和 on_bar 中的数据处理与下单逻辑。",
+            )
+
         steps.append(
             VerificationStepResult(
                 level="L4",
-                name="NautilusTrader 运行时契约",
+                name="NautilusTrader 运行时契约与沙盒模拟",
                 ok=True,
-                message="Strategy 实例化、生命周期钩子与配置注入校验通过",
+                message="Strategy 实例化、生命周期钩子、合成 Bar 事件驱动模拟执行全部通过",
             )
         )
 

@@ -206,23 +206,24 @@ class BtcEmaAtrTrendStrategy(Strategy):
         prev_fast = s_close.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
         prev_slow = s_close.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
 
-        pos = self.portfolio.position(self.instrument_id)
-        is_long = pos is not None and pos.side == PositionSide.LONG and pos.quantity > 0
+        is_long = self.portfolio.is_net_long(self.instrument_id)
+        is_flat = self.portfolio.is_flat(self.instrument_id)
 
         # Entry signal: Golden Cross
         if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
-            if pos is not None and pos.quantity > 0:
-                self.close_position(self.instrument_id)
+            if not is_flat:
+                self.close_all_positions(self.instrument_id)
+            qty = self.instrument.make_qty(Decimal("0.01")) if hasattr(self, "instrument") and self.instrument else Quantity.from_str("0.01")
             order = self.order_factory.market(
                 instrument_id=self.instrument_id,
                 order_side=OrderSide.BUY,
-                quantity=Quantity.from_str("0.01"),
+                quantity=qty,
             )
             self.submit_order(order)
 
         # Exit signal: Death Cross
         elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
-            self.close_position(self.instrument_id)
+            self.close_all_positions(self.instrument_id)
 
     def on_stop(self):
         self.unsubscribe_bars(self.bar_type)

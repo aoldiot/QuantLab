@@ -48,12 +48,15 @@ class BollingerMeanReversionStrategy(Strategy):
         self.lower_band = self.middle_band - self.std_dev_multiplier * std_dev
 
     def _calculate_position_size(self) -> Quantity:
-        account_balance = self.portfolio.account_balance().as_double()
+        equity_dict = self.portfolio.equity(self.instrument_id.venue)
+        if equity_dict:
+            total_equity = sum(m.as_double() for m in equity_dict.values())
+        else:
+            total_equity = 10000.0
         price = self.bars[-1].close.as_double()
-        notional = account_balance * self.position_size_pct
-        size = notional / price
-        size_rounded = self.instrument.round_quantity(Decimal(size))
-        return Quantity(size_rounded)
+        notional = total_equity * self.position_size_pct
+        size = notional / price if price > 0 else 0.001
+        return self.instrument.make_qty(Decimal(str(round(size, 8))))
 
     def on_bar(self, bar: Bar) -> None:
         self.bars.append(bar)
@@ -64,7 +67,7 @@ class BollingerMeanReversionStrategy(Strategy):
         current_close = bar.close.as_double()
         is_long = self.portfolio.is_net_long(self.instrument_id)
         is_short = self.portfolio.is_net_short(self.instrument_id)
-        is_flat = self.portfolio.is_net_flat(self.instrument_id)
+        is_flat = self.portfolio.is_flat(self.instrument_id)
         position_size = self._calculate_position_size()
 
         if is_flat:

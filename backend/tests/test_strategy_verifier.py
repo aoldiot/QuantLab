@@ -538,3 +538,94 @@ class BrokenConfig(StrategyConfig):
     assert slug is None
 
 
+def test_ast_catches_nautilus_hallucinations():
+    bad_code = """
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class BadConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class BadStrategy(Strategy):
+    def __init__(self, config: BadConfig) -> None:
+        super().__init__(config)
+    def on_bar(self, bar) -> None:
+        bal = self.portfolio.account_balance()
+        flat = self.portfolio.is_net_flat(self.instrument_id)
+        qty = self.instrument.round_quantity(1.0)
+        self.close_position(self.instrument_id)
+
+def calculate_indicators(dataframe: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+    return dataframe
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="bad_strat",
+    strategy_path="app.strategies.bad_strat:BadStrategy",
+    config_path="app.strategies.bad_strat:BadConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+"""
+    res = verify_strategy_source(bad_code, strategy_name="bad_strat")
+    assert res.ok is False
+    assert res.failed_level == "L1"
+    assert "account_balance" in res.error_message
+    assert "is_net_flat" in res.error_message
+    assert "round_quantity" in res.error_message
+    assert "close_position" in res.error_message
+
+
+def test_l4_simulation_catches_runtime_on_bar_crash():
+    crash_code = """
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class CrashConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class CrashStrategy(Strategy):
+    def __init__(self, config: CrashConfig) -> None:
+        super().__init__(config)
+        self.instrument_id = config.instrument_id
+        self.bar_type = config.bar_type
+    def on_start(self) -> None:
+        self.subscribe_bars(self.bar_type)
+    def on_bar(self, bar) -> None:
+        val = 1 / 0
+
+def calculate_indicators(dataframe: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+    return dataframe
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="crash_strat",
+    strategy_path="app.strategies.crash_strat:CrashStrategy",
+    config_path="app.strategies.crash_strat:CrashConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+"""
+    res = verify_strategy_source(crash_code, strategy_name="crash_strat")
+    assert res.ok is False
+    assert res.failed_level == "L4"
+    assert "division by zero" in res.error_message
+
+
+def test_bollinger_mean_reversion_strategy_passes_verification():
+    res = verify_strategy_file(Path("app/strategies/bollinger_mean_reversion.py"), strategy_name="bollinger_mean_reversion")
+    assert res.ok is True
+    assert all(step.ok for step in res.steps)
+
+
+

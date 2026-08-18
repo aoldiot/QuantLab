@@ -111,15 +111,16 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
           prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
 
           is_long = self.portfolio.is_net_long(self.instrument_id)
-          is_flat = self.portfolio.is_net_flat(self.instrument_id)
+          is_flat = self.portfolio.is_flat(self.instrument_id)
 
           if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
               if not is_flat:
                   self.close_all_positions(self.instrument_id)
+              qty = self.instrument.make_qty(self.config.trade_size) if hasattr(self, "instrument") and self.instrument else self.trade_size
               order = self.order_factory.market(
                   instrument_id=self.instrument_id,
                   order_side=OrderSide.BUY,
-                  quantity=self.trade_size,
+                  quantity=qty,
               )
               self.submit_order(order)
           elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
@@ -131,13 +132,46 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
 - 结构 3：`calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame`：
   - 必须返回行数完全相同的 DataFrame（严禁 dropna）。
   - **CRITICAL：必须计算并在返回的 DataFrame 中包含 `plot_config` 中声明的所有指标列！**
-  - 对 rolling/ewm 计算产生的头部 NaN，必须使用 `.bfill()` 或 `.fillna(0.0)` 填充，保证预热后无 NaN。
+  - 对 rolling/ewm 计算产生的头部 NaN，必须使用 `.bfill()` 或 `.fillna(0.0)` 填充，保证预热后无 NaN：
+  ```python
+  def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+      result = df.copy()
+      fast_p = int(parameters.get("fast_period", 12))
+      slow_p = int(parameters.get("slow_period", 26))
+      close = pd.to_numeric(result["close"], errors="coerce")
+      result["fast_ma"] = close.ewm(span=fast_p, adjust=False).mean().bfill()
+      result["slow_ma"] = close.ewm(span=slow_p, adjust=False).mean().bfill()
+      return result
+  ```
 - 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：
   - `strategy_path="app.strategies.{slug}:XxxStrategy"`（必须带 `app.strategies.{slug}:` 前缀）
   - `config_path="app.strategies.{slug}:XxxConfig"`（必须带 `app.strategies.{slug}:` 前缀）
   - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`，且必须满足 `minimum <= default <= maximum`。
   - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`（`primary_timeframe` 必须包含在 `timeframes` 中）。
-  - `plot_config` 必须是双层嵌套字典规范。
+  - `plot_config` 必须是双层嵌套字典规范：
+    ```python
+    plot_config = {
+        "main_plot": {
+            "close": {"type": "line", "color": "#ffffff"},
+            "fast_ma": {"type": "line", "color": "#ffaa00"},
+            "slow_ma": {"type": "line", "color": "#00aaff"},
+        },
+        "subplots": {
+            # 第一层为面板标题，第二层为 DataFrame 指标列名
+            "ATR": {
+                "atr": {"type": "line", "color": "#ff55ff"}
+            }
+        }
+    }
+    ```
+
+4. NautilusTrader API 常见禁忌与标准用法（CRITICAL）：
+- ❌ 严禁调用 `self.portfolio.account_balance()`（Portfolio 无此方法！如需获取账户净值请使用 `self.portfolio.equity(self.instrument_id.venue)`）。
+- ❌ 严禁调用 `self.portfolio.is_net_flat(...)`（正确方法为 `self.portfolio.is_flat(self.instrument_id)`）。
+- ❌ 严禁调用 `self.portfolio.position(...)`（正确方法为 `self.portfolio.net_position(self.instrument_id)` 或 `self.portfolio.is_flat(...)`）。
+- ❌ 严禁调用 `self.close_position(self.instrument_id)`（平仓标的必须使用 `self.close_all_positions(self.instrument_id)`）。
+- ❌ 严禁调用 `self.instrument.round_quantity(...)`（正确方法为 `self.instrument.make_qty(...)`，直接返回规范精度 Quantity）。
+- ❌ 严禁向订单 `quantity` 传递裸 float/int（必须使用 `Quantity` 或 `self.instrument.make_qty(...)`）。
 """
 
 
