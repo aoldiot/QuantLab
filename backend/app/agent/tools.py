@@ -508,13 +508,13 @@ async def write_strategy_code(
 
     # Attempt to resolve missing/generic strategy_name from instructions, error_context, or project
     if not strategy_name or strategy_name in ("strategy", "custom_strategy"):
-        m = re.search(r"backend/app/strategies/([a-zA-Z0-9_\-]+)\.py", instructions or "")
+        m = re.search(r"backend/app/strategies/([a-z][a-z0-9_]{1,63})\.py", instructions or "")
         if not m:
-            m = re.search(r"策略[「\"']([a-zA-Z0-9_\-\s]+)[」\"']", instructions or "")
+            m = re.search(r"策略[「\"']([a-z][a-z0-9_]{1,63})[」\"']", instructions or "")
         if not m and error_context:
-            m = re.search(r"backend/app/strategies/([a-zA-Z0-9_\-]+)\.py", error_context)
+            m = re.search(r"backend/app/strategies/([a-z][a-z0-9_]{1,63})\.py", error_context)
         if m:
-            strategy_name = m.group(1)
+            strategy_name = m.group(1).lower()
 
     if (not strategy_name or strategy_name in ("strategy", "custom_strategy")) and db and project_id:
         try:
@@ -523,11 +523,17 @@ async def write_strategy_code(
             if proj and proj.strategy_id:
                 strat = await db.get(Strategy, proj.strategy_id)
                 if strat and strat.slug:
-                    strategy_name = strat.slug
+                    strategy_name = strat.slug.lower()
         except Exception as e:
             logger.warning("尝试从项目关联策略获取 strategy_name 失败: %s", e)
 
-    strategy_name = sanitize_strategy_slug(strategy_name) if strategy_name else "custom_strategy"
+    if not strategy_name or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", strategy_name):
+        err_msg = f"策略名称格式不合法 ('{strategy_name}')，必须使用小写字母、数字和下划线，且以字母开头"
+        _update_status("参数校验失败", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
+        return {
+            "ok": False,
+            "error": err_msg,
+        }
 
     repo_path = settings.strategy_repo_path.resolve()
     target_file = (repo_path / "backend/app/strategies" / f"{strategy_name}.py").resolve()
@@ -568,7 +574,7 @@ async def write_strategy_code(
         except Exception:
             pass
 
-    max_self_heal_turns = 6
+    max_self_heal_turns = 12
     eval_file = work_dir / f"{strategy_name}_staging.py"
     if existing_code:
         eval_file.write_text(existing_code, encoding="utf-8")
@@ -606,9 +612,10 @@ async def write_strategy_code(
     current_dsh_prompt = dsh_base_prompt
     for heal_turn in range(max_self_heal_turns + 1):
         if heal_turn > 0:
+            heal_progress = min(85, 45 + int(heal_turn * (40 / max_self_heal_turns)))
             _update_status(
                 f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮沙盒自愈修复...",
-                min(85, 50 + heal_turn * 15),
+                heal_progress,
                 log_line=f"[SELF-HEAL] 触发沙盒自愈修复 (第 {heal_turn} 轮)...",
             )
             current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
@@ -678,7 +685,7 @@ async def write_strategy_code(
             )
             _update_status(
                 "未能提取到 Python 代码块",
-                min(85, 50 + heal_turn * 15),
+                min(85, 45 + int(heal_turn * (40 / max_self_heal_turns))),
                 log_line="[ERROR] 模型回复中未包含有效的 Python 策略代码块 (```python ... ```)",
             )
 

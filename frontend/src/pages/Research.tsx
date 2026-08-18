@@ -1579,9 +1579,11 @@ function CodeApprovalCard({
           </div>
           <h4>策略编码方案已就绪 · 请确认是否开始写码</h4>
         </div>
-        <div className="code-approval-slug">
-          <code>{data.strategy_name || 'custom_strategy'}</code>
-        </div>
+        {data.strategy_name && (
+          <div className="code-approval-slug">
+            <code>{data.strategy_name}</code>
+          </div>
+        )}
       </div>
 
       <div className="code-approval-body">
@@ -2863,7 +2865,7 @@ export default function Research(){
                   <div className="code-view-bar">
                     <span className="code-filename">
                       <FileCode size={14}/>
-                      {strategyName?`${strategyName}.py`:'strategy.py'}
+                      {strategyName ? `${strategyName}.py` : '策略源码 (未生成)'}
                     </span>
                     {strategyName&&(
                       <Link

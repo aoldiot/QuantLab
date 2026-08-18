@@ -100,82 +100,44 @@ def ensure_strategy_storage() -> None:
                     logger.warning("恢复 Agent 策略文件失败 %s: %s", wt_file.name, e)
 
 
-from .strategy_contract import sanitize_strategy_slug
-
-
 def save_strategy_code(name: str, code: str) -> Path:
     """Save strategy code to both ephemeral STRATEGY_DIR and persistent PERSISTENT_STRATEGY_DIR."""
-    slug = sanitize_strategy_slug(name)
     STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
-    canonical = (STRATEGY_DIR / f"{slug}.py").resolve()
-    persisted = (PERSISTENT_STRATEGY_DIR / f"{slug}.py").resolve()
+    canonical = (STRATEGY_DIR / f"{name}.py").resolve()
+    persisted = (PERSISTENT_STRATEGY_DIR / f"{name}.py").resolve()
     canonical.write_text(code, encoding="utf-8")
     persisted.write_text(code, encoding="utf-8")
     return canonical
 
 
 def _path(name: str) -> Path:
-    if not name or str(name).strip() == "__init__":
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", name) or name == "__init__":
+        raise HTTPException(400, "文件名只能使用小写字母、数字和下划线")
+    path = (STRATEGY_DIR / f"{name}.py").resolve()
+    if path.parent != STRATEGY_DIR.resolve():
         raise HTTPException(400, "非法策略文件路径")
-    slug = sanitize_strategy_slug(name)
-    if slug == "__init__":
-        raise HTTPException(400, "非法策略文件路径")
 
-    canonical = (STRATEGY_DIR / f"{slug}.py").resolve()
-    if canonical.exists() and canonical.is_file():
-        return canonical
+    # If missing in STRATEGY_DIR, check PERSISTENT_STRATEGY_DIR or worktrees
+    if not path.exists():
+        persisted = (PERSISTENT_STRATEGY_DIR / f"{name}.py").resolve()
+        if persisted.exists():
+            shutil.copy2(persisted, path)
+            return path
 
-    # If missing in STRATEGY_DIR, check PERSISTENT_STRATEGY_DIR
-    persisted = (PERSISTENT_STRATEGY_DIR / f"{slug}.py").resolve()
-    if persisted.exists() and persisted.is_file():
-        try:
-            shutil.copy2(persisted, canonical)
-            return canonical
-        except Exception:
-            return persisted
+        worktrees_root = settings.data_root / "agent" / "worktrees"
+        if worktrees_root.exists():
+            candidates = sorted(worktrees_root.glob(f"*/backend/app/strategies/{name}.py"), key=lambda x: x.stat().st_mtime, reverse=True)
+            if candidates:
+                try:
+                    content = candidates[0].read_text(encoding="utf-8")
+                    if content.strip():
+                        save_strategy_code(name, content)
+                        return path
+                except Exception:
+                    pass
 
-    # Search for alternative candidate filenames (e.g. raw input, with hyphens, with underscores)
-    raw_name = Path(str(name).strip()).stem
-    candidates = [
-        raw_name,
-        raw_name.replace("_", "-"),
-        raw_name.replace("-", "_"),
-        slug.replace("_", "-"),
-    ]
-    for c_name in candidates:
-        if not c_name or c_name == "__init__":
-            continue
-        c_persisted = (PERSISTENT_STRATEGY_DIR / f"{c_name}.py").resolve()
-        if c_persisted.exists() and c_persisted.is_file():
-            try:
-                shutil.copy2(c_persisted, canonical)
-                return canonical
-            except Exception:
-                return c_persisted
-        c_canonical = (STRATEGY_DIR / f"{c_name}.py").resolve()
-        if c_canonical.exists() and c_canonical.is_file():
-            return c_canonical
-
-    # Check agent worktrees
-    worktrees_root = settings.data_root / "agent" / "worktrees"
-    if worktrees_root.exists():
-        found = sorted(
-            list(worktrees_root.glob(f"*/backend/app/strategies/{slug}.py"))
-            + list(worktrees_root.glob(f"*/backend/app/strategies/{raw_name}.py")),
-            key=lambda x: x.stat().st_mtime,
-            reverse=True,
-        )
-        if found:
-            try:
-                content = found[0].read_text(encoding="utf-8")
-                if content.strip():
-                    save_strategy_code(slug, content)
-                    return canonical
-            except Exception:
-                pass
-
-    return canonical
+    return path
 
 
 

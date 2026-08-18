@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 def get_strategy_code(strategy_name: str) -> str | None:
     """Retrieve strategy python code by name."""
-    strategy_name = sanitize_strategy_slug(strategy_name) if strategy_name else ""
+    strategy_name = strategy_name.strip().lower()
     p = _path(strategy_name)
     if not p.exists():
         return None
@@ -28,15 +28,17 @@ def get_strategy_code(strategy_name: str) -> str | None:
 
 def save_strategy_file(strategy_name: str, code: str) -> Path:
     """Save code into backend/app/strategies/{strategy_name}.py."""
-    slug = sanitize_strategy_slug(strategy_name)
-    save_strategy_code(slug, code)
-    return _path(slug)
+    strategy_name = strategy_name.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", strategy_name):
+        raise ValueError(f"无效的策略名称: {strategy_name}")
+    save_strategy_code(strategy_name, code)
+    return _path(strategy_name)
 
 
 def verify_strategy_code(strategy_name: str, custom_path: Path | None = None) -> dict[str, Any]:
     """Run the 4-level Pre-Flight sandbox verification."""
-    slug = sanitize_strategy_slug(strategy_name) if strategy_name else "temp_strategy"
-    target = custom_path or _path(slug)
+    strategy_name = strategy_name.strip().lower()
+    target = custom_path or _path(strategy_name)
     if not target.exists():
         return {
             "ok": False,
@@ -45,7 +47,7 @@ def verify_strategy_code(strategy_name: str, custom_path: Path | None = None) ->
             "steps": [],
         }
 
-    res = verify_strategy_file(target, strategy_name=slug)
+    res = verify_strategy_file(target, strategy_name=strategy_name)
     return res.to_dict()
 
 
