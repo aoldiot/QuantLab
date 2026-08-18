@@ -824,7 +824,7 @@ function groupMessagesIntoTurns(
     }
 
     const isBacktestCall = toolName === 'execute_backtest'
-    const isWritingCall = toolName === 'write_strategy_with_claude'
+    const isWritingCall = toolName === 'write_strategy_code' || toolName === 'write_strategy_with_claude'
     const runForCall = isBacktestCall
       ? (runs.find(r => r.name.includes(args.strategy_name || '') || r.id === project?.latest_backtest_id) || activeRun)
       : null
@@ -1056,7 +1056,7 @@ function ProcessToolStep({
   const args = item.args || {}
   const res = item.result || {}
   const isBacktest = toolName === 'execute_backtest'
-  const isWriting = toolName === 'write_strategy_with_claude'
+  const isWriting = toolName === 'write_strategy_code' || toolName === 'write_strategy_with_claude'
   const isTerminal = toolName === 'terminal'
   const isSkill = toolName === 'skill_view'
   const isProcess = toolName === 'process'
@@ -1775,7 +1775,7 @@ export default function Research(){
     const rulesSummary = data.key_rules && data.key_rules.length > 0 ? `\n核心规则要点：\n${data.key_rules.map(r => `- ${r}`).join('\n')}` : ''
     const paramsSummary = data.parameter_specs && Object.keys(data.parameter_specs).length > 0 ? `\n预设参数配置：${JSON.stringify(data.parameter_specs, null, 2)}` : ''
     const approvePrompt =
-      `【已批准策略「${stratName}」的设计方案，请立即调用 write_strategy_with_claude 工具编写策略代码】：\n` +
+      `【已批准策略「${stratName}」的设计方案，请立即调用 write_strategy_code 工具编写策略代码】：\n` +
       `- strategy_name: "${stratName}"\n` +
       `- instructions: "请编写策略 ${stratName} 的完整代码文件 backend/app/strategies/${stratName}.py，严格遵循 NautilusTrader 开发规范并通过 4 级 Pre-Flight 验证。${rulesSummary}${paramsSummary}"`
 

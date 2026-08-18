@@ -7,8 +7,6 @@ import logging
 import os
 import py_compile
 import re
-import shutil
-import subprocess
 from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any
@@ -19,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import settings
 from ..db import SessionLocal
 from ..git_versions import code_hash, manifest_hash
-from ..llm_config import get_config, sdk_env
+from ..llm_config import get_config
 from ..models import BacktestRun, ResearchProject, RunStatus, Strategy, StrategyVersion
 from ..runner import execute_backtest
 from ..strategy_contract import load_manifest, validate_parameters
@@ -71,6 +69,8 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
                 "atr": {"type": "line", "color": "#ff55ff"}
             }
         }
+    }
+    ```
 3. Pre-Flight 4 级运行期沙盒校验准则（代码将由沙盒全自动检测，请严格遵守）：
 - Level 1 语法与结构：必须包含 StrategyConfig 子类、Strategy 子类、calculate_indicators 函数与 STRATEGY_MANIFEST 实例。
 - Level 2 契约与实例化：StrategyConfig 子类必须声明所有在 STRATEGY_MANIFEST.parameters 中定义的参数，字段名与类型一致；plot_config 必须为双层嵌套字典，图形类型必须为 line/histogram/bar/area/baseline。
@@ -227,8 +227,8 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "write_strategy_with_claude",
-            "description": "执行策略编写与 4 级 Pre-Flight 运行期沙盒验证。在用户批准编码或明确要求修复时，由 Hermes 调度此工具生成或修复 NautilusTrader 策略代码。",
+            "name": "write_strategy_code",
+            "description": "执行策略编写与 4 级 Pre-Flight 运行期沙盒验证。在用户批准编码或明确要求修复时，调度此工具生成或修复 NautilusTrader 策略代码。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -291,7 +291,7 @@ async def ensure_strategy_db_record(
             logger.warning("解析策略 Manifest 降级处理 (%s): %s", strategy_name, m_exc)
             s_name = strategy_name.replace("_", " ").title()
             s_slug = strategy_name
-            s_desc = "Hermes 量化研究策略"
+            s_desc = "QuantLab 量化研究策略"
             s_cat = "trend"
             s_ver = "1.0.0"
             s_pschema = {}
@@ -330,7 +330,7 @@ async def ensure_strategy_db_record(
                 parameter_schema=s_pschema,
                 data_requirements=s_dreq,
                 manifest_hash=m_hash,
-                description="Hermes 研究生成",
+                description="QuantLab 研究生成",
             )
             db.add(version_obj)
             await db.flush()
@@ -361,7 +361,7 @@ WRITING_STATUS: dict[str, dict[str, Any]] = {}
 
 
 def get_writing_log_tool(project_id: str) -> dict[str, Any]:
-    """Retrieve the real-time writing progress and log of Claude strategy generator."""
+    """Retrieve the real-time writing progress and log of strategy generator."""
     if project_id in WRITING_STATUS:
         return WRITING_STATUS[project_id]
     log_file = settings.artifact_root.resolve() / f"research_{project_id}" / "writing.log"
@@ -387,7 +387,7 @@ def get_writing_log_tool(project_id: str) -> dict[str, Any]:
     }
 
 
-async def write_strategy_with_claude(
+async def write_strategy_code(
     strategy_name: str,
     instructions: str,
     is_fix: bool = False,
@@ -396,10 +396,10 @@ async def write_strategy_with_claude(
     project_id: str | None = None,
     db: AsyncSession | None = None,
 ) -> dict[str, Any]:
-    """Execute Claude Code to write or repair NautilusTrader strategy code with 4-level pre-flight verification."""
+    """Write or repair NautilusTrader strategy code with 4-level pre-flight verification."""
     strategy_name = strategy_name.strip().lower() if strategy_name else ""
 
-    # Initialize artifact writing log directory & file immediately so logs are never stale
+    # Initialize artifact writing log directory & file immediately
     work_dir = settings.artifact_root.resolve() / f"research_{project_id or 'default'}"
     work_dir.mkdir(parents=True, exist_ok=True)
     log_file = work_dir / "writing.log"
@@ -472,7 +472,6 @@ async def write_strategy_with_claude(
     if specification:
         spec_section = f"\n【结构化策略规格定义 (Specification)】\n```json\n{json.dumps(specification, ensure_ascii=False, indent=2)}\n```\n"
 
-    # Build detailed prompt for Claude
     fix_prompt = ""
     if is_fix and error_context:
         fix_prompt = f"""
@@ -486,31 +485,10 @@ async def write_strategy_with_claude(
 ```
 """
 
-    base_prompt = f"""
-你正在为 QuantLab 量化交易系统编写/修改 NautilusTrader 策略文件：`backend/app/strategies/{strategy_name}.py`。
-
-{NAUTILUS_DEVELOPER_GUIDE}
-
-【编写任务与需求】
-{instructions}
-{spec_section}
-{fix_prompt}
-
-【严格要求】
-1. 只修改或生成 `backend/app/strategies/{strategy_name}.py` 文件。
-2. 必须包含 StrategyConfig 子类、Strategy 子类、calculate_indicators 函数和 STRATEGY_MANIFEST 对象。
-3. 确保所有指标和信号严格向量化与事件驱动计算正确，杜绝未来函数。
-4. 【执行效率与轮次要求】：请直接编写或修改目标策略代码文件，并使用简单快速的检查。严禁在子会话中运行长时间的完整回测或 benchmark 消耗轮次，尽量在 2-5 轮内完成写码与必要检验。
-5. 编写完成后，确保通过 Python 语法和 QuantLab 4 级契约校验。
-"""
-
-    # Retrieve environment variables for Claude
-    env = os.environ.copy()
     cfg = None
     if db:
         try:
             cfg = await get_config(db)
-            env.update(sdk_env(cfg))
         except Exception:
             pass
 
@@ -519,255 +497,9 @@ async def write_strategy_with_claude(
     v_res = None
     stdout_lines: list[str] = []
 
-    # Attempt to use Claude Agent SDK query
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions, query, AssistantMessage, ResultMessage
+    from app.dsh.runtime import dsh_runtime
 
-        options = ClaudeAgentOptions(
-            cwd=Path(repo_path),
-            model=cfg.model if cfg else None,
-            env=env,
-            tools=["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
-            allowed_tools=[
-                "Read",
-                "Glob",
-                "Grep",
-                "Edit",
-                "Write",
-                "Bash",
-            ],
-            permission_mode="bypassPermissions",
-            setting_sources=[],
-            max_turns=max(cfg.max_turns or 50, 50) if cfg else 50,
-            system_prompt=NAUTILUS_DEVELOPER_GUIDE,
-        )
-
-        _update_status("正在启动 Claude Agent SDK 客户端...", 25, log_line="[SDK] 初始化 Claude Agent SDK 客户端...")
-
-        current_prompt = base_prompt
-        for heal_turn in range(max_self_heal_turns + 1):
-            is_healing = heal_turn > 0
-            if is_healing:
-                _update_status(
-                    f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮自动自愈修复...",
-                    min(80, 50 + heal_turn * 15),
-                    log_line=f"[SELF-HEAL] 触发自闭环自愈修复 (第 {heal_turn} 轮)...",
-                )
-            else:
-                _update_status("已启动代码编写进程，正在分析并编写策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
-
-            logger.info("Claude SDK 正在生成/修复代码: %s (turn=%d)", strategy_name, heal_turn)
-
-            turn_tokens: list[str] = []
-            try:
-                async for message in query(prompt=current_prompt, options=options):
-                    if isinstance(message, AssistantMessage):
-                        if hasattr(message, "content"):
-                            for part in getattr(message, "content", []):
-                                if isinstance(part, dict) and "text" in part:
-                                    t = str(part["text"])
-                                    turn_tokens.append(t)
-                                    with log_file.open("a", encoding="utf-8") as f:
-                                        f.write(t)
-                                        f.flush()
-                                elif hasattr(part, "text"):
-                                    t = str(getattr(part, "text"))
-                                    turn_tokens.append(t)
-                                    with log_file.open("a", encoding="utf-8") as f:
-                                        f.write(t)
-                                        f.flush()
-                    elif isinstance(message, ResultMessage):
-                        res_txt = message.result or ""
-                        turn_tokens.append(res_txt)
-                        with log_file.open("a", encoding="utf-8") as f:
-                            f.write(f"\n[Result]: {res_txt}\n")
-                            f.flush()
-                    cur_prog = min(85, 30 + len(turn_tokens) // 5)
-                    _update_status("代码生成与文件修改中...", cur_prog)
-            except Exception as q_exc:
-                logger.warning("Claude SDK query 异常: %s", q_exc)
-                with log_file.open("a", encoding="utf-8") as f:
-                    f.write(f"\n[SDK Stderr]: {q_exc}\n")
-                    f.flush()
-
-            stdout_lines.extend(turn_tokens)
-
-            # If Claude SDK failed with authentication error, break immediately to DSH fallback
-            if any("Failed to authenticate" in t or "401 the API key" in t or "API Error: 401" in t for t in turn_tokens):
-                logger.warning("检测到 Claude SDK 鉴权异常，立即终止 Claude SDK 循环并无缝切换至 DeepSeek Harness 原生生成引擎")
-                break
-
-            _update_status(
-                "代码生成完成，正在执行 4 级 Pre-Flight 策略验证沙盒...",
-                88,
-                log_line="[VERIFICATION] 代码生成退出，开始执行 4 级 Pre-Flight 运行期沙盒检测...",
-            )
-
-            if not eval_file.exists():
-                alt_file = (STRATEGY_DIR / f"{strategy_name}.py").resolve()
-                if alt_file.exists():
-                    eval_file = alt_file
-
-            if eval_file.exists():
-                v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
-                for step in v_res.steps:
-                    mark = "✓" if step.ok else "✗"
-                    _update_status(
-                        f"验证阶段: {step.level} {step.name}",
-                        90,
-                        log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
-                    )
-
-                if v_res.ok:
-                    break
-
-            if heal_turn < max_self_heal_turns:
-                _update_status(
-                    f"Pre-Flight 校验未通过 ({v_res.failed_level if v_res else 'L1'})，正在准备自动修复...",
-                    85,
-                    log_line=f"[WARN] 校验未通过 ({v_res.failed_level if v_res else 'L1'}): {v_res.error_message if v_res else '文件缺失'}。在同一会话中触发自愈修复...",
-                )
-                current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
-                current_prompt = f"""
-【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level if v_res else 'L1'})】
-你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒在 `{v_res.failed_level if v_res else 'L1'}` 级别检测到以下错误：
-
-- 错误摘要: {v_res.summary if v_res else '文件缺失或校验未通过'}
-- 错误详情: {v_res.error_message if v_res else '未生成策略文件'}
-- 修复建议: {v_res.suggestion if v_res else '请编写完整的 NautilusTrader 策略代码'}
-
-当前代码内容如下：
-```python
-{current_code[:12000]}
-```
-
-【修复任务】
-请针对上述具体错误与建议，直接修改并修复 `backend/app/strategies/{strategy_name}.py`，确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
-"""
-
-    except Exception as sdk_exc:
-        logger.warning("Claude SDK 运行遇到异常 (%s)，降级为 CLI 方式执行...", sdk_exc)
-        # Fallback to CLI execution
-        extra_paths = [
-            str(Path.home() / ".local/bin"),
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/usr/bin",
-            "/bin",
-        ]
-        cur_path = env.get("PATH", "")
-        for p in extra_paths:
-            if p not in cur_path:
-                cur_path = f"{p}:{cur_path}"
-        env["PATH"] = cur_path
-
-        claude_bin = (
-            shutil.which("claude", path=cur_path)
-            or (Path.home() / ".local/bin/claude").as_posix()
-            or "/usr/local/bin/claude"
-            or "/opt/homebrew/bin/claude"
-            or "claude"
-        )
-
-        current_prompt = base_prompt
-        for heal_turn in range(max_self_heal_turns + 1):
-            is_healing = heal_turn > 0
-            if is_healing:
-                _update_status(
-                    f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮自动自愈修复...",
-                    min(80, 50 + heal_turn * 15),
-                    log_line=f"[SELF-HEAL] 触发自闭环自愈修复 (第 {heal_turn} 轮)...",
-                )
-            else:
-                _update_status("已启动代码编写进程，正在分析并编写策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
-
-            cmd = [
-                claude_bin,
-                "-p",
-                current_prompt,
-                "--dangerously-skip-permissions",
-            ]
-
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    cwd=str(repo_path),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    env=env,
-                )
-
-                async def _stream_cli_output():
-                    while True:
-                        line = await process.stdout.readline()
-                        if not line:
-                            break
-                        text = line.decode("utf-8", errors="replace")
-                        stdout_lines.append(text)
-                        with log_file.open("a", encoding="utf-8") as f:
-                            f.write(text)
-                            f.flush()
-                        cur_prog = min(85, 30 + len(stdout_lines))
-                        _update_status("代码生成与文件修改中...", cur_prog)
-
-                await asyncio.wait_for(
-                    asyncio.gather(process.wait(), _stream_cli_output()),
-                    timeout=300,
-                )
-            except Exception as exc:
-                err_msg = f"调用 Claude CLI 失败：{exc}"
-                _update_status("调用失败", 100, status="FAILED", log_line=f"[ERROR] {err_msg}")
-                return {"ok": False, "error": err_msg}
-
-            if not eval_file.exists():
-                alt_file = (STRATEGY_DIR / f"{strategy_name}.py").resolve()
-                if alt_file.exists():
-                    eval_file = alt_file
-
-            v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
-            for step in v_res.steps:
-                mark = "✓" if step.ok else "✗"
-                _update_status(
-                    f"验证阶段: {step.level} {step.name}",
-                    90,
-                    log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
-                )
-
-            if v_res.ok:
-                break
-
-            if heal_turn < max_self_heal_turns:
-                current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
-                current_prompt = f"""
-【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level})】
-你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒在 `{v_res.failed_level}` 级别检测到以下错误：
-
-- 错误摘要: {v_res.summary}
-- 错误详情: {v_res.error_message}
-- 修复建议: {v_res.suggestion}
-
-当前代码内容如下：
-```python
-{current_code[:12000]}
-```
-
-【修复任务】
-请针对上述具体错误与建议，直接修改并修复 `backend/app/strategies/{strategy_name}.py`，确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
-"""
-
-    if eval_file.exists() and v_res is None:
-        v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
-
-    # 3. If Claude SDK and CLI did not generate a verified strategy, fallback to DeepSeek Harness Direct Strategy Generator
-    if v_res is None or not v_res.ok:
-        _update_status(
-            "正在使用 DeepSeek Harness 核心引擎进行策略代码构建与沙盒验证...",
-            40,
-            log_line="[DSH-FALLBACK] 启用 DeepSeek Harness 原生策略写码引擎...",
-        )
-        from app.dsh.runtime import dsh_runtime
-
-        dsh_base_prompt = f"""
+    dsh_base_prompt = f"""
 你正在为 QuantLab 量化交易系统编写/修改 NautilusTrader 策略文件：`backend/app/strategies/{strategy_name}.py`。
 
 【策略需求与任务】
@@ -784,16 +516,16 @@ async def write_strategy_with_claude(
 3. 确保所有指标和信号严格向量化与事件驱动计算正确，杜绝未来函数。
 4. 不要输出多余说明，直接输出可直接保存执行的完整 Python 代码。
 """
-        current_dsh_prompt = dsh_base_prompt
-        for heal_turn in range(max_self_heal_turns + 1):
-            if heal_turn > 0:
-                _update_status(
-                    f"DSH 正在执行第 {heal_turn}/{max_self_heal_turns} 轮沙盒自愈修复...",
-                    min(85, 50 + heal_turn * 15),
-                    log_line=f"[DSH-HEAL] 触发 DSH 沙盒自愈修复 (第 {heal_turn} 轮)...",
-                )
-                current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
-                current_dsh_prompt = f"""
+    current_dsh_prompt = dsh_base_prompt
+    for heal_turn in range(max_self_heal_turns + 1):
+        if heal_turn > 0:
+            _update_status(
+                f"正在执行第 {heal_turn}/{max_self_heal_turns} 轮沙盒自愈修复...",
+                min(85, 50 + heal_turn * 15),
+                log_line=f"[SELF-HEAL] 触发沙盒自愈修复 (第 {heal_turn} 轮)...",
+            )
+            current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
+            current_dsh_prompt = f"""
 【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level if v_res else 'L1'})】
 你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒检测到以下错误：
 
@@ -809,45 +541,49 @@ async def write_strategy_with_claude(
 【修复任务】
 请针对上述具体错误与建议修复代码，直接输出修复后的完整 Python 策略代码块（```python ... ```），确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
 """
+        else:
+            _update_status("正在生成策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
 
-            logger.info("DSH 代码生成引擎开始生成策略 %s (turn=%d)...", strategy_name, heal_turn)
-            content, _, reasoning = await dsh_runtime.call_llm(
-                messages=[{"role": "user", "content": current_dsh_prompt}],
-                system_prompt="你是 QuantLab 首席量化策略架构师与代码开发专家。只输出符合 NautilusTrader 规范的完整 Python 代码块。",
-                db_config=cfg,
+        logger.info("代码生成引擎开始生成策略 %s (turn=%d)...", strategy_name, heal_turn)
+        content, _, reasoning = await dsh_runtime.call_llm(
+            messages=[{"role": "user", "content": current_dsh_prompt}],
+            system_prompt="你是 QuantLab 首席量化策略架构师与代码开发专家。只输出符合 NautilusTrader 规范的完整 Python 代码块。",
+            db_config=cfg,
+        )
+
+        code_match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", content)
+        if code_match:
+            extracted_code = code_match.group(1).strip()
+        elif "class " in content and "Strategy" in content:
+            extracted_code = content.strip()
+        else:
+            extracted_code = ""
+
+        if extracted_code:
+            eval_file.write_text(extracted_code, encoding="utf-8")
+            stdout_lines.append(f"\n[生成代码字符数: {len(extracted_code)}]\n")
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(f"\n[生成代码字符数: {len(extracted_code)}]\n")
+                f.flush()
+
+            _update_status(
+                "代码已写入，正在执行 4 级 Pre-Flight 沙盒检测...",
+                88,
+                log_line="[VERIFY] 开始执行 4 级 Pre-Flight 运行期沙盒检测...",
             )
-
-            # Extract python code
-            code_match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", content)
-            if code_match:
-                extracted_code = code_match.group(1).strip()
-            elif "class " in content and "Strategy" in content:
-                extracted_code = content.strip()
-            else:
-                extracted_code = ""
-
-            if extracted_code:
-                eval_file.write_text(extracted_code, encoding="utf-8")
-                stdout_lines.append(f"\n[DSH 生成代码字符数: {len(extracted_code)}]\n")
-                with log_file.open("a", encoding="utf-8") as f:
-                    f.write(f"\n[DSH 生成代码字符数: {len(extracted_code)}]\n")
-                    f.flush()
-
+            v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
+            for step in v_res.steps:
+                mark = "✓" if step.ok else "✗"
                 _update_status(
-                    "DSH 代码已写入，正在执行 4 级 Pre-Flight 沙盒检测...",
-                    88,
-                    log_line="[DSH-VERIFY] 开始执行 4 级 Pre-Flight 运行期沙盒检测...",
+                    f"验证阶段: {step.level} {step.name}",
+                    90,
+                    log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
                 )
-                v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
-                for step in v_res.steps:
-                    mark = "✓" if step.ok else "✗"
-                    _update_status(
-                        f"验证阶段: {step.level} {step.name}",
-                        90,
-                        log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
-                    )
-                if v_res.ok:
-                    break
+            if v_res.ok:
+                break
+
+    if eval_file.exists() and v_res is None:
+        v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)
 
     if v_res and v_res.ok:
         # Code is fully verified, sync to persistent storage
@@ -896,9 +632,13 @@ async def write_strategy_with_claude(
             "ok": False,
             "status": "VALIDATION_FAILED",
             "strategy_name": strategy_name,
-            "error": f"Pre-Flight 4 级校验未通过 [{failed_level}]: {error_msg}\n修复建议: {suggestion}\n\nClaude 输出：\n{full_stdout[:1000]}",
+            "error": f"Pre-Flight 4 级校验未通过 [{failed_level}]: {error_msg}\n修复建议: {suggestion}\n\n生成输出：\n{full_stdout[:1000]}",
             "validation": v_res.to_dict() if v_res else {},
         }
+
+
+# Backwards compatibility alias
+write_strategy_with_claude = write_strategy_code
 
 
 async def execute_backtest_tool(
@@ -965,7 +705,7 @@ async def execute_backtest_tool(
                 parameter_schema=manifest.parameter_schema(),
                 data_requirements=manifest.data_requirements(),
                 manifest_hash=m_hash,
-                description="Hermes 自主研究所发布",
+                description="QuantLab 研究发布",
             )
             s.add(version_obj)
             await s.flush()
@@ -1101,13 +841,12 @@ async def dispatch_tool_call(
     project_id: str | None = None,
     db: AsyncSession | None = None,
 ) -> dict[str, Any]:
-    """Dispatch a tool call requested by Hermes Agent."""
-    logger.info("执行 Hermes 工具调用：%s, 参数：%s", tool_name, arguments)
-    if tool_name == "write_strategy_with_claude":
+    """Dispatch a tool call requested by Agent."""
+    logger.info("执行 Agent 工具调用：%s, 参数：%s", tool_name, arguments)
+    if tool_name in ("write_strategy_code", "write_strategy_with_claude"):
         strat_arg = arguments.get("strategy_name", "")
         inst_arg = arguments.get("instructions", "")
-        # If instructions was empty or generic, fill from context or project
-        return await write_strategy_with_claude(
+        return await write_strategy_code(
             strategy_name=strat_arg,
             instructions=inst_arg,
             is_fix=arguments.get("is_fix", False),
@@ -1117,7 +856,6 @@ async def dispatch_tool_call(
             db=db,
         )
     elif tool_name == "propose_code_approval":
-        # Auto-infer strategy_name if omitted or generic
         strat_name = arguments.get("strategy_name", "")
         if (not strat_name or strat_name in ("strategy", "custom_strategy")) and db and project_id:
             try:

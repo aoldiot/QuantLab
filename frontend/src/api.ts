@@ -80,7 +80,6 @@ export const api={
   llmConfig:()=>request<LlmConfiguration>('/settings/llm'),
   saveLlmConfig:(data:unknown)=>request<LlmConfiguration>('/settings/llm',{method:'PUT',body:JSON.stringify(data)}),
   testLlmConfig:(deep=false)=>request<{ok:boolean;message:string}>(`/settings/llm/test?deep=${deep}`,{method:'POST'}),
-  testHermesConfig:()=>request<{ok:boolean;message:string}>('/settings/llm/test-hermes',{method:'POST'}),
   testDshConfig:()=>request<{ok:boolean;message:string;reasoning?:string}>('/settings/llm/test-dsh',{method:'POST'}),
   gitConfig:()=>request<GitConfiguration>('/settings/git'),
   saveGitConfig:(data:unknown)=>request<GitConfiguration>('/settings/git',{method:'PUT',body:JSON.stringify(data)}),

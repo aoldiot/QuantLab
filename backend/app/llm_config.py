@@ -7,7 +7,6 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,10 +56,8 @@ def config_out(config: LlmConfiguration | None) -> dict:
     if config is None:
         return {
             "configured": False,
-            "hermes_configured": False,
         }
     key = decrypt_api_key(config.api_key_encrypted)
-    hermes_key = decrypt_api_key(config.hermes_api_key_encrypted) if config.hermes_api_key_encrypted else ""
     return {
         "configured": bool(key and config.base_url and config.model),
         "base_url": config.base_url,
@@ -74,14 +71,6 @@ def config_out(config: LlmConfiguration | None) -> dict:
         "last_test_ok": config.last_test_ok,
         "last_test_message": config.last_test_message,
         "last_tested_at": config.last_tested_at,
-        "hermes_configured": bool(config.hermes_base_url and config.hermes_model),
-        "hermes_base_url": config.hermes_base_url,
-        "hermes_api_key_masked": mask_api_key(hermes_key) if hermes_key else "",
-        "hermes_model": config.hermes_model,
-        "hermes_timeout_seconds": config.hermes_timeout_seconds,
-        "hermes_last_test_ok": config.hermes_last_test_ok,
-        "hermes_last_test_message": config.hermes_last_test_message,
-        "hermes_last_tested_at": config.hermes_last_tested_at,
         "updated_at": config.updated_at,
     }
 
@@ -93,41 +82,24 @@ async def get_config(db: AsyncSession) -> LlmConfiguration:
     return config
 
 
-async def get_hermes_config(db: AsyncSession | None = None) -> tuple[str, str, str, int]:
-    """Returns (base_url, api_key, model, timeout_seconds) for Hermes from DB."""
-    if db is None:
-        raise HTTPException(503, "未提供数据库会话，无法获取 Hermes 配置")
-    config = await db.get(LlmConfiguration, 1)
-    if not config or not config.hermes_base_url or not config.hermes_model:
-        raise HTTPException(503, "尚未配置 Hermes，请先前往系统设置配置")
-    api_key = decrypt_api_key(config.hermes_api_key_encrypted) if config.hermes_api_key_encrypted else ""
-    return (
-        config.hermes_base_url,
-        api_key,
-        config.hermes_model,
-        config.hermes_timeout_seconds or 600,
-    )
-
-
 MAX_API_RETRIES = 5
 
 
-def sdk_env(config: LlmConfiguration) -> dict[str, str]:
-    env = {
-        "ANTHROPIC_BASE_URL": config.base_url.rstrip("/"),
-        "API_TIMEOUT_MS": str((config.timeout_seconds or 120) * 1000),
-        "CLAUDE_CODE_MAX_RETRIES": str(MAX_API_RETRIES),
-    }
-    key_name = "ANTHROPIC_API_KEY" if config.auth_type == "api_key" else "ANTHROPIC_AUTH_TOKEN"
-    env[key_name] = decrypt_api_key(config.api_key_encrypted)
-    if config.small_fast_model:
-        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.small_fast_model
-    # Forward proxy envs to the Claude SDK subprocess if present
-    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"):
-        val = os.environ.get(var)
-        if val:
-            env[var] = val
-    return env
+def format_llm_error(exc: Exception) -> str:
+    err_str = str(exc).strip()
+    hint = ""
+    if any(k in err_str for k in ("401", "authentication_failed", "Invalid API key", "unauthorized")):
+        hint = "API Key 认证失败（401 Unauthorized）。请前往「系统设置 - LLM 配置」检查 API Key 是否正确有效。"
+    elif any(k in err_str for k in ("404", "not_found", "model_not_found", "does not exist")):
+        hint = "模型不存在或无权访问（404 Not Found）。请检查配置的模型名称与 Base URL 服务是否匹配。"
+    elif any(k in err_str for k in ("429", "rate_limit", "overloaded", "insufficient_quota")):
+        hint = "上游接口请求超限或额度不足（429 Too Many Requests / Overloaded）。请稍后重试或检查账户额度/并发配置。"
+    elif any(k in err_str for k in ("ECONNREFUSED", "Connection refused", "Failed to connect", "getaddrinfo", "ETIMEDOUT")):
+        hint = "无法连接到 LLM Base URL 服务。请检查 Base URL 地址及本地网络/代理连接。"
+
+    if hint:
+        return f"{hint}\n【底层错误】{err_str}"
+    return err_str
 
 
 @router.get("")
@@ -146,86 +118,44 @@ async def save_llm_configuration(data: LlmConfigurationUpdate, db: AsyncSession 
             base_url=data.base_url,
             model=data.model,
             api_key_encrypted=encrypt_api_key(data.api_key),
-            hermes_base_url=data.hermes_base_url,
-            hermes_model=data.hermes_model,
-            hermes_timeout_seconds=data.hermes_timeout_seconds,
-            hermes_api_key_encrypted=encrypt_api_key(data.hermes_api_key) if data.hermes_api_key else None,
         )
         db.add(config)
     else:
         if data.api_key:
             config.api_key_encrypted = encrypt_api_key(data.api_key)
-        if data.hermes_api_key:
-            config.hermes_api_key_encrypted = encrypt_api_key(data.hermes_api_key)
     for field in (
         "base_url", "auth_type", "model", "small_fast_model", "timeout_seconds",
-        "max_turns", "default_permission_mode", "hermes_base_url", "hermes_model",
-        "hermes_timeout_seconds",
+        "max_turns", "default_permission_mode",
     ):
         setattr(config, field, getattr(data, field))
     config.last_test_ok = None
     config.last_test_message = None
-    config.hermes_last_test_ok = None
-    config.hermes_last_test_message = None
     await db.commit()
     await db.refresh(config)
     return config_out(config)
 
 
-def format_sdk_error(exc: Exception, stderr_lines: list[str] | None = None) -> str:
-    err_str = str(exc).strip()
-    raw_stderr = "\n".join(line.strip() for line in (stderr_lines or []) if line.strip())
-    combined = f"{err_str}\n{raw_stderr}".strip() if raw_stderr else err_str
-
-    hint = ""
-    if any(k in combined for k in ("401", "authentication_failed", "Invalid API key", "unauthorized")):
-        hint = "API Key 认证失败（401 Unauthorized）。请前往「系统设置 - LLM 配置」检查 API Key 与认证类型（api_key / auth_token）是否正确有效。"
-    elif any(k in combined for k in ("404", "not_found", "model_not_found", "does not exist")):
-        hint = "模型不存在或无权访问（404 Not Found）。请检查配置的模型名称与 Base URL 服务是否匹配。"
-    elif any(k in combined for k in ("429", "rate_limit", "overloaded", "insufficient_quota")):
-        hint = "上游接口请求超限或额度不足（429 Too Many Requests / Overloaded）。请稍后重试或检查账户额度/并发配置。"
-    elif "No conversation found with session ID" in combined:
-        hint = "Claude 历史会话在本地未找到或已过期。"
-    elif any(k in combined for k in ("ECONNREFUSED", "Connection refused", "Failed to connect", "getaddrinfo", "ETIMEDOUT")):
-        hint = "无法连接到 LLM Base URL 服务。请检查 Base URL 地址及本地网络/代理连接。"
-
-    if raw_stderr and "Check stderr output for details" in err_str:
-        err_str = err_str.replace("Error output: Check stderr output for details", f"Error output:\n{raw_stderr}")
-    elif raw_stderr and raw_stderr not in err_str:
-        err_str = f"{err_str}\nStderr: {raw_stderr}"
-
-    if hint:
-        return f"{hint}\n【底层错误】{err_str}"
-    return err_str
-
-
 @router.post("/test")
 async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(get_db)):
     config = await get_config(db)
-    prompt = "使用 Bash 工具执行 printf quantlab-agent-ok，并只回复命令输出。" if deep else "只回复 quantlab-ok"
-    stderr_lines: list[str] = []
-    options = ClaudeAgentOptions(
-        model=config.model,
-        env=sdk_env(config),
-        tools=["Bash"] if deep else [],
-        allowed_tools=["Bash(printf quantlab-agent-ok)"] if deep else [],
-        permission_mode="dontAsk",
-        setting_sources=[],
-        max_turns=2,
-        stderr=lambda line: stderr_lines.append(line),
-    )
-    result_text = ""
+    from app.dsh.runtime import dsh_runtime
+    
+    test_prompt = "请测试工具调用能力，回复 quantlab-agent-ok" if deep else "请只回复 quantlab-ok"
     try:
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                result_text = message.result or ""
-                if message.is_error:
-                    raise RuntimeError(result_text or message.subtype)
+        res_text, tool_calls, reasoning = await dsh_runtime.call_llm(
+            messages=[{"role": "user", "content": test_prompt}],
+            system_prompt="你是 QuantLab 测试助手。请简洁确认连接状态。",
+            db_config=config,
+        )
+        if "[API Error" in res_text or "[LLM Exception]" in res_text:
+            raise RuntimeError(res_text)
+            
         config.last_test_ok = True
-        config.last_test_message = result_text[:500] or "连接成功"
+        config.last_test_message = res_text[:500] or "quantlab-ok"
     except Exception as exc:
         config.last_test_ok = False
-        config.last_test_message = format_sdk_error(exc, stderr_lines)[:1000]
+        config.last_test_message = format_llm_error(exc)[:1000]
+
     config.last_tested_at = datetime.now(UTC)
     await db.commit()
     if not config.last_test_ok:
@@ -233,77 +163,7 @@ async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(
     return {"ok": True, "deep": deep, "message": config.last_test_message}
 
 
-@router.post("/test-hermes")
-async def test_hermes_configuration(db: AsyncSession = Depends(get_db)):
-    base_url, api_key, model, timeout_seconds = await get_hermes_config(db)
-    config = await db.get(LlmConfiguration, 1)
-
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    clean_url = base_url.rstrip("/")
-    if clean_url.endswith("/v1") or "/v1" in clean_url:
-        endpoint = f"{clean_url}/chat/completions"
-        body = {
-            "model": model,
-            "messages": [{"role": "user", "content": "测试连接。请只回复 quantlab-hermes-ok"}],
-        }
-    else:
-        endpoint = f"{clean_url}/responses"
-        body = {
-            "model": model,
-            "conversation": f"quantlab-test-{uuid.uuid4()}",
-            "input": "测试连接。请只回复 quantlab-hermes-ok",
-            "instructions": "严格只回复 quantlab-hermes-ok",
-            "store": False,
-        }
-
-    timeout = httpx.Timeout(min(timeout_seconds, 30))
-    result_text = ""
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(endpoint, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices:
-                result_text = choices[0].get("message", {}).get("content", "")
-            else:
-                texts = []
-                for item in data.get("output", []):
-                    for part in item.get("content", []):
-                        if isinstance(part, dict) and isinstance(part.get("text"), str):
-                            texts.append(part["text"])
-                if not texts and isinstance(data.get("output_text"), str):
-                    texts.append(data["output_text"])
-                result_text = "\n".join(texts).strip() or resp.text
-        if config:
-            config.hermes_last_test_ok = True
-            config.hermes_last_test_message = result_text[:500] or "Hermes 连接成功"
-            config.hermes_last_tested_at = datetime.now(UTC)
-            await db.commit()
-    except Exception as exc:
-        if config:
-            config.hermes_last_test_ok = False
-            config.hermes_last_test_message = str(exc)[:1000]
-            config.hermes_last_tested_at = datetime.now(UTC)
-            await db.commit()
-        raise HTTPException(502, f"Hermes 连接失败：{exc}") from exc
-
-    return {"ok": True, "message": result_text[:500] or "Hermes 连接成功"}
-
-
 @router.post("/test-dsh")
 async def test_dsh_configuration(db: AsyncSession = Depends(get_db)):
     """Test DeepSeek Harness LLM connectivity and Tool Calling capability."""
-    config = await db.get(LlmConfiguration, 1)
-    from app.dsh.runtime import dsh_runtime
-    res_text, tool_calls, reasoning = await dsh_runtime.call_llm(
-        messages=[{"role": "user", "content": "请测试连接并只回复 quantlab-dsh-ok"}],
-        system_prompt="你是 QuantLab DSH 测试助手。严格只回复 quantlab-dsh-ok",
-        db_config=config,
-    )
-    if "[API Error" in res_text or "[LLM Exception]" in res_text:
-        raise HTTPException(502, f"DeepSeek Harness 测试连接失败: {res_text}")
-    return {"ok": True, "message": res_text or "DSH LLM 连接正常", "reasoning": reasoning}
+    return await test_llm_configuration(deep=True, db=db)

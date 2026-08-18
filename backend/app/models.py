@@ -131,13 +131,6 @@ class LlmConfiguration(Base):
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_test_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    hermes_base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    hermes_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    hermes_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    hermes_timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True, default=600)
-    hermes_last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    hermes_last_test_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    hermes_last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -189,7 +182,7 @@ class ResearchProject(Base):
     title: Mapped[str] = mapped_column(String(200))
     original_idea: Mapped[str] = mapped_column(Text)
     status: Mapped[ResearchStatus] = mapped_column(Enum(ResearchStatus), default=ResearchStatus.DISCUSSING, index=True)
-    hermes_conversation: Mapped[str] = mapped_column(String(200), unique=True)
+    conversation_id: Mapped[str] = mapped_column("hermes_conversation", String(200), unique=True)
     strategy_id: Mapped[str | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
     implementation_session_id: Mapped[str | None] = mapped_column(ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True)
     latest_backtest_id: Mapped[str | None] = mapped_column(ForeignKey("backtest_runs.id", ondelete="SET NULL"), nullable=True)
@@ -199,6 +192,14 @@ class ResearchProject(Base):
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    @property
+    def hermes_conversation(self) -> str:
+        return self.conversation_id
+
+    @hermes_conversation.setter
+    def hermes_conversation(self, value: str) -> None:
+        self.conversation_id = value
 
 
 class ResearchMessage(Base):
@@ -224,7 +225,7 @@ class StrategySpecification(Base):
 
 
 class ResearchDecision(Base):
-    """A strategy design choice Hermes raised that only the user can settle."""
+    """A strategy design choice Agent raised that only the user can settle."""
 
     __tablename__ = "research_decisions"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

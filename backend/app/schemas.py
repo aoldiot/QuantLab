@@ -176,10 +176,6 @@ class LlmConfigurationUpdate(BaseModel):
     timeout_seconds: int = Field(default=120, ge=10, le=1800)
     max_turns: int = Field(default=30, ge=1, le=200)
     default_permission_mode: PermissionMode = "default"
-    hermes_base_url: str | None = Field(default=None, max_length=500)
-    hermes_api_key: str | None = Field(default=None, max_length=2000)
-    hermes_model: str | None = Field(default=None, max_length=200)
-    hermes_timeout_seconds: int = Field(default=600, ge=10, le=3600)
 
 
 class AgentSessionCreate(BaseModel):

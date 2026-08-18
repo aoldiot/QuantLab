@@ -88,11 +88,11 @@ INSTRUMENT_ID_TEMPLATE={symbol}-PERP.{venue}
 
 创建回测时，任务会锁定策略版本的 commit SHA。执行器通过 `git archive` 将该提交导出到任务的 `data/backtests/<run-id>/source/`，然后从这份只读代码快照启动 NautilusTrader。后续修改当前工作区不会改变旧回测使用的策略代码。
 
-## 策略 Agent
+## 策略 Agent 与 DeepSeek Harness (DSH)
 
-系统设置页保存全局 Anthropic Messages API 配置。API Key 使用 `LLM_SECRET_ENCRYPTION_KEY` 加密，后端通过 `claude-agent-sdk` 自带的 runtime 运行 Agent，不依赖本机 Claude Code 或本机登录。
+系统设置页保存全局 LLM API 配置（支持 DeepSeek 等 OpenAI 兼容接口）。API Key 使用 `LLM_SECRET_ENCRYPTION_KEY` 加密存储。
 
-策略研究页通过 Hermes API Server 进行研究研讨和回测分析。启动 `hermes gateway` 后，可在前端「系统设置 - LLM 配置」中直接配置 Hermes Base URL 与 API Key（API Key 加密存储）。QuantLab 仅向 Hermes 提供受控研究上下文；策略代码仍由 Claude Agent SDK 在隔离 worktree 中实现。
+策略研究模块基于 **DeepSeek Harness (DSH)** 自主架构运行，实现星型拓扑多 Agent 协作（Quant Lead、Researcher、Developer 与 Reviewer）。系统包含完整的 4 级 Pre-Flight 运行期沙盒验证（语法结构、契约规范、向量化指标计算及 NautilusTrader 运行期生命周期测试），确保全流程高质量自主研发与回测。
 
 策略详情页可启动隔离的 Git worktree Agent 会话，支持 Plan、审批执行、自动编辑和完全自动模式。会话与工具事件写入 PostgreSQL，工作区保存在 `data/agent/worktrees/`，修改经 Diff 确认后才应用到正式策略文件。数据库结构使用 Alembic 管理，`start.sh` 会先执行 `alembic upgrade head`。
 

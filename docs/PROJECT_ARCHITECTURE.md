@@ -27,8 +27,8 @@ QuantLab 是一个以 NautilusTrader 为执行内核的量化策略研究与回�
 3. Binance 现货及 U 本位永续 K 线下载，并写入 Nautilus Catalog。
 4. 单标的策略与组合策略的真实 NautilusTrader 回测。
 5. 回测进度、取消、失败诊断、绩效指标和交互图表展示。
-6. 通过 Hermes 进行策略研讨、规格生成和回测分析。
-7. 通过 Claude Agent SDK 在隔离 worktree 中实现或修复策略。
+6. 基于 DeepSeek Harness (DSH) 进行全流程策略研讨、逻辑设计、Pre-Flight 沙盒验证、回测与归因分析。
+7. 通过策略 Agent 在隔离工作区中实现或修复策略。
 8. LLM、Git 远端与运行参数配置。
 
 ### 2.2 外部依赖
@@ -39,8 +39,7 @@ QuantLab 是一个以 NautilusTrader 为执行内核的量化策略研究与回�
 | Redis 7 | 已纳入部署与配置，但当前业务代码尚未实际使用 | 预留 |
 | Binance Vision / Exchange API | 获取交易标的元数据与历史 K 线归档 | HTTPS |
 | NautilusTrader | Catalog、回测引擎、订单撮合、账户与绩效报告 | Python SDK |
-| Hermes API Server | 研究对话、规格生成、回测结果分析 | OpenAI 风格 `/v1/responses` HTTP API |
-| Anthropic Messages API | Claude Agent SDK 的模型服务 | 由 Agent SDK 调用 |
+| OpenAI 兼容 LLM 服务 | DeepSeek / DSH 量化研究与策略写码服务 | HTTP `/v1/chat/completions` API |
 | Git 远端（可选） | 推送策略专用仓库 | Git + AskPass |
 
 ## 3. 总体架构
@@ -54,8 +53,8 @@ flowchart LR
     API --> PG[("PostgreSQL")]
     API --> FS[("本地文件系统")]
     API --> GR[("策略专用 Git 仓库")]
-    API --> H["Hermes API Server"]
-    AG --> CA["Claude Agent SDK"]
+    API --> DSH["DeepSeek Harness 核心引擎"]
+    AG --> DSH
     AG --> WT[("隔离 Git worktree")]
 
     API --> DL["Binance 数据下载器"]
@@ -77,9 +76,9 @@ flowchart LR
 | --- | --- | --- |
 | 表现层 | `frontend/src` | 页面路由、表单、状态轮询、图表、Agent 实时会话 |
 | API/应用层 | `backend/app/main.py`、各 Router | 参数校验、业务规则、状态流转、资源编排 |
-| 领域层 | `models.py`、`strategy_contract.py`、`research.py` | 策略版本、研究生命周期、回测任务和契约规则 |
-| 执行层 | `runner.py`、`backtests/*` | Git 快照导出、进程隔离、回测配置、结果采集 |
-| 集成层 | `data_downloads.py`、`agent/service.py`、`llm_config.py`、`git_config.py` | Binance、Hermes、Claude SDK、Git 远端集成 |
+| 领域层 | `models.py`、`strategy_contract.py`、`research.py`、`dsh/*` | 策略版本、研究生命周期、回测任务、DSH 编排与契约规则 |
+| 执行层 | `runner.py`、`backtests/*`、`strategy_verifier.py` | Git 快照导出、进程隔离、Pre-Flight 沙盒、结果采集 |
+| 集成层 | `data_downloads.py`、`agent/service.py`、`llm_config.py`、`git_config.py` | Binance、DeepSeek / DSH、Git 远端集成 |
 | 持久化层 | PostgreSQL、Catalog、回测目录、策略 Git 仓库 | 结构化业务数据、行情、代码版本及大体积报告 |
 
 ## 4. 技术架构
@@ -311,47 +310,36 @@ Agent 服务为每个会话创建隔离 Git worktree，只复制/暴露策略开
 
 worktree 默认保留 7 天，启动时清理过期目录。服务重启会丢失实时连接与正在执行的 SDK 任务，但数据库消息仍可查询。
 
-### 5.8 研究闭环
+### 5.8 研究闭环 (DeepSeek Harness)
 
-研究功能把 Hermes 的讨论/分析能力与 Claude Agent SDK 的代码能力分离：Hermes 只获得受控研究上下文并产出讨论、规格和分析；实际策略代码由隔离 Agent 工作区修改。
+研究模块由 **DeepSeek Harness (DSH)** 原生架构驱动，通过星型拓扑多 Agent 协同与 4 级 Pre-Flight 运行期沙盒，实现策略研讨、编码、回测与归因分析的自动化闭环。
 
 ```mermaid
 stateDiagram-v2
     [*] --> DISCUSSING: 创建研究项目
-    DISCUSSING --> DISCUSSING: 拍板待决策项
-    DISCUSSING --> SPEC_REVIEW: 决策清空后生成策略规格
-    DISCUSSING --> DISCUSSING: 规格产生新决策则回退
-    SPEC_REVIEW --> IMPLEMENTING: 确认规格并创建实现会话
-    IMPLEMENTING --> CODE_REVIEW: 接受 Agent 修改
-    CODE_REVIEW --> READY_FOR_BACKTEST: 发布策略版本
-    READY_FOR_BACKTEST --> BACKTESTING: 创建回测
-    BACKTESTING --> READY_FOR_ANALYSIS: 回测成功
-    BACKTESTING --> READY_FOR_BACKTEST: 回测失败或取消
-    READY_FOR_ANALYSIS --> ANALYZING: 请求 Hermes 分析
-    ANALYZING --> RESULT_REVIEW: 分析完成
-    ANALYZING --> READY_FOR_ANALYSIS: 分析失败
+    DISCUSSING --> DISCUSSING: 策略构想与指标研讨
+    DISCUSSING --> CODE_APPROVAL: 输出 Markdown 方案并由用户审批
+    CODE_APPROVAL --> WRITING: 用户批准编码，启动 4 级 Pre-Flight 沙盒写码
+    WRITING --> CODE_REVIEW: 4 级沙盒全部通过，保存策略代码
+    CODE_REVIEW --> BACKTEST_PROPOSED: 用户要求回测，生成回测参数方案卡片
+    BACKTEST_PROPOSED --> BACKTESTING: 用户确认参数并启动回测
+    BACKTESTING --> RESULT_REVIEW: 回测执行成功并生成归因分析报告
+    BACKTESTING --> CODE_REVIEW: 回测报错触发自动自愈修复
     RESULT_REVIEW --> ARCHIVED: 保存结论并归档
-    ARCHIVED --> RESULT_REVIEW: 重新打开且已有结论
-    ARCHIVED --> DISCUSSING: 重新打开且无结论
-    RESULT_REVIEW --> DISCUSSING: 新一轮研讨
-    RESULT_REVIEW --> SPEC_REVIEW: 复制规格形成新版本
-    RESULT_REVIEW --> READY_FOR_BACKTEST: 继续验证现有策略
+    RESULT_REVIEW --> DISCUSSING: 新一轮策略假设研讨
 ```
 
 一次典型业务流程：
 
 1. 用户创建研究项目并提交原始想法。
-2. 用户与 Hermes 多轮研讨，明确假设、信号、风控与实验计划。Hermes 只在确有必须由用户拍板的策略设计选项时，才在回复末尾追加 `quantlab-questions` 机器块；后端剥离该块并落为 `ResearchDecision`，界面上显示原始 Markdown。没有待拍板决策时不产出该块。
-3. 用户在研讨阶段逐项拍板决策（选择推荐项、自定义回答，或忽略与本研究无关的问题）。只要还存在 `PENDING` 决策，生成策略规格会被拒绝（HTTP 409）。
-4. 决策清空后 Hermes 生成机器可校验的 JSON 策略规格，已拍板决策作为既定前提注入提示；无效输出会自动再修复一次。规格中若仍出现新的 `open_questions`，草稿会保留，但这些问题转为研讨决策项并把项目退回 `DISCUSSING`。
-5. 用户确认规格后，系统创建策略草稿和隔离 Agent 会话，Claude 按确认规格实现并测试。
-6. 用户审查 diff，接受后发布为绑定 Git commit 的策略版本。
-7. 用户选择数据、区间、资金、杠杆和参数，执行真实回测。
-8. 回测成功后 Hermes 区分事实与推断，判断假设是否得到支持并建议下一实验。
-9. 用户记录 `SUPPORTED`、`REJECTED` 或 `INCONCLUSIVE` 结论。
-10. 归档研究，或回到讨论/规格/回测阶段继续迭代。
-
-失败回测可创建修复 Agent 会话。其提示要求先判断责任：只有根因在策略字段、指标、订单或交易逻辑时才能修改策略；平台、框架、Catalog、环境或用户配置问题必须拒绝修改策略并给出责任模块。
+2. DSH Quant Lead 与用户多轮研讨，明确量化假设、标的周期、进出场信号、风控规则与回测区间。
+3. DSH 在回复正文中输出完整的 Markdown 策略设计方案，并在末尾发起 `propose_code_approval` 交互式审批卡片。
+4. 用户在界面上点击“批准方案”后，系统调用 `write_strategy_code` 工具，启动 4 级 Pre-Flight 运行期沙盒（AST 结构、参数契约、向量化指标计算、NautilusTrader 运行期生命周期）。
+5. 沙盒验证通过后，策略代码自动持久化并注册到数据库 `Strategy` 与 `StrategyVersion`。
+6. 当用户明确要求回测时，系统调用 `propose_backtest_params` 弹出交互式回测配置卡片。
+7. 用户确认后调用 `execute_backtest`，后台通过独立 Worker 进程安全执行 NautilusTrader 回测。
+8. 回测完成后，DSH 自动生成绩效指标与归因分析报告供用户审查。
+9. 用户归档项目或进入下一轮策略迭代。
 
 ## 6. 数据模型
 
@@ -374,13 +362,13 @@ erDiagram
 | `Strategy` | slug、name、status | 策略业务主档 |
 | `StrategyVersion` | version、entrypoint、git_commit、manifest_hash | 不可变发布快照 |
 | `BacktestRun` | status、stage、config、metrics、result | 回测任务及摘要 |
-| `ResearchProject` | status、Hermes conversation、关联策略/回测、结论 | 研究聚合根 |
+| `ResearchProject` | status、conversation_id、关联策略/回测、结论 | 研究聚合根 |
 | `ResearchMessage` | role、type、metadata | 研讨、决策、分析和迭代记录 |
 | `StrategySpecification` | version、status、content | 可确认、可被替代的结构化规格 |
 | `ResearchDecision` | question、options、recommendation、status、answer、origin | 研讨阶段待用户拍板的策略设计决策 |
 | `AgentSession` | strategy、permission、workspace、status | 隔离开发会话 |
 | `AgentMessage` | role、event_type、content | Agent 消息与工具事件 |
-| `LlmConfiguration` | endpoint、model、加密 key、权限默认值 | Claude 服务配置，单行记录 |
+| `LlmConfiguration` | base_url、model、加密 key、权限默认值 | LLM 服务配置，单行记录 |
 | `GitConfiguration` | remote、username、加密 password、auto_push | 策略远端配置，单行记录 |
 
 业务状态存为数据库 Enum。`StrategyVersion -> BacktestRun`、研究关联等使用外键，但部分关系只声明字段、未配置 ORM relationship；服务层负责显式查询和状态联动。

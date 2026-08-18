@@ -19,11 +19,11 @@ from .agent.tools import (
     ensure_strategy_db_record,
     get_strategy_code_tool,
     get_writing_log_tool,
+    write_strategy_code,
     write_strategy_with_claude,
 )
 from .config import settings
 from .db import get_db, SessionLocal
-from .llm_config import get_hermes_config
 from .models import (
     BacktestRun,
     ResearchMessage,
@@ -347,11 +347,12 @@ THINKING_REGEX = re.compile(
 
 ACTIVE_RESEARCH_TASKS: dict[str, asyncio.Task[Any]] = {}
 RESEARCH_LOCKS: dict[str, asyncio.Lock] = {}
-HERMES_THINKING_STATUS: dict[str, dict[str, Any]] = {}
+RESEARCH_THINKING_STATUS: dict[str, dict[str, Any]] = {}
+HERMES_THINKING_STATUS = RESEARCH_THINKING_STATUS
 
 
 def _set_thinking_status(project_id: str, status: str, step: str, thought: str = ""):
-    HERMES_THINKING_STATUS[project_id] = {
+    RESEARCH_THINKING_STATUS[project_id] = {
         "status": status,
         "step": step,
         "thought": thought,
@@ -409,8 +410,8 @@ async def _project(project_id: str, db: AsyncSession) -> ResearchProject:
     return project
 
 
-def _parse_hermes_response(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
-    """Extract message text, tool calls, and reasoning/thinking content from Hermes response payload."""
+def _parse_llm_response(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
+    """Extract message text, tool calls, and reasoning/thinking content from LLM response payload."""
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     reasoning_parts: list[str] = []
@@ -441,7 +442,7 @@ def _parse_hermes_response(payload: dict[str, Any]) -> tuple[str, list[dict[str,
                 args = {}
             tool_calls.append({"name": fn.get("name"), "arguments": args, "id": tc.get("id")})
 
-    # 2. Check Hermes /responses output schema
+    # 2. Check /responses output schema
     for item in payload.get("output", []):
         kind = item.get("type")
         if kind in ("thought", "reasoning"):
@@ -495,7 +496,10 @@ def _parse_hermes_response(payload: dict[str, Any]) -> tuple[str, list[dict[str,
     return full_text, tool_calls, reasoning_content
 
 
-async def _call_hermes_stream(
+_parse_hermes_response = _parse_llm_response
+
+
+async def _call_research_llm_stream(
     project: ResearchProject,
     prompt: str,
     instructions: str = RESEARCH_INSTRUCTIONS,
@@ -539,15 +543,10 @@ async def _call_hermes_stream(
             api_key = decrypt_api_key(cfg.api_key_encrypted) if cfg.api_key_encrypted else ""
             model = cfg.model
             timeout_seconds = cfg.timeout_seconds or 120
-        elif cfg.hermes_base_url and cfg.hermes_model:
-            base_url = cfg.hermes_base_url.rstrip("/")
-            api_key = decrypt_api_key(cfg.hermes_api_key_encrypted) if cfg.hermes_api_key_encrypted else ""
-            model = cfg.hermes_model
-            timeout_seconds = cfg.hermes_timeout_seconds or 120
 
     headers = {
         "Content-Type": "application/json",
-        "X-Session-Id": project.hermes_conversation,
+        "X-Session-Id": project.conversation_id,
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -601,7 +600,7 @@ async def _call_hermes_stream(
         if endpoint.endswith("/responses"):
             body = {
                 "model": model,
-                "conversation": project.hermes_conversation,
+                "conversation": project.conversation_id,
                 "input": prompt,
                 "instructions": instructions,
                 "tools": openai_tools,
@@ -789,226 +788,7 @@ async def _call_hermes_stream(
     return full_text, parsed_tool_calls, reasoning_content
 
 
-async def _sync_hermes_session_messages(project: ResearchProject, db: AsyncSession) -> None:
-    """Synchronize all messages, thoughts, and server-side tool calls from session into QuantLab DB."""
-    try:
-        base_url, api_key, model, _ = await get_hermes_config(db)
-    except Exception:
-        return
-    root_url = base_url.replace("/v1", "").rstrip("/")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{root_url}/api/sessions/{project.hermes_conversation}/messages", headers=headers)
-            if r.status_code != 200:
-                return
-            data = r.json().get("data", [])
-            if not data:
-                return
-
-            existing_rows = (
-                await db.scalars(
-                    select(ResearchMessage)
-                    .where(ResearchMessage.project_id == project.id)
-                    .order_by(ResearchMessage.created_at)
-                )
-            ).all()
-
-            for item in data:
-                role = item.get("role")
-                tool_name = item.get("tool_name")
-                tool_calls = item.get("tool_calls")
-                thought = item.get("thought") or item.get("reasoning_content") or item.get("reasoning")
-                content = str(item.get("content") or "").strip()
-
-                if role == "user":
-                    continue
-                elif role == "assistant":
-                    if tool_calls:
-                        for tc in tool_calls:
-                            fn = tc.get("function", {}) if isinstance(tc, dict) else {}
-                            fn_name = fn.get("name") or tc.get("name") or "tool"
-                            fn_args = fn.get("arguments") or tc.get("arguments") or {}
-                            try:
-                                parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                            except Exception:
-                                parsed_args = {"raw": str(fn_args)}
-
-                            meta = {"tool_name": fn_name, "arguments": parsed_args}
-                            if thought:
-                                meta["reasoning_content"] = thought
-
-                            # Check if already recorded in DB
-                            exists = any(
-                                m.role == "assistant"
-                                and m.message_type == "tool_call"
-                                and m.metadata_json.get("tool_name") == fn_name
-                                and json.dumps(m.metadata_json.get("arguments", {}), sort_keys=True)
-                                == json.dumps(parsed_args, sort_keys=True)
-                                for m in existing_rows
-                            )
-                            if not exists:
-                                call_msg = ResearchMessage(
-                                    project_id=project.id,
-                                    role="assistant",
-                                    content=f"调用工具 `{fn_name}`: {json.dumps(parsed_args, ensure_ascii=False)}",
-                                    message_type="tool_call",
-                                    metadata_json=meta,
-                                )
-                                db.add(call_msg)
-                                existing_rows.append(call_msg)
-
-                    if content:
-                        clean_text = TOOL_CALL_REGEX.sub("", content).strip()
-                        if clean_text:
-                            bp_meta: dict[str, Any] = {}
-                            bp_m = BACKTEST_PARAMS_REGEX.search(clean_text)
-                            if bp_m:
-                                try:
-                                    bp_meta = {"backtest_params": json.loads(bp_m.group(1).strip())}
-                                except Exception:
-                                    pass
-
-                            ca_meta: dict[str, Any] = {}
-                            ca_m = CODE_APPROVAL_REGEX.search(clean_text)
-                            if ca_m:
-                                try:
-                                    ca_meta = {"code_approval": json.loads(ca_m.group(1).strip())}
-                                except Exception:
-                                    pass
-
-                            meta = {}
-                            if thought:
-                                meta["reasoning_content"] = thought
-                            if bp_meta:
-                                meta.update(bp_meta)
-                            if ca_meta:
-                                meta.update(ca_meta)
-
-                            msg_type = "code_approval" if ca_meta else "backtest_params" if bp_meta else "message"
-
-                            exists = any(
-                                m.role == "assistant"
-                                and (
-                                    m.content.strip() == clean_text
-                                    or (len(clean_text) > 30 and (m.content.strip().startswith(clean_text[:60]) or clean_text.startswith(m.content.strip()[:60])))
-                                )
-                                for m in existing_rows
-                            )
-                            if not exists:
-                                asst_msg = ResearchMessage(
-                                    project_id=project.id,
-                                    role="assistant",
-                                    content=clean_text,
-                                    message_type=msg_type,
-                                    metadata_json=meta,
-                                )
-                                db.add(asst_msg)
-                                existing_rows.append(asst_msg)
-
-                elif role == "tool":
-                    t_name = tool_name or "terminal"
-                    try:
-                        res_obj = json.loads(content) if isinstance(content, str) else content
-                    except Exception:
-                        res_obj = {"output": content}
-
-                    meta = {"tool_name": t_name, "result": res_obj}
-                    exists = any(
-                        (m.role == "tool" or m.message_type in ("tool_output", "code_approval", "backtest_params"))
-                        and (
-                            m.content.strip() == content.strip()
-                            or (m.metadata_json.get("tool_name") == t_name and m.metadata_json.get("result") is not None)
-                        )
-                        for m in existing_rows
-                    )
-                    if not exists:
-                        out_msg = ResearchMessage(
-                            project_id=project.id,
-                            role="tool",
-                            content=content,
-                            message_type="tool_output",
-                            metadata_json=meta,
-                        )
-                        db.add(out_msg)
-                        existing_rows.append(out_msg)
-
-            await db.commit()
-    except Exception as exc:
-        logger.debug("同步 Hermes 会话消息异常: %s", exc)
-
-
-async def _poll_hermes_background_delegation(
-    project: ResearchProject,
-    db: AsyncSession,
-    max_wait_seconds: int = 45,
-    poll_interval: float = 2.0,
-) -> tuple[str | None, str | None]:
-    """Poll Agent session messages and disk files until background delegation completes."""
-    try:
-        base_url, api_key, model, _ = await get_hermes_config(db)
-    except Exception:
-        return None, None
-    root_url = base_url.replace("/v1", "").rstrip("/")
-    endpoint = f"{root_url}/api/sessions/{project.hermes_conversation}/messages"
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    start_time = asyncio.get_event_loop().time()
-    logger.info("Hermes 启动了后台子代理任务，进入持续轮询监听模式 (session=%s)...", project.hermes_conversation)
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        while (asyncio.get_event_loop().time() - start_time) < max_wait_seconds:
-            await asyncio.sleep(poll_interval)
-            _set_thinking_status(
-                project.id,
-                "TOOL_RUNNING",
-                f"Hermes 正在编写代码 (已耗时 {int(asyncio.get_event_loop().time() - start_time)}s)...",
-            )
-
-            # 1. Check Hermes session messages
-            try:
-                r = await client.get(endpoint, headers=headers)
-                if r.status_code == 200:
-                    data = r.json().get("data", [])
-                    for item in reversed(data):
-                        role = item.get("role")
-                        content = item.get("content") or item.get("text") or ""
-                        if role == "assistant" and content:
-                            if "正在后台运行" in content and "task-0.log" in content:
-                                continue
-                            if "STRATEGY_MANIFEST" in content or "StrategyConfig" in content or "策略代码" in content:
-                                logger.info("成功从 Hermes 会话捕获到完成消息！")
-                                return content, None
-            except Exception as e:
-                logger.debug("轮询 Hermes 会话消息：%s", e)
-
-            # 2. Check recently updated/created strategy file on disk
-            strat_dir = settings.strategy_repo_path.resolve() / "backend/app/strategies"
-            if strat_dir.exists():
-                for py_file in strat_dir.glob("*.py"):
-                    if py_file.name.startswith("__"):
-                        continue
-                    mtime = py_file.stat().st_mtime
-                    if (datetime.now().timestamp() - mtime) < (max_wait_seconds + 30):
-                        try:
-                            code_text = py_file.read_text(encoding="utf-8")
-                            if "STRATEGY_MANIFEST" in code_text and "StrategyConfig" in code_text:
-                                logger.info("从本地策略目录检测到最新生成策略：%s", py_file.name)
-                                derived_slug = py_file.stem
-                                await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
-                                summary_msg = (
-                                    f"✅ 策略代码「{derived_slug}」已编写完成并通过校验！\n\n"
-                                    f"```python\n{code_text}\n```\n\n"
-                                    f"策略代码已成功同步至项目。若您希望对该策略进行回测验证，请在对话中回复“进行回测”或“开始回测”。"
-                                )
-                                return summary_msg, code_text
-                        except Exception:
-                            pass
-
-    return None, None
+_call_hermes_stream = _call_research_llm_stream
 
 
 async def _sync_strategy_code_if_present(
@@ -1048,14 +828,14 @@ async def _sync_strategy_code_if_present(
     return None
 
 
-async def run_hermes_agent_cycle(
+async def run_research_agent_cycle(
     project: ResearchProject,
     user_prompt: str,
     db: AsyncSession,
     max_turns: int = 6,
     record_user_prompt: bool = True,
 ) -> list[ResearchMessage]:
-    """Run an autonomous multi-turn cycle: User -> Hermes -> Tools -> Hermes -> Result."""
+    """Run an autonomous multi-turn cycle: User -> DSH Quant Lead -> Tools -> Result."""
     new_messages: list[ResearchMessage] = []
 
     # 1. Record user message if not recorded yet
@@ -1083,7 +863,7 @@ async def run_hermes_agent_cycle(
                 "THINKING",
                 f"DSH Quant Lead 正在统筹量化假设与指标计算规则（轮次 {turn}）...",
             )
-            text, tool_calls, reasoning_content = await _call_hermes_stream(project, current_prompt, db=db)
+            text, tool_calls, reasoning_content = await _call_research_llm_stream(project, current_prompt, db=db)
 
             if reasoning_content:
                 _set_thinking_status(
@@ -1092,12 +872,6 @@ async def run_hermes_agent_cycle(
                     "DSH Quant Lead 思考完成，正在组织研讨方案与调度指令...",
                     thought=reasoning_content,
                 )
-
-            # Check if Hermes initiated background delegation
-            if text and ("正在后台运行" in text or "deleg_" in text or "task-0.log" in text) and not tool_calls:
-                final_text, _ = await _poll_hermes_background_delegation(project, db)
-                if final_text:
-                    text = final_text
 
             # Record assistant text response if present
             if text:
@@ -1372,7 +1146,10 @@ async def run_hermes_agent_cycle(
     return new_messages
 
 
-async def _run_hermes_background(project_id: str, prompt: str) -> None:
+run_hermes_agent_cycle = run_research_agent_cycle
+
+
+async def _run_research_background(project_id: str, prompt: str) -> None:
     """Run DSH agent cycle in a background task decoupled from HTTP request lifecycle."""
     lock = _get_project_lock(project_id)
     async with lock:
@@ -1381,7 +1158,7 @@ async def _run_hermes_background(project_id: str, prompt: str) -> None:
             if not project:
                 return
             try:
-                await run_hermes_agent_cycle(
+                await run_research_agent_cycle(
                     project, prompt, db=db, record_user_prompt=False
                 )
             except Exception as exc:
@@ -1400,9 +1177,12 @@ async def _run_hermes_background(project_id: str, prompt: str) -> None:
                     pass
 
 
+_run_hermes_background = _run_research_background
+
+
 def _start_research_task(project_id: str, prompt: str) -> asyncio.Task[None]:
     """Start a background research task and track it in ACTIVE_RESEARCH_TASKS."""
-    task = asyncio.create_task(_run_hermes_background(project_id, prompt))
+    task = asyncio.create_task(_run_research_background(project_id, prompt))
     ACTIVE_RESEARCH_TASKS[project_id] = task
 
     def _cleanup(t: asyncio.Task[None]):
@@ -1431,13 +1211,13 @@ async def create_project(data: ResearchProjectCreate, db: AsyncSession = Depends
         client_id=data.client_id,
         title=data.title,
         original_idea=data.original_idea,
-        hermes_conversation=f"quantlab-research-{uuid.uuid4()}",
+        conversation_id=f"quantlab-research-{uuid.uuid4()}",
     )
     db.add(project)
     await db.commit()
     await db.refresh(project)
 
-    # If original_idea is provided, immediately persist user message and trigger Hermes background task
+    # If original_idea is provided, immediately persist user message and trigger background task
     if data.original_idea and data.original_idea.strip():
         idea = data.original_idea.strip()
         user_msg = ResearchMessage(
@@ -1475,8 +1255,7 @@ async def get_project_status(project_id: str, db: AsyncSession = Depends(get_db)
 
 @router.get("/{project_id}/messages")
 async def list_messages(project_id: str, db: AsyncSession = Depends(get_db)):
-    project = await _project(project_id, db)
-    await _sync_hermes_session_messages(project, db)
+    await _project(project_id, db)
     rows = (
         await db.scalars(
             select(ResearchMessage)
@@ -1513,7 +1292,7 @@ async def send_message(
     await db.commit()
     await db.refresh(user_msg)
 
-    # 2. Trigger Hermes agent cycle in decoupled background task
+    # 2. Trigger research agent cycle in decoupled background task
     _start_research_task(project.id, content)
 
     return [_message_out(user_msg)]
@@ -1547,16 +1326,16 @@ async def list_project_backtests(project_id: str, db: AsyncSession = Depends(get
 
 @router.get("/{project_id}/writing-log")
 async def get_project_writing_log(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Get the live progress and logs of Claude strategy writing."""
+    """Get the live progress and logs of strategy writing."""
     await _project(project_id, db)
     return get_writing_log_tool(project_id)
 
 
 @router.get("/{project_id}/thinking-status")
 async def get_project_thinking_status(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Get real-time thinking status and reasoning content for Hermes Agent."""
+    """Get real-time thinking status and reasoning content for Research Agent."""
     await _project(project_id, db)
-    return HERMES_THINKING_STATUS.get(
+    return RESEARCH_THINKING_STATUS.get(
         project_id,
         {"status": "IDLE", "step": "就绪", "thought": "", "updated_at": datetime.now(UTC).isoformat()},
     )
@@ -1692,8 +1471,8 @@ async def write_strategy_endpoint(
     req: ResearchWriteStrategyRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """API endpoint for Hermes skill / CLI to invoke Claude Agent SDK for strategy generation."""
-    res = await write_strategy_with_claude(
+    """API endpoint for strategy code generation."""
+    res = await write_strategy_code(
         strategy_name=req.strategy_name,
         instructions=req.instructions,
         is_fix=req.is_fix,

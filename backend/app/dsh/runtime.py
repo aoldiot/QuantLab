@@ -117,15 +117,6 @@ class DSHRuntimeManager:
                 api_key = decrypt_api_key(db_config.api_key_encrypted) if db_config.api_key_encrypted else ""
                 model = db_config.model
                 timeout_seconds = db_config.timeout_seconds or 120
-            elif db_config.hermes_base_url and db_config.hermes_model:
-                base_url = db_config.hermes_base_url.rstrip("/")
-                api_key = (
-                    decrypt_api_key(db_config.hermes_api_key_encrypted)
-                    if db_config.hermes_api_key_encrypted
-                    else ""
-                )
-                model = db_config.hermes_model
-                timeout_seconds = db_config.hermes_timeout_seconds or 120
 
         # Build standard messages payload
         payload_messages = []
