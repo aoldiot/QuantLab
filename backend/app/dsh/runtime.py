@@ -128,6 +128,7 @@ class DSHRuntimeManager:
             "model": model,
             "messages": payload_messages,
             "temperature": temperature,
+            "max_tokens": 8192,
         }
 
         if tools:
@@ -171,7 +172,7 @@ class DSHRuntimeManager:
                 if target_url.endswith("/messages"):
                     body = {
                         "model": model,
-                        "max_tokens": 4096,
+                        "max_tokens": 8192,
                         "messages": messages,
                         "system": system_prompt,
                         "temperature": temperature,

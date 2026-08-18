@@ -645,21 +645,24 @@ async def write_strategy_code(
 
 当前暂存代码内容：
 ```python
-{current_code[:15000]}
+{current_code[:30000]}
 ```
 
-【修复任务】
-请针对上述具体错误与建议修复代码，直接输出修复后的【完整 Python 策略代码块】（```python ... ```），确保通过全部 4 级 Pre-Flight 运行期沙盒检测。
-【重要】：代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），严禁输出代码片段，严禁在第一行输出中文说明或路径标签！
+【修复任务（CRITICAL）】
+1. 请根据报错信息针对性修复语法、缩进、括号匹配与 API 契约问题。
+2. 保证代码结构紧凑清晰，完整输出全部代码直至 `STRATEGY_MANIFEST` 结尾，严禁在末尾或函数中途截断！
+3. 代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），直接输出单一标准的 ```python ... ``` 代码块，严禁输出任何文字前缀或路径标签。
 """
         else:
             _update_status("正在生成策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
 
         logger.info("代码生成引擎开始生成策略 %s (turn=%d)...", strategy_name, heal_turn)
+        heal_temperature = min(0.6, 0.2 + 0.05 * heal_turn) if heal_turn > 0 else 0.2
         content, _, reasoning = await dsh_runtime.call_llm(
             messages=[{"role": "user", "content": current_dsh_prompt}],
             system_prompt="你是 QuantLab 首席量化策略架构师与代码开发专家。只输出符合 NautilusTrader 规范的完整 Python 代码块，第一行为导入语句。",
             db_config=cfg,
+            temperature=heal_temperature,
         )
 
         extracted_code = extract_python_strategy_code(content)

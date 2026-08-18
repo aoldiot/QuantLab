@@ -804,29 +804,6 @@ async def _sync_strategy_code_if_present(
                 except Exception:
                     pass
 
-    for p_dir in (STRATEGY_DIR, PERSISTENT_STRATEGY_DIR):
-        if p_dir.exists():
-            for py_file in p_dir.glob("*.py"):
-                if py_file.name.startswith("__"):
-                    continue
-                if (datetime.now().timestamp() - py_file.stat().st_mtime) < 180:
-                    try:
-                        c_text = py_file.read_text(encoding="utf-8")
-                        if (
-                            len(c_text) > 500
-                            and "STRATEGY_MANIFEST" in c_text
-                            and "StrategyConfig" in c_text
-                            and "calculate_indicators" in c_text
-                        ):
-                            s_slug = sanitize_strategy_slug(py_file.stem)
-                            strat_rec = await ensure_strategy_db_record(s_slug, db, project_id=project.id)
-                            if strat_rec and strat_rec[0]:
-                                project.strategy_id = strat_rec[0].id
-                                project.updated_at = datetime.now(UTC)
-                                await db.commit()
-                            return s_slug
-                    except Exception:
-                        pass
     return None
 
 
