@@ -499,6 +499,7 @@ async def write_strategy_code(
 
     from app.dsh.runtime import dsh_runtime
 
+    class_prefix = "".join(part.capitalize() for part in strategy_name.split("_")) if strategy_name else "Custom"
     dsh_base_prompt = f"""
 你正在为 QuantLab 量化交易系统编写/修改 NautilusTrader 策略文件：`backend/app/strategies/{strategy_name}.py`。
 
@@ -507,12 +508,19 @@ async def write_strategy_code(
 {spec_section}
 {fix_prompt}
 
+【命名规范推荐】
+- 策略配置类：`class {class_prefix}Config(StrategyConfig, frozen=True):`
+- 策略实现类：`class {class_prefix}Strategy(Strategy):`
+- STRATEGY_MANIFEST 契约配置：
+  `strategy_path="app.strategies.{strategy_name}:{class_prefix}Strategy",`
+  `config_path="app.strategies.{strategy_name}:{class_prefix}Config",`
+
 【NautilusTrader 策略开发核心规范】
 {NAUTILUS_DEVELOPER_GUIDE}
 
 【严格要求】
 1. 只输出包含完整策略代码的 Python 代码块（```python ... ```）。
-2. 必须包含 StrategyConfig 子类、Strategy 子类、calculate_indicators 函数与 STRATEGY_MANIFEST 契约对象。
+2. 必须包含四大核心导出声明：`{class_prefix}Config`（继承自 StrategyConfig）、`{class_prefix}Strategy`（继承自 Strategy）、`calculate_indicators` 与 `STRATEGY_MANIFEST`。
 3. 确保所有指标和信号严格向量化与事件驱动计算正确，杜绝未来函数。
 4. 不要输出多余说明，直接输出可直接保存执行的完整 Python 代码。
 """
@@ -581,6 +589,19 @@ async def write_strategy_code(
                 )
             if v_res.ok:
                 break
+        else:
+            v_res = VerificationResult(
+                ok=False,
+                summary="模型未输出有效的 Python 代码块",
+                failed_level="L1",
+                error_message="未能从模型回复中提取到包含 Python 代码的代码块（```python ... ```）",
+                suggestion="请直接输出完整的 Python 策略代码，并用 ```python 和 ``` 代码块包裹。",
+            )
+            _update_status(
+                "未能提取到 Python 代码块",
+                min(85, 50 + heal_turn * 15),
+                log_line="[ERROR] 模型回复中未包含有效的 Python 策略代码块 (```python ... ```)",
+            )
 
     if eval_file.exists() and v_res is None:
         v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)

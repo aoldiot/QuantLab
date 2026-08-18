@@ -986,6 +986,7 @@ async def run_research_agent_cycle(
             has_backtest = False
             has_proposal = False
             has_write_strategy = False
+            write_strategy_result: dict[str, Any] | None = None
 
             for tc in tool_calls:
                 tool_name = tc.get("name", "")
@@ -995,7 +996,7 @@ async def run_research_agent_cycle(
                     has_backtest = True
                 elif tool_name in ("propose_code_approval", "propose_backtest_params"):
                     has_proposal = True
-                elif tool_name == "write_strategy_with_claude":
+                elif tool_name in ("write_strategy_with_claude", "write_strategy_code"):
                     has_write_strategy = True
 
                 # Update thinking status for tool execution
@@ -1005,7 +1006,7 @@ async def run_research_agent_cycle(
                         "WAITING_APPROVAL",
                         "策略设计方案已就绪，已向用户发起编码审批请求...",
                     )
-                elif tool_name == "write_strategy_with_claude":
+                elif tool_name in ("write_strategy_with_claude", "write_strategy_code"):
                     _set_thinking_status(
                         project.id,
                         "TOOL_RUNNING",
@@ -1050,6 +1051,9 @@ async def run_research_agent_cycle(
                 except Exception as exc:
                     logger.error("工具执行出错 %s: %s", tool_name, exc)
                     result = {"ok": False, "error": f"工具执行异常：{exc}"}
+
+                if tool_name in ("write_strategy_with_claude", "write_strategy_code"):
+                    write_strategy_result = result
 
                 # If backtest was triggered, record latest_backtest_id
                 if tool_name == "execute_backtest" and result.get("run_id"):
@@ -1129,11 +1133,20 @@ async def run_research_agent_cycle(
 
             # 3. Strategy code write/repair completed: Allow 1 concise summary turn, with strict prohibition of backtesting.
             if has_write_strategy:
-                current_prompt = (
-                    "策略代码已成功编写/修复并保存。\n"
-                    "请用 2-3 句话简短向用户汇报策略编写或修复的主要要点，并告知代码已就绪。\n"
-                    "【系统安全红线】：严禁调用 execute_backtest 工具，严禁擅自启动回测，严禁生成回测参数卡片。汇报完毕后等待用户下一步明确指令。"
-                )
+                if write_strategy_result and write_strategy_result.get("ok"):
+                    current_prompt = (
+                        "策略代码已成功编写并通过 4 级 Pre-Flight 运行期沙盒校验。\n"
+                        "请用 2-3 句话简短向用户汇报策略编写的核心逻辑与指标，并告知代码已通过 4 级沙盒校验就绪。\n"
+                        "【系统安全红线】：严禁调用 execute_backtest 工具，严禁擅自启动回测，严禁生成回测参数卡片。汇报完毕后等待用户下一步明确指令。"
+                    )
+                else:
+                    err_msg = write_strategy_result.get("error", "Pre-Flight 沙盒校验未通过") if write_strategy_result else "代码生成未完成"
+                    current_prompt = (
+                        f"策略代码编写/修改未通过 4 级 Pre-Flight 运行期沙盒校验。\n"
+                        f"错误详情：\n{err_msg}\n\n"
+                        f"请用 2-3 句话如实向用户汇报策略编写未能通过沙盒检测的具体报错层级与原因，并说明修复建议，提示用户可查看右侧日志，等待用户下一步修改指令。\n"
+                        f"【系统安全红线】：严禁谎称代码编写成功，严禁调用 execute_backtest 工具，严禁擅自启动回测。"
+                    )
             else:
                 current_prompt = "\n\n".join(tool_results_summary)
                 current_prompt += "\n\n请根据上述工具执行结果简短汇报。注意：若未收到用户明确的回测或修复指令，严禁擅自调用回测或修改代码。"

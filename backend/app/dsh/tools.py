@@ -322,13 +322,15 @@ async def dispatch_dsh_tool_call(
         try:
             saved_path = save_strategy_file(strategy_name, code)
             v_res = verify_strategy_code(strategy_name, saved_path)
+            is_ok = bool(v_res.get("ok")) if isinstance(v_res, dict) else False
             if db is not None:
                 await ensure_strategy_db_record(strategy_name, db, project_id=project_id)
             return {
-                "ok": True,
+                "ok": is_ok,
                 "strategy_name": strategy_name,
                 "saved_path": str(saved_path),
                 "verification": v_res,
+                "error": None if is_ok else f"Pre-Flight 校验未通过 [{v_res.get('failed_level', 'L1')}]: {v_res.get('error_message')}",
             }
         except Exception as exc:
             return {"ok": False, "error": f"保存策略文件失败: {exc}"}
@@ -336,10 +338,12 @@ async def dispatch_dsh_tool_call(
     elif tool_name == "quant_preflight_verify":
         strategy_name = arguments.get("strategy_name", "")
         v_res = verify_strategy_code(strategy_name)
+        is_ok = bool(v_res.get("ok")) if isinstance(v_res, dict) else False
         return {
-            "ok": True,
+            "ok": is_ok,
             "strategy_name": strategy_name,
             "verification": v_res,
+            "error": None if is_ok else f"Pre-Flight 校验未通过 [{v_res.get('failed_level', 'L1')}]: {v_res.get('error_message')}",
         }
 
     elif tool_name == "quant_execute_backtest":

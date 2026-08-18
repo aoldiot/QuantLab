@@ -89,7 +89,7 @@ const WORKFLOW_STEPS: WorkflowStep[] = [
     fullDesc: '开发者将 Candidate 规格转化为标准的 NautilusTrader 事件驱动策略代码，并在隔离沙盒中通过语法、导入、实例化与运行期计算 4 级确定性校验。',
     inputs: ['Candidate 策略规格', '指标与图表契约定义', '参数规范 ParameterSpec'],
     actions: ['NautilusTrader 策略代码生成', '指标流式计算函数实现', '4 级 Pre-Flight 运行期沙盒校验'],
-    tools: ['quant_save_strategy_code', 'preflight_sandbox_verifier'],
+    tools: ['quant_save_strategy_code', 'quant_preflight_verify'],
     outputs: ['策略源码 (app/strategies/<slug>.py)', '沙盒验证通过凭证'],
     icon: Code2,
     linkTo: '/strategies',

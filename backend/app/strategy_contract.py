@@ -156,9 +156,10 @@ def validate_plot_contract(module: Any, manifest: StrategyManifest) -> None:
             if isinstance(pane_series, dict):
                 series.extend(pane_series.items())
     for column, spec in series:
-        if isinstance(column, str) and isinstance(spec, dict):
-            if spec.get("type", "line") not in supported:
-                raise ValueError(f"指标 {column} 使用了不支持的图形类型: {spec.get('type')}")
+        if not isinstance(spec, dict):
+            raise TypeError(f"指标 {column} 的配置必须是字典类型，例如 {{'type': 'line', 'color': '#ffffff'}}")
+        if spec.get("type", "line") not in supported:
+            raise ValueError(f"指标 {column} 使用了不支持的图形类型: {spec.get('type')}")
 
 
 def calculate_plot_indicators(module_path: str, frame: pd.DataFrame, parameters: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:

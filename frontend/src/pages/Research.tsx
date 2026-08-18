@@ -1091,7 +1091,7 @@ function ProcessToolStep({
       if (isBacktest && res.metrics?.total_return != null) {
         statusBadge = `成功 · 收益 ${Number(res.metrics.total_return).toFixed(2)}%`
       } else if (isWriting) {
-        statusBadge = '成功 · AST校验通过'
+        statusBadge = '成功 · 4级沙盒通过'
       } else {
         statusBadge = '成功'
       }
@@ -1164,8 +1164,22 @@ function ProcessToolStep({
             <div className="tool-live-writing-box">
               <div className="tool-progress-info">
                 <div className="tool-progress-stage">
-                  <Loader2 size={13} className={`spin ${item.isWritingActive ? 'text-cyan' : ''}`} />
-                  <span>{writingLog?.stage || (item.isWritingActive ? '正在编写策略代码...' : '代码编写完成')}</span>
+                  {item.isWritingActive ? (
+                    <Loader2 size={13} className="spin text-cyan" />
+                  ) : writingLog?.status === 'FAILED' || (!isSuccess && hasResult) ? (
+                    <X size={13} className="text-rose-400" />
+                  ) : (
+                    <Check size={13} className="text-emerald-400" />
+                  )}
+                  <span>
+                    {writingLog?.stage || (
+                      item.isWritingActive
+                        ? '正在编写策略代码...'
+                        : isSuccess
+                        ? '代码编写完成并通过沙盒校验'
+                        : '代码沙盒校验未通过'
+                    )}
+                  </span>
                 </div>
                 <span className="tool-progress-num">{writingLog?.progress ?? 100}%</span>
               </div>
