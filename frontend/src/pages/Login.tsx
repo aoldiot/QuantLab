@@ -9,14 +9,13 @@ import {
   Loader2, 
   ShieldCheck, 
   AlertCircle, 
-  ArrowRight,
-  KeyRound
+  ArrowRight
 } from 'lucide-react';
 import '../login.css';
 
 export default function Login() {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -56,12 +55,6 @@ export default function Login() {
     }
   };
 
-  const handleQuickFill = () => {
-    setUsername('admin');
-    setPassword('admin123');
-    setError(null);
-  };
-
   return (
     <div className="login-wrapper">
       <div className="login-bg-glow-1" />
@@ -99,7 +92,7 @@ export default function Login() {
                 id="login-username"
                 type="text"
                 className="login-input"
-                placeholder="请输入系统管理员账号"
+                placeholder="请输入登录账号"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoComplete="username"
@@ -119,7 +112,7 @@ export default function Login() {
                 id="login-password"
                 type={showPassword ? 'text' : 'password'}
                 className="login-input has-toggle"
-                placeholder="请输入访问密码"
+                placeholder="请输入登录密码"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="current-password"
@@ -155,25 +148,6 @@ export default function Login() {
             )}
           </button>
         </form>
-
-        <div className="login-env-tip">
-          <div className="login-env-tip-header">
-            <span>
-              <KeyRound size={13} />
-              <span>环境配置提示</span>
-            </span>
-            <button
-              type="button"
-              className="login-quick-fill-btn"
-              onClick={handleQuickFill}
-            >
-              填入默认账号
-            </button>
-          </div>
-          <div>
-            账号密码已配置在后端 <code>.env</code> 文件中（默认 <code>admin</code> / <code>admin123</code>）。
-          </div>
-        </div>
 
         <div className="login-footer">
           QuantLab Studio &copy; 2026 &middot; High Performance Quantitative System

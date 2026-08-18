@@ -71,7 +71,7 @@ function MainLayout() {
         <div className="nav-user-actions">
           <div className="nav-user-badge">
             <UserIcon size={13} />
-            <span>{user || 'admin'}</span>
+            <span>{user || '用户'}</span>
           </div>
           <button
             type="button"
