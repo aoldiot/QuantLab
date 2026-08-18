@@ -11,9 +11,14 @@ import pandas as pd
 class StrategyMode(StrEnum):
     SINGLE_INSTRUMENT = "SINGLE_INSTRUMENT"
     PORTFOLIO = "PORTFOLIO"
+    SINGLE = "SINGLE_INSTRUMENT"
+    BOTH = "SINGLE_INSTRUMENT"
+    BACKTEST_AND_LIVE = "SINGLE_INSTRUMENT"
+    LIVE = "SINGLE_INSTRUMENT"
+    BACKTEST = "SINGLE_INSTRUMENT"
 
 
-@dataclass(frozen=True)
+@dataclass
 class ParameterSpec:
     title: str = ""
     type: str = "number"
@@ -21,18 +26,56 @@ class ParameterSpec:
     minimum: float | None = None
     maximum: float | None = None
     description: str = ""
+    step: float | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+    min: float | None = None
+    max: float | None = None
+
+    def __post_init__(self):
+        if self.minimum is None:
+            if self.min_value is not None:
+                self.minimum = self.min_value
+            elif self.min is not None:
+                self.minimum = self.min
+        if self.maximum is None:
+            if self.max_value is not None:
+                self.maximum = self.max_value
+            elif self.max is not None:
+                self.maximum = self.max
 
     def to_schema(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["min"] = data.pop("minimum", None)
-        data["max"] = data.pop("maximum", None)
-        return {k: v for k, v in data.items() if v is not None}
+        p_type = self.type
+        if isinstance(p_type, type):
+            p_type = p_type.__name__
+
+        def _clean(val: Any) -> Any:
+            from decimal import Decimal
+            if isinstance(val, Decimal):
+                return float(val)
+            if isinstance(val, type):
+                return val.__name__
+            return val
+
+        return {
+            k: _clean(v)
+            for k, v in {
+                "title": self.title,
+                "type": p_type,
+                "default": self.default,
+                "min": self.minimum,
+                "max": self.maximum,
+                "step": self.step,
+                "description": self.description,
+            }.items()
+            if v is not None
+        }
 
 
 @dataclass(frozen=True)
 class StrategyManifest:
-    slug: str
-    name: str
+    slug: str = ""
+    name: str = ""
     description: str = ""
     version: str = "1.0.0"
     category: str = "trend"
@@ -50,14 +93,21 @@ class StrategyManifest:
     mode: StrategyMode = StrategyMode.SINGLE_INSTRUMENT
     supports_short: bool = True
     requires_funding: bool = True
+    strategy_id: str = ""
+    id: str = ""
 
     def __post_init__(self):
+        actual_slug = self.slug or self.strategy_id or self.id or "strategy"
+        if not self.slug:
+            object.__setattr__(self, "slug", actual_slug)
+        if not self.name:
+            object.__setattr__(self, "name", actual_slug.replace("_", " ").title())
         if not self.strategy_path:
-            strat_class = "".join(w.capitalize() for w in self.slug.split("_")) + "Strategy"
-            object.__setattr__(self, "strategy_path", f"app.strategies.{self.slug}:{strat_class}")
+            strat_class = "".join(w.capitalize() for w in actual_slug.split("_")) + "Strategy"
+            object.__setattr__(self, "strategy_path", f"app.strategies.{actual_slug}:{strat_class}")
         if not self.config_path:
-            config_class = "".join(w.capitalize() for w in self.slug.split("_")) + "Config"
-            object.__setattr__(self, "config_path", f"app.strategies.{self.slug}:{config_class}")
+            config_class = "".join(w.capitalize() for w in actual_slug.split("_")) + "Config"
+            object.__setattr__(self, "config_path", f"app.strategies.{actual_slug}:{config_class}")
         if not self.plot_config:
             object.__setattr__(
                 self,

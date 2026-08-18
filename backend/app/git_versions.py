@@ -30,7 +30,7 @@ def manifest_hash(manifest: StrategyManifest) -> str:
         "parameters": manifest.parameter_schema(),
         "data_requirements": manifest.data_requirements(),
     }
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 

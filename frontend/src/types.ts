@@ -39,3 +39,64 @@ export interface ResearchThinkingStatus{status:'IDLE'|'THINKING'|'WAITING_APPROV
 export interface CodeApprovalData{strategy_name:string;strategy_summary:string;key_rules:string[];parameter_specs?:Record<string,any>}
 export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}
 
+export interface DashboardRecentRun {
+  id: string
+  name: string
+  status: string
+  stage: string
+  progress: number
+  strategy_name?: string | null
+  venue?: string | null
+  timeframes: string[]
+  symbols: string[]
+  total_return?: number | null
+  sharpe?: number | null
+  created_at: string
+}
+
+export interface DashboardStrategyStats {
+  total_strategies: number
+  registered_strategies: number
+  draft_strategies: number
+  categories: Record<string, number>
+}
+
+export interface DashboardBacktestStats {
+  total_runs: number
+  running_runs: number
+  completed_runs: number
+  failed_runs: number
+  canceled_runs: number
+  win_rate?: number | null
+  avg_return?: number | null
+  avg_sharpe?: number | null
+  recent_runs: DashboardRecentRun[]
+}
+
+export interface DashboardResearchStats {
+  total_projects: number
+  active_projects: number
+  archived_projects: number
+}
+
+export interface DashboardCatalogStats {
+  total_symbols: number
+  total_bars: number
+  total_size_bytes: number
+  available_timeframes: string[]
+}
+
+export interface DashboardSystemStats {
+  llm_configured: boolean
+  db_ok: boolean
+  engine_status: string
+}
+
+export interface DashboardStats {
+  strategies: DashboardStrategyStats
+  backtests: DashboardBacktestStats
+  research: DashboardResearchStats
+  catalog: DashboardCatalogStats
+  system: DashboardSystemStats
+}
+

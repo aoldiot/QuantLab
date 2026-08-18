@@ -60,6 +60,19 @@ export default function SettingsPage(){
       setBusy(false)
     }
   }
+  async function testDsh(){
+    setBusy(true)
+    setError('')
+    try{
+      const r=await api.testDshConfig()
+      setNotice('DeepSeek Harness 连接测试：'+r.message)
+      setConfig(await api.llmConfig())
+    }catch(e){
+      setError((e as Error).message)
+    }finally{
+      setBusy(false)
+    }
+  }
   async function saveGit(e:React.FormEvent<HTMLFormElement>){
     e.preventDefault()
     setBusy(true)
@@ -103,57 +116,57 @@ export default function SettingsPage(){
     {error&&<div className="form-error">{error}</div>}
     {notice&&<div className="save-notice"><CheckCircle2/>{notice}</div>}
     <div className="settings-tabs" role="tablist" aria-label="设置分类">
-      <button type="button" role="tab" aria-selected={tab==='llm'} className={tab==='llm'?'active':''} onClick={()=>switchTab('llm')}><KeyRound/>LLM 配置</button>
+      <button type="button" role="tab" aria-selected={tab==='llm'} className={tab==='llm'?'active':''} onClick={()=>switchTab('llm')}><KeyRound/>LLM & DSH 配置</button>
       <button type="button" role="tab" aria-selected={tab==='git'} className={tab==='git'?'active':''} onClick={()=>switchTab('git')}><GitBranch/>策略 Git 远程备份</button>
     </div>
     <section className="card settings-page" role="tabpanel">
-      {tab==='llm'?<LlmSettings config={config} busy={busy} save={save} test={test} testHermes={testHermes}/>:<GitSettings config={gitConfig} busy={busy} save={saveGit} backup={backupGitNow}/>}
+      {tab==='llm'?<LlmSettings config={config} busy={busy} save={save} test={test} testHermes={testHermes} testDsh={testDsh}/>:<GitSettings config={gitConfig} busy={busy} save={saveGit} backup={backupGitNow}/>}
     </section>
   </div>
 }
 
-function LlmSettings({config,busy,save,test,testHermes}:{config:LlmConfiguration;busy:boolean;save:(e:React.FormEvent<HTMLFormElement>)=>void;test:(deep:boolean)=>void;testHermes:()=>void}){
+function LlmSettings({config,busy,save,test,testHermes,testDsh}:{config:LlmConfiguration;busy:boolean;save:(e:React.FormEvent<HTMLFormElement>)=>void;test:(deep:boolean)=>void;testHermes:()=>void;testDsh:()=>void}){
   return <form className="stack-form llm-settings-form" onSubmit={save}>
     <div className="llm-subcard">
       <div className="section-title">
         <div>
-          <h3><KeyRound/>Claude Agent 配置</h3>
-          <p>用于代码生成、代码重构与策略文件落地。API Key 加密保存且不返回前端。</p>
+          <h3><KeyRound/>DeepSeek Harness (DSH) / Agent 核心模型配置</h3>
+          <p>用于 DSH Quant Lead、Researcher、Developer 与 Reviewer 多 Agent 编排与工具调用。API Key 加密保存。</p>
         </div>
-        {config.configured&&<span className={config.last_test_ok?'config-ok':(config.last_test_ok===false?'config-error':'config-pending')}>{config.last_test_ok?'Claude 连接正常':(config.last_test_ok===false?'Claude 连接异常':'Claude 等待测试')}</span>}
+        {config.configured&&<span className={config.last_test_ok?'config-ok':(config.last_test_ok===false?'config-error':'config-pending')}>{config.last_test_ok?'模型连接正常':(config.last_test_ok===false?'模型连接异常':'等待测试')}</span>}
       </div>
       <div className="settings-grid">
-        <label className="wide">Anthropic API Base URL<input name="base_url" required defaultValue={config.base_url??''} placeholder="https://api.anthropic.com"/></label>
-        <label>认证方式<select name="auth_type" defaultValue={config.auth_type??'api_key'}><option value="api_key">x-api-key</option><option value="auth_token">Authorization Bearer</option></select></label>
+        <label className="wide">LLM API Base URL<input name="base_url" required defaultValue={config.base_url??'https://api.deepseek.com/v1'} placeholder="https://api.deepseek.com/v1"/></label>
+        <label>认证方式<select name="auth_type" defaultValue={config.auth_type??'api_key'}><option value="api_key">Authorization: Bearer / x-api-key</option><option value="auth_token">Authorization Bearer Token</option></select></label>
         <label>API Key<input name="api_key" type="password" placeholder={config.api_key_masked??'请输入 API Key'}/></label>
-        <label>模型<input name="model" required defaultValue={config.model??''} placeholder="claude-sonnet-4-6"/></label>
-        <label>小模型（可选）<input name="small_fast_model" defaultValue={config.small_fast_model??''}/></label>
+        <label>主模型 (Model)<input name="model" required defaultValue={config.model??'deepseek-chat'} placeholder="deepseek-chat / deepseek-reasoner / claude-sonnet-4-6"/></label>
+        <label>快速模型（可选）<input name="small_fast_model" defaultValue={config.small_fast_model??'deepseek-chat'}/></label>
         <label>超时（秒）<input name="timeout_seconds" type="number" min="10" max="1800" defaultValue={config.timeout_seconds??120}/></label>
         <label>最大 Agent 轮次<input name="max_turns" type="number" min="1" max="200" defaultValue={config.max_turns??30}/></label>
         <label className="wide">默认权限模式<select name="default_permission_mode" defaultValue={config.default_permission_mode??'default'}><option value="plan">Plan</option><option value="default">审批执行</option><option value="acceptEdits">自动编辑</option><option value="bypassPermissions">完全自动</option></select></label>
       </div>
       <div className="subcard-actions">
-        <button type="button" className="button" disabled={busy||!config.configured} onClick={()=>test(false)}><PlugZap/>测试 Claude 连接</button>
-        <button type="button" className="button" disabled={busy||!config.configured} onClick={()=>test(true)}><PlugZap/>深度测试 Claude Agent</button>
+        <button type="button" className="button primary" disabled={busy||!config.configured} onClick={testDsh}><PlugZap/>测试 DSH Agent 连接</button>
+        <button type="button" className="button" disabled={busy||!config.configured} onClick={()=>test(false)}><PlugZap/>测试基础 API 连接</button>
       </div>
     </div>
 
     <div className="llm-subcard">
       <div className="section-title">
         <div>
-          <h3><BrainCircuit/>Hermes 研究配置</h3>
-          <p>用于策略研讨对话、规格生成与回测结果深度分析。由前端统一维护，无需固定在环境变量。</p>
+          <h3><BrainCircuit/>多模型与备用 Hermes 端点配置</h3>
+          <p>用于兼容外部本地模型服务或备用推理节点。由前端统一维护并加密存储。</p>
         </div>
-        {config.hermes_configured?<span className={config.hermes_last_test_ok?'config-ok':(config.hermes_last_test_ok===false?'config-error':'config-pending')}>{config.hermes_last_test_ok?'Hermes 连接正常':(config.hermes_last_test_ok===false?'Hermes 连接异常':'Hermes 等待测试')}</span>:<span className="config-pending">未配置 Hermes</span>}
+        {config.hermes_configured?<span className={config.hermes_last_test_ok?'config-ok':(config.hermes_last_test_ok===false?'config-error':'config-pending')}>{config.hermes_last_test_ok?'备用连接正常':(config.hermes_last_test_ok===false?'备用连接异常':'等待测试')}</span>:<span className="config-pending">未配置备用端点</span>}
       </div>
       <div className="settings-grid">
-        <label className="wide">Hermes API Base URL<input name="hermes_base_url" defaultValue={config.hermes_base_url??''} placeholder="http://127.0.0.1:8642/v1"/></label>
-        <label>Hermes API Key（可选）<input name="hermes_api_key" type="password" placeholder={config.hermes_api_key_masked??'留空或输入 Bearer Token'}/></label>
-        <label>Hermes 模型<input name="hermes_model" defaultValue={config.hermes_model??''} placeholder="hermes-agent"/></label>
+        <label className="wide">备用 API Base URL<input name="hermes_base_url" defaultValue={config.hermes_base_url??''} placeholder="http://127.0.0.1:8642/v1"/></label>
+        <label>API Key（可选）<input name="hermes_api_key" type="password" placeholder={config.hermes_api_key_masked??'留空或输入 Bearer Token'}/></label>
+        <label>模型名称<input name="hermes_model" defaultValue={config.hermes_model??''} placeholder="deepseek-chat / hermes-agent"/></label>
         <label className="wide">请求超时（秒）<input name="hermes_timeout_seconds" type="number" min="10" max="3600" defaultValue={config.hermes_timeout_seconds??600}/></label>
       </div>
       <div className="subcard-actions">
-        <button type="button" className="button" disabled={busy||!config.hermes_configured} onClick={testHermes}><PlugZap/>测试 Hermes 连接</button>
+        <button type="button" className="button" disabled={busy||!config.hermes_configured} onClick={testHermes}><PlugZap/>测试备用端点连接</button>
       </div>
     </div>
 

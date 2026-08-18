@@ -75,6 +75,7 @@ function BacktestParamsModal({
   const [initialBalance, setInitialBalance] = useState(10000)
   const [leverage, setLeverage] = useState(1.0)
   const [executionModel, setExecutionModel] = useState('CONSERVATIVE')
+  const [checkDataIntegrity, setCheckDataIntegrity] = useState(true)
   const [parameters, setParameters] = useState<Record<string, any>>({})
 
   const [newParamKey, setNewParamKey] = useState('')
@@ -107,6 +108,7 @@ function BacktestParamsModal({
     setInitialBalance(Number(initialParams.initial_balance ?? 10000))
     setLeverage(Number(initialParams.leverage ?? 1.0))
     setExecutionModel(initialParams.execution_model || 'CONSERVATIVE')
+    setCheckDataIntegrity(initialParams.check_data_integrity !== false)
     setParameters(initialParams.parameters ? { ...initialParams.parameters } : {})
     setCatalogCheckResult(null)
   }, [isOpen, initialParams])
@@ -226,6 +228,7 @@ function BacktestParamsModal({
       initial_balance: initialBalance,
       leverage,
       execution_model: executionModel,
+      check_data_integrity: checkDataIntegrity,
       parameters,
     }
     onConfirmAndRun(finalParams)
@@ -247,7 +250,7 @@ function BacktestParamsModal({
           leverage,
           execution_model: executionModel,
           strategy_parameters: parameters,
-          check_data_integrity: true,
+          check_data_integrity: checkDataIntegrity,
           research_project_id: project.id,
         },
       },
@@ -259,13 +262,13 @@ function BacktestParamsModal({
     <div className="modal-backdrop">
       <section className="modal backtest-edit-modal">
         <button className="modal-close" onClick={onClose}><X size={16} /></button>
-        <div className="modal-head-title-row">
+        <div className="backtest-modal-header">
           <div className="modal-title-with-badge">
             <Sliders size={20} className="modal-title-icon" />
             <h2>配置并确认策略回测方案</h2>
             <span className="strategy-slug-badge">{strategyName}</span>
           </div>
-          <p className="muted">用户可在此自主微调标的、周期、回测区间及策略参数，确定后将交由 Hermes 调度 QuantLab 执行回测。</p>
+          <p className="muted modal-subtitle">用户可在此自主微调标的、周期、回测区间及策略参数，确定后将交由 DeepSeek Harness 调度 QuantLab 执行回测。</p>
         </div>
 
         <form onSubmit={handleSubmit} className="backtest-form-stack">
@@ -387,23 +390,34 @@ function BacktestParamsModal({
             </div>
 
             {/* Catalog Check Action */}
-            <div className="catalog-check-bar">
+            <div className="integrity-checkbox-bar">
+              <label className="checkbox-toggle-label">
+                <input
+                  type="checkbox"
+                  checked={checkDataIntegrity}
+                  onChange={e => setCheckDataIntegrity(e.target.checked)}
+                  style={{ width: 16, height: 16, accentColor: 'var(--cyan)' }}
+                />
+                <span>检查本地行情完整性（可选，回测启动前校验历史 K 线数据）</span>
+              </label>
+
               <button
                 type="button"
                 className="button mini secondary catalog-btn"
                 onClick={handleCheckCatalog}
                 disabled={checkingCatalog}
+                title="立即校验当前所选标的与时间范围的本地行情是否完整"
               >
                 {checkingCatalog ? <Loader2 size={12} className="spin" /> : <Database size={12} />}
-                校验本地行情完整性
+                校验完整性
               </button>
-              {catalogCheckResult && (
-                <span className={`catalog-result-tag ${catalogCheckResult.ok ? 'ok' : 'warn'}`}>
-                  {catalogCheckResult.ok ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
-                  {catalogCheckResult.summary}
-                </span>
-              )}
             </div>
+            {catalogCheckResult && (
+              <div className={`catalog-result-tag ${catalogCheckResult.ok ? 'ok' : 'warn'}`}>
+                {catalogCheckResult.ok ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                <span>{catalogCheckResult.summary}</span>
+              </div>
+            )}
           </div>
 
           {/* Section 3: 策略自定义参数 */}
@@ -469,20 +483,22 @@ function BacktestParamsModal({
           <div className="modal-actions backtest-modal-actions">
             <button
               type="button"
-              className="button secondary"
+              className="button secondary adv-config-btn"
               onClick={handleOpenAdvancedNew}
               title="在完整回测管理页面中微调更多高级设置"
             >
               <ExternalLink size={13} />
               在回测管理中高级配置
             </button>
-            <button type="button" className="button" onClick={onClose}>
-              取消
-            </button>
-            <button type="submit" className="button primary execute-confirm-btn">
-              <Play size={14} />
-              确认修改并由 Hermes 执行回测
-            </button>
+            <div className="modal-actions-right">
+              <button type="button" className="button" onClick={onClose}>
+                取消
+              </button>
+              <button type="submit" className="button primary execute-confirm-btn">
+                <Play size={14} />
+                确认修改并执行回测
+              </button>
+            </div>
           </div>
         </form>
       </section>
@@ -566,6 +582,145 @@ function BacktestParamsCard({
           <Sliders size={12} />
           查看与修改参数
         </button>
+      </div>
+    </div>
+  )
+}
+
+function BacktestResultCard({
+  msg,
+  project,
+  strategyName,
+  busy,
+  handleConfirmAnalysis,
+  handleConfirmRepair,
+  handleOpenParamsModal,
+}: {
+  msg: ResearchMessage
+  project: ResearchProject
+  strategyName: string
+  busy: boolean
+  handleConfirmAnalysis: (metrics?: Record<string, any>, stratName?: string) => void
+  handleConfirmRepair: (errMsg?: string, stratName?: string) => void
+  handleOpenParamsModal: (params: Record<string, any>) => void
+}) {
+  const res = msg.metadata?.result || msg.metadata?.backtest_result || {}
+  const isSuccess = res.ok !== false && res.status !== 'FAILED'
+  const metrics = res.metrics || {}
+  const strat = res.strategy_name || strategyName || 'strategy'
+
+  if (!isSuccess) {
+    return (
+      <div className="backtest-result-card-wrap">
+        <div className="backtest-error-box in-dialog">
+          <div className="error-box-header">
+            <AlertCircle size={16} className="err-icon" />
+            <b>策略「{strat}」回测执行失败</b>
+          </div>
+          <p className="err-msg-text">{res.error_message || '回测执行异常，请查看详细日志或进行代码修复'}</p>
+          <div className="error-prompt-tip">
+            ⚠️ 策略回测运行报错。是否确认让 DeepSeek Harness 进行代码修复？（【系统安全限制】：修复后不会自动重新回测）
+          </div>
+          <div className="err-action-row">
+            <button
+              type="button"
+              className="button mini primary fix-btn"
+              disabled={busy}
+              onClick={() => handleConfirmRepair(res.error_message, strat)}
+            >
+              <Wrench size={12} /> 确认修复策略代码
+            </button>
+            <button
+              type="button"
+              className="button mini secondary"
+              onClick={() => handleOpenParamsModal(res.arguments || res.backtest_params || { strategy_name: strat })}
+            >
+              <Sliders size={12} /> 重新调整回测参数
+            </button>
+            {res.run_id && (
+              <Link className="button mini secondary" to={`/backtests/${res.run_id}`} target="_blank">
+                查看详细日志 <ExternalLink size={11} />
+              </Link>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const totalReturn = metrics.total_return != null ? `${Number(metrics.total_return).toFixed(2)}%` : '—'
+  const sharpe =
+    (metrics.sharpe_ratio ?? metrics.sharpe) != null
+      ? Number(metrics.sharpe_ratio ?? metrics.sharpe).toFixed(2)
+      : '—'
+  const maxDd = metrics.max_drawdown != null ? `${Number(metrics.max_drawdown).toFixed(2)}%` : '—'
+  const winRate = metrics.win_rate != null ? `${Number(metrics.win_rate).toFixed(1)}%` : '—'
+  const totalTrades = metrics.total_trades ?? metrics.trades ?? '—'
+
+  return (
+    <div className="backtest-result-card-wrap">
+      <div className="backtest-main-result-card">
+        <div className="result-card-header">
+          <div className="result-card-title">
+            <CheckCircle2 size={18} className="text-green" />
+            <span><b>策略回测完成</b> ({strat})</span>
+          </div>
+          <span className="badge ok">回测报告已就绪</span>
+        </div>
+
+        <div className="backtest-metrics-grid">
+          <div className="metric-box">
+            <span className="label">总收益率</span>
+            <b className={`value ${(metrics.total_return ?? 0) >= 0 ? 'pos' : 'neg'}`}>{totalReturn}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">夏普比率</span>
+            <b className="value">{sharpe}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">最大回撤</span>
+            <b className="value neg">{maxDd}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">胜率</span>
+            <b className="value">{winRate}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">总交易数</span>
+            <b className="value">{totalTrades}</b>
+          </div>
+          {res.run_id && (
+            <div className="metric-box action">
+              <Link className="button mini primary detail-link-btn" to={`/backtests/${res.run_id}`} target="_blank">
+                完整详情 <ExternalLink size={11} />
+              </Link>
+            </div>
+          )}
+        </div>
+
+        <div className="backtest-analysis-prompt-card">
+          <div className="analysis-prompt-info">
+            <Sparkles size={14} className="text-cyan" />
+            <span>回测已成功生成报告。是否需要对本次回测绩效及交易进行深度归因分析？</span>
+          </div>
+          <div className="analysis-prompt-actions">
+            <button
+              type="button"
+              className="button mini primary analysis-btn"
+              disabled={busy}
+              onClick={() => handleConfirmAnalysis(metrics, strat)}
+            >
+              <Sparkles size={12} /> 确认进行回测深度分析
+            </button>
+            <button
+              type="button"
+              className="button mini secondary"
+              onClick={() => handleOpenParamsModal(res.arguments || res.backtest_params || { strategy_name: strat })}
+            >
+              <Sliders size={12} /> 调整参数重新回测
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -733,18 +888,12 @@ function groupMessagesIntoTurns(
       continue
     }
 
-    if (msg.message_type === 'tool_output') {
-      addToolOutput(msg)
-      continue
-    }
-
-    if (msg.role === 'tool') {
-      // All tool execution results belong to processItems
-      addToolOutput(msg)
-      continue
-    }
-
+    // 1. Proposals (code_approval and backtest_params) must be extracted to responseMessages
+    // regardless of whether their role is 'assistant' or 'tool'
     if (msg.message_type === 'code_approval' || msg.metadata?.code_approval) {
+      if (msg.role === 'tool' || msg.message_type === 'tool_output') {
+        addToolOutput(msg)
+      }
       if (msg.metadata?.reasoning_content?.trim()) {
         currentTurn.processItems.push({
           id: `${msg.id}-thought`,
@@ -762,6 +911,9 @@ function groupMessagesIntoTurns(
     }
 
     if (msg.message_type === 'backtest_params' || msg.metadata?.backtest_params) {
+      if (msg.role === 'tool' || msg.message_type === 'tool_output') {
+        addToolOutput(msg)
+      }
       if (msg.metadata?.reasoning_content?.trim()) {
         currentTurn.processItems.push({
           id: `${msg.id}-thought`,
@@ -775,6 +927,44 @@ function groupMessagesIntoTurns(
       if (!alreadyHasParams) {
         currentTurn.responseMessages.push(msg)
       }
+      continue
+    }
+
+    if (
+      msg.message_type === 'backtest_result' ||
+      msg.metadata?.tool_name === 'execute_backtest' ||
+      msg.metadata?.backtest_result
+    ) {
+      if (msg.role === 'tool' || msg.message_type === 'tool_output') {
+        addToolOutput(msg)
+      }
+      if (msg.metadata?.reasoning_content?.trim()) {
+        currentTurn.processItems.push({
+          id: `${msg.id}-thought`,
+          type: 'thinking',
+          thought: msg.metadata.reasoning_content,
+        })
+      }
+      const alreadyHasResult = currentTurn.responseMessages.some(
+        m =>
+          m.message_type === 'backtest_result' ||
+          m.metadata?.tool_name === 'execute_backtest' ||
+          m.metadata?.backtest_result
+      )
+      if (!alreadyHasResult) {
+        currentTurn.responseMessages.push(msg)
+      }
+      continue
+    }
+
+    // 2. Generic tool execution outputs belong to processItems
+    if (msg.message_type === 'tool_output') {
+      addToolOutput(msg)
+      continue
+    }
+
+    if (msg.role === 'tool') {
+      addToolOutput(msg)
       continue
     }
 
@@ -816,7 +1006,7 @@ function ProcessThinkingStep({ thought }: { thought: string }) {
       >
         <div className="step-head-title">
           <BrainCircuit size={13} className="step-icon text-cyan" />
-          <span className="step-label">Hermes 思考过程 (Reasoning Process)</span>
+          <span className="step-label">DeepSeek Harness 思考与推理 (Reasoning Process)</span>
         </div>
         <div className="step-head-actions">
           <span className="step-toggle-hint">{expanded ? '收起' : '展开'}</span>
@@ -899,7 +1089,7 @@ function ProcessToolStep({
   } else if (hasResult) {
     if (isSuccess) {
       if (isBacktest && res.metrics?.total_return != null) {
-        statusBadge = `成功 · 收益 ${(res.metrics.total_return * 100).toFixed(1)}%`
+        statusBadge = `成功 · 收益 ${Number(res.metrics.total_return).toFixed(2)}%`
       } else if (isWriting) {
         statusBadge = '成功 · AST校验通过'
       } else {
@@ -1043,24 +1233,32 @@ function ProcessToolStep({
                 <div className="metric-box">
                   <span className="label">总收益率</span>
                   <b className={`value ${(res.metrics.total_return ?? 0) >= 0 ? 'pos' : 'neg'}`}>
-                    {res.metrics.total_return != null ? `${(res.metrics.total_return * 100).toFixed(2)}%` : '—'}
+                    {res.metrics.total_return != null ? `${Number(res.metrics.total_return).toFixed(2)}%` : '—'}
                   </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">夏普比率</span>
-                  <b className="value">{res.metrics.sharpe_ratio != null ? Number(res.metrics.sharpe_ratio).toFixed(2) : '—'}</b>
+                  <b className="value">
+                    {(res.metrics.sharpe_ratio ?? res.metrics.sharpe) != null
+                      ? Number(res.metrics.sharpe_ratio ?? res.metrics.sharpe).toFixed(2)
+                      : '—'}
+                  </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">最大回撤</span>
-                  <b className="value neg">{res.metrics.max_drawdown != null ? `${(res.metrics.max_drawdown * 100).toFixed(2)}%` : '—'}</b>
+                  <b className="value neg">
+                    {res.metrics.max_drawdown != null ? `${Number(res.metrics.max_drawdown).toFixed(2)}%` : '—'}
+                  </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">胜率</span>
-                  <b className="value">{res.metrics.win_rate != null ? `${(res.metrics.win_rate * 100).toFixed(1)}%` : '—'}</b>
+                  <b className="value">
+                    {res.metrics.win_rate != null ? `${Number(res.metrics.win_rate).toFixed(1)}%` : '—'}
+                  </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">总交易数</span>
-                  <b className="value">{res.metrics.total_trades ?? '—'}</b>
+                  <b className="value">{res.metrics.total_trades ?? res.metrics.trades ?? '—'}</b>
                 </div>
                 {res.run_id && (
                   <div className="metric-box action">
@@ -1107,7 +1305,7 @@ function ProcessToolStep({
               </div>
               <p className="err-msg-text">{res.error_message || '执行过程出现异常'}</p>
               <div className="error-prompt-tip">
-                ⚠️ 策略回测运行报错。是否确认让 Hermes 进行代码修复？（【系统安全限制】：本次仅修复策略代码，修复后不会自动重新回测）
+                ⚠️ 策略回测运行报错。是否确认让 DeepSeek Harness 进行代码修复？（【系统安全限制】：本次仅修复策略代码，修复后不会自动重新回测）
               </div>
               <div className="err-action-row">
                 <button
@@ -1233,11 +1431,11 @@ function HermesProcessBox({
   const hasRunning = toolItems.some(p => p.isCallRunning || p.isWritingActive)
   const hasError = toolItems.some(p => p.isSuccess === false)
 
-  let title = 'Hermes 思考与执行过程'
+  let title = 'DeepSeek Harness 思考与执行过程'
   if (toolCount === 0 && hasThinking) {
-    title = 'Hermes 思考过程'
+    title = 'DeepSeek Harness 思考过程'
   } else if (!hasThinking && toolCount > 0) {
-    title = 'Hermes 工具调度过程'
+    title = 'DeepSeek Harness 工具调度过程'
   }
 
   return (
@@ -1328,7 +1526,7 @@ function ThinkingAccordion({thought}: {thought: string}) {
       >
         <div className="step-head-title">
           <BrainCircuit size={13} className="step-icon text-cyan" />
-          <span className="step-label">Hermes 思考过程 (Thinking Process)</span>
+          <span className="step-label">DeepSeek Harness 深度思考过程 (Thinking Process)</span>
         </div>
         <div className="step-head-actions">
           <span className="step-toggle-hint">{expanded ? '收起' : '展开'}</span>
@@ -1410,7 +1608,7 @@ function CodeApprovalCard({
       <div className="code-approval-footer">
         <div className="code-approval-tip">
           <AlertCircle size={13} />
-          <span>请核对上述策略设计逻辑。批准后 Hermes 将开始编写策略代码。</span>
+          <span>请核对上述策略设计逻辑。批准后 DeepSeek Harness 将开始编写策略代码。</span>
         </div>
         <div className="code-approval-actions">
           <button
@@ -1570,15 +1768,16 @@ export default function Research(){
 
   function handleApproveCode(data:CodeApprovalData){
     if(!project||busy)return
-    const stratName=data.strategy_name||'strategy'
+    const stratName =
+      (data.strategy_name && data.strategy_name !== 'strategy' && data.strategy_name !== 'custom_strategy')
+        ? data.strategy_name
+        : (strategyName || 'custom_strategy')
     const rulesSummary = data.key_rules && data.key_rules.length > 0 ? `\n核心规则要点：\n${data.key_rules.map(r => `- ${r}`).join('\n')}` : ''
     const paramsSummary = data.parameter_specs && Object.keys(data.parameter_specs).length > 0 ? `\n预设参数配置：${JSON.stringify(data.parameter_specs, null, 2)}` : ''
-    const approvePrompt=
-      `已批准策略「${stratName}」的设计方案。`+
-      `请开始编写策略代码文件 backend/app/strategies/${stratName}.py 并严格遵循 NautilusTrader 开发规范。`+
-      (data.strategy_summary ? `\n策略概要：${data.strategy_summary}` : '') +
-      rulesSummary +
-      paramsSummary
+    const approvePrompt =
+      `【已批准策略「${stratName}」的设计方案，请立即调用 write_strategy_with_claude 工具编写策略代码】：\n` +
+      `- strategy_name: "${stratName}"\n` +
+      `- instructions: "请编写策略 ${stratName} 的完整代码文件 backend/app/strategies/${stratName}.py，严格遵循 NautilusTrader 开发规范并通过 4 级 Pre-Flight 验证。${rulesSummary}${paramsSummary}"`
 
     const tempId=generateUUID()
     const optimisticMsg:ResearchMessage={
@@ -1618,14 +1817,20 @@ export default function Research(){
   }
 
   function handleModifyCode(data:CodeApprovalData){
-    const stratName=data.strategy_name||'strategy'
+    const stratName =
+      (data.strategy_name && data.strategy_name !== 'strategy' && data.strategy_name !== 'custom_strategy')
+        ? data.strategy_name
+        : (strategyName || 'custom_strategy')
     setInput(`关于策略「${stratName}」的设计方案，我想调整以下逻辑：\n- `)
     textareaRef.current?.focus()
   }
 
   function handleConfirmRepair(errorMessage?: string, stratName?: string){
     if(!project||busy)return
-    const sName = stratName || strategyName || 'strategy'
+    const sName =
+      (stratName && stratName !== 'strategy' && stratName !== 'custom_strategy')
+        ? stratName
+        : (strategyName || 'custom_strategy')
     const errText = errorMessage || '回测执行异常'
     const repairPrompt =
       `针对策略「${sName}」回测运行报错：\n${errText}\n\n`+
@@ -1675,12 +1880,18 @@ export default function Research(){
 
   function handleConfirmAnalysis(metrics?: Record<string, any>, stratName?: string){
     if(!project||busy)return
-    const sName = stratName || strategyName || 'strategy'
-    const ret = metrics?.total_return != null ? `${(metrics.total_return * 100).toFixed(2)}%` : '—'
-    const sharpe = metrics?.sharpe_ratio != null ? Number(metrics.sharpe_ratio).toFixed(2) : '—'
-    const dd = metrics?.max_drawdown != null ? `${(metrics.max_drawdown * 100).toFixed(2)}%` : '—'
-    const winRate = metrics?.win_rate != null ? `${(metrics.win_rate * 100).toFixed(1)}%` : '—'
-    const totalTrades = metrics?.total_trades ?? '—'
+    const sName =
+      (stratName && stratName !== 'strategy' && stratName !== 'custom_strategy')
+        ? stratName
+        : (strategyName || 'custom_strategy')
+    const ret = metrics?.total_return != null ? `${Number(metrics.total_return).toFixed(2)}%` : '—'
+    const sharpe =
+      (metrics?.sharpe_ratio ?? metrics?.sharpe) != null
+        ? Number(metrics?.sharpe_ratio ?? metrics?.sharpe).toFixed(2)
+        : '—'
+    const dd = metrics?.max_drawdown != null ? `${Number(metrics.max_drawdown).toFixed(2)}%` : '—'
+    const winRate = metrics?.win_rate != null ? `${Number(metrics.win_rate).toFixed(1)}%` : '—'
+    const totalTrades = metrics?.total_trades ?? metrics?.trades ?? '—'
 
     const analysisPrompt =
       `针对策略「${sName}」本次回测结果（总收益率: ${ret}, 夏普比率: ${sharpe}, 最大回撤: ${dd}, 胜率: ${winRate}, 总交易数: ${totalTrades}），请进行1次深度回测归因分析。\n\n`+
@@ -1959,6 +2170,58 @@ export default function Research(){
     }
   }
 
+  async function handleDshRun(e?: React.FormEvent) {
+    if (e) e.preventDefault()
+    const text = input.trim()
+    if (!project || !text || busy) return
+    const tempId = generateUUID()
+    const optimisticMsg: ResearchMessage = {
+      id: tempId,
+      role: 'user',
+      content: `⚡ [DSH 多 Agent 星型闭环] ${text}`,
+      message_type: 'message',
+      metadata: { is_dsh_run: true },
+      created_at: new Date().toISOString(),
+    }
+    setMessages(prev => [...prev, optimisticMsg])
+    setInput('')
+    setBusy(true)
+    setError('')
+    autoScrollRef.current = true
+    setShowScrollBottom(false)
+    setTimeout(() => scrollToBottom(true), 30)
+    try {
+      await api.runDshPipeline(project.id, text)
+      const [m, r, fresh, wLog, tStatus] = await Promise.all([
+        api.researchMessages(project.id),
+        api.researchRuns(project.id),
+        api.researchProject(project.id),
+        api.researchWritingLog(project.id).catch(() => null),
+        api.researchThinkingStatus(project.id).catch(() => null),
+      ])
+      setMessages(m)
+      setRuns(r)
+      setProject(fresh)
+      if (wLog) setWritingLog(wLog)
+      if (tStatus) setThinkingStatus(tStatus)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function getAgentDisplayName(msg: ResearchMessage) {
+    if (msg.role === 'user') return '你'
+    const role = msg.metadata?.agent_role
+    if (role === 'lead') return 'DSH Quant Lead (总主控)'
+    if (role === 'researcher') return 'Researcher (量化研究员)'
+    if (role === 'developer') return 'Developer (策略开发员)'
+    if (role === 'reviewer') return 'Reviewer (独立审核员)'
+    if (role === 'tool' || msg.role === 'tool') return 'QuantLab 确定性量化引擎'
+    return 'DSH Quant Lead'
+  }
+
   function handleKeyDown(e:React.KeyboardEvent<HTMLTextAreaElement>){
     if(e.key==='Enter'&&!e.shiftKey){
       // 中文/日文等 IME 输入法正在选词输入中，不触发发送
@@ -2076,7 +2339,7 @@ export default function Research(){
                 <div className="chat-header-info">
                   <h2>{project.title}</h2>
                   <span className="chat-header-meta">
-                    创建于 {new Date(project.created_at).toLocaleDateString('zh-CN')} · Hermes 主控
+                    创建于 {new Date(project.created_at).toLocaleDateString('zh-CN')} · DeepSeek Harness 主控
                   </span>
                 </div>
                 <div className="chat-header-actions">
@@ -2177,8 +2440,8 @@ export default function Research(){
                 {messages.length===0&&(
                   <div className="chat-welcome-card">
                     <div className="welcome-avatar"><Bot size={28}/></div>
-                    <h3>你好，我是 QuantLab 首席量化研究员 Hermes</h3>
-                    <p>我将全流程协助你完成策略假设研讨、编写策略代码、自动执行回测并进行深度归因。你可以从以下方向开始：</p>
+                    <h3>你好，我是 QuantLab DSH 量化研发主控（Quant Lead）</h3>
+                    <p>基于 DeepSeek Harness (DSH) 星型多 Agent 协作系统（Quant Lead、Researcher、Developer、Reviewer）与 QuantLab 确定性工具库，全流程协助您完成假设检验、因子分析、策略编写、沙盒自愈、独立审查与回测验证。</p>
                     <div className="suggestion-grid">
                       {SUGGESTIONS.map((s,i)=>(
                         <button
@@ -2206,7 +2469,7 @@ export default function Research(){
                         <UserMessageBubble msg={turn.userMessage} />
                       )}
 
-                      {/* Hermes Thinking & Tool Process Box (Collapsed by default!) */}
+                      {/* Hermes / DSH Thinking & Tool Process Box */}
                       {turn.processItems.length > 0 && (
                         <HermesProcessBox
                           processItems={turn.processItems}
@@ -2227,20 +2490,24 @@ export default function Research(){
                       {/* Assistant Responses & Proposal Cards for this turn */}
                       {turn.responseMessages.map(msg => {
                         if (msg.message_type === 'code_approval' || msg.metadata?.code_approval) {
-                          const approvalData: CodeApprovalData = msg.metadata?.code_approval || msg.metadata?.arguments || {}
-                          const cleanContent = msg.content
+                          const approvalData: CodeApprovalData =
+                            msg.metadata?.code_approval || msg.metadata?.result?.approval_data || msg.metadata?.arguments || {}
+                          let cleanContent = msg.content
                             ? msg.content.replace(/```(?:code_approval|json:code_approval)[\s\S]*?```/gi, '').trim()
                             : ''
+                          if (cleanContent.startsWith('{') && cleanContent.endsWith('}')) {
+                            cleanContent = ''
+                          }
                           return (
                             <div key={msg.id} className="chat-msg-wrap">
                               {cleanContent && (
-                                <article className={`chat-message ${msg.role}`}>
+                                <article className={`chat-message ${msg.role === 'tool' ? 'assistant' : msg.role}`}>
                                   <div className="message-avatar">
                                     <Bot size={16} />
                                   </div>
                                   <div className="message-content">
                                     <div className="message-author">
-                                      <b>Hermes 研究员</b>
+                                      <b>{getAgentDisplayName(msg)}</b>
                                       <time>{new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
                                     </div>
                                     <div className="message-markdown">
@@ -2262,20 +2529,24 @@ export default function Research(){
                         }
 
                         if (msg.message_type === 'backtest_params' || msg.metadata?.backtest_params) {
-                          const bp = msg.metadata?.backtest_params || msg.metadata?.arguments || {}
-                          const cleanContent = msg.content
+                          const bp =
+                            msg.metadata?.backtest_params || msg.metadata?.result?.backtest_params || msg.metadata?.arguments || {}
+                          let cleanContent = msg.content
                             ? msg.content.replace(/```(?:backtest_params|json:backtest_params)[\s\S]*?```/gi, '').trim()
                             : ''
+                          if (cleanContent.startsWith('{') && cleanContent.endsWith('}')) {
+                            cleanContent = ''
+                          }
                           return (
                             <div key={msg.id} className="chat-msg-wrap">
                               {cleanContent && (
-                                <article className={`chat-message ${msg.role}`}>
+                                <article className={`chat-message ${msg.role === 'tool' ? 'assistant' : msg.role}`}>
                                   <div className="message-avatar">
                                     <Bot size={16} />
                                   </div>
                                   <div className="message-content">
                                     <div className="message-author">
-                                      <b>Hermes 研究员</b>
+                                      <b>{getAgentDisplayName(msg)}</b>
                                       <time>{new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
                                     </div>
                                     <div className="message-markdown">
@@ -2297,6 +2568,28 @@ export default function Research(){
                           )
                         }
 
+                        if (
+                          msg.message_type === 'backtest_result' ||
+                          msg.metadata?.tool_name === 'execute_backtest' ||
+                          msg.metadata?.backtest_result
+                        ) {
+                          return (
+                            <div key={msg.id} className="chat-msg-wrap">
+                              {project && (
+                                <BacktestResultCard
+                                  msg={msg}
+                                  project={project}
+                                  strategyName={strategyName}
+                                  busy={busy}
+                                  handleConfirmAnalysis={handleConfirmAnalysis}
+                                  handleConfirmRepair={handleConfirmRepair}
+                                  handleOpenParamsModal={handleOpenParamsModal}
+                                />
+                              )}
+                            </div>
+                          )
+                        }
+
                         // Regular assistant or system message
                         return (
                           <article key={msg.id} className={`chat-message ${msg.role}`}>
@@ -2305,7 +2598,7 @@ export default function Research(){
                             </div>
                             <div className="message-content">
                               <div className="message-author">
-                                <b>{msg.role === 'user' ? '你' : 'Hermes 研究员'}</b>
+                                <b>{getAgentDisplayName(msg)}</b>
                                 <time>{new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
                               </div>
                               <div className="message-markdown">
@@ -2331,7 +2624,7 @@ export default function Research(){
                       <div className="live-card-body">
                         <div className="live-card-head">
                           <div className="live-title-group">
-                            <b>Hermes 正在编写策略代码</b>
+                            <b>DeepSeek Harness 正在编写策略代码</b>
                             {writingLog.strategy_name && <span className="live-strat-name">{writingLog.strategy_name}.py</span>}
                           </div>
                           <span className="live-percent-badge writer">{writingLog.progress}%</span>
@@ -2416,7 +2709,7 @@ export default function Research(){
                       <div className="live-card-body">
                         <div className="live-card-head">
                           <div className="live-title-group">
-                            <b>Hermes 量化研究员正在深度思考与推理</b>
+                            <b>DeepSeek Harness 量化主控正在深度思考与推理</b>
                             <span className="live-thinking-state-badge">
                               <Loader2 size={11} className="spin" />
                               {thinkingStatus?.status === 'TOOL_RUNNING' ? '工具调度中' : '量化推理中'}
@@ -2487,7 +2780,7 @@ export default function Research(){
                     className="quick-chip"
                     onClick={()=>setInput('请对本次回测结果进行1次深度归因分析，详细剖析盈利/亏损原因（只分析原因，禁止修改代码和回测）。')}
                   >
-                    📊 申请回测归因分析
+                    📊 回测结果分析
                   </button>
                 </div>
 
@@ -2575,7 +2868,7 @@ export default function Research(){
                   ):(
                     <div className="drawer-empty">
                       <Code2 size={32}/>
-                      <p>尚未生成代码，请在对话中让 Hermes 编写策略。</p>
+                      <p>尚未生成代码，请在对话中让 DeepSeek Harness 编写策略。</p>
                     </div>
                   )}
                 </div>
@@ -2609,7 +2902,7 @@ export default function Research(){
                   </div>
                   <div className="writer-terminal-box">
                     <pre className="terminal-log-content">
-                      {writingLog?.logs || '暂无写码日志，在对话中让 Hermes 编写策略时将在此实时流式输出。'}
+                      {writingLog?.logs || '暂无写码日志，在对话中让 DeepSeek Harness 编写策略时将在此实时流式输出。'}
                     </pre>
                   </div>
                 </div>
@@ -2629,9 +2922,9 @@ export default function Research(){
                       </div>
                       {run.metrics&&(
                         <div className="run-card-metrics">
-                          <span>夏普: <b>{run.metrics.sharpe_ratio!=null?Number(run.metrics.sharpe_ratio).toFixed(2):'—'}</b></span>
-                          <span>回撤: <b className="neg">{run.metrics.max_drawdown!=null?`${(run.metrics.max_drawdown*100).toFixed(1)}%`:'—'}</b></span>
-                          <span>收益: <b className={(run.metrics.total_return??0)>=0?'pos':'neg'}>{run.metrics.total_return!=null?`${(run.metrics.total_return*100).toFixed(1)}%`:'—'}</b></span>
+                          <span>夏普: <b>{(run.metrics.sharpe_ratio ?? run.metrics.sharpe)!=null?Number(run.metrics.sharpe_ratio ?? run.metrics.sharpe).toFixed(2):'—'}</b></span>
+                          <span>回撤: <b className="neg">{run.metrics.max_drawdown!=null?`${Number(run.metrics.max_drawdown).toFixed(1)}%`:'—'}</b></span>
+                          <span>收益: <b className={(run.metrics.total_return??0)>=0?'pos':'neg'}>{run.metrics.total_return!=null?`${Number(run.metrics.total_return).toFixed(1)}%`:'—'}</b></span>
                         </div>
                       )}
                       <div className="run-card-actions">
@@ -2644,7 +2937,7 @@ export default function Research(){
                   {!runs.length&&(
                     <div className="drawer-empty">
                       <FlaskConical size={32}/>
-                      <p>当前研究尚无回测记录，可在对话中让 Hermes 执行回测。</p>
+                      <p>当前研究尚无回测记录，可在对话中让 DeepSeek Harness 执行回测。</p>
                     </div>
                   )}
                 </div>
@@ -2671,7 +2964,7 @@ export default function Research(){
           <section className="modal create-research-modal">
             <button className="modal-close" onClick={()=>setCreating(false)}><X size={16}/></button>
             <h2>新建策略研究</h2>
-            <p className="muted">开启一个全新的对话会话，由 Hermes 协同完成策略构想、写码与回测。</p>
+            <p className="muted">开启一个全新的对话会话，由 DeepSeek Harness 协同完成策略构想、写码与回测。</p>
             <form onSubmit={handleCreate} className="stack-form">
               <label>
                 研究主题名称

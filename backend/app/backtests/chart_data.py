@@ -58,6 +58,17 @@ def _bar_type_fragment(timeframe: str) -> str:
     return f"-{amount}-{names.get(unit, unit.upper())}-"
 
 
+def _parse_timeframe(bar_type: str) -> str | None:
+    parts = bar_type.split("-")
+    unit_map = {"MINUTE": "m", "MINUTES": "m", "HOUR": "h", "HOURS": "h", "DAY": "d", "DAYS": "d", "WEEK": "w", "WEEKS": "w", "MONTH": "M"}
+    for i in range(len(parts) - 1):
+        amount = parts[i]
+        unit = parts[i + 1].upper()
+        if amount.isdigit() and unit in unit_map:
+            return f"{amount}{unit_map[unit]}"
+    return None
+
+
 def load_chart(artifact_dir: Path, symbol: str | None, start: int | None, end: int | None,
                limit: int = 5000, timeframe: str | None = None) -> dict:
     bars_path = artifact_dir / "bars.parquet"
@@ -75,17 +86,28 @@ def load_chart(artifact_dir: Path, symbol: str | None, start: int | None, end: i
     del symbol_frame
     bars = pd.read_parquet(bars_path, filters=[(symbol_col, "==", selected)])
     bar_type_col = _column(bars, "bar_type")
+    chosen = None
     if bar_type_col:
         bar_types = bars[bar_type_col].astype(str)
-        chosen = None
         if timeframe:
             matches = bar_types[bar_types.str.contains(_bar_type_fragment(timeframe), regex=False)]
             if not matches.empty:
                 chosen = matches.iloc[0]
+        if chosen is None and (artifact_dir / "indicators.parquet").exists():
+            try:
+                ind_schema = pq.read_schema(artifact_dir / "indicators.parquet").names
+                if "bar_type" in ind_schema:
+                    ind_types = pd.read_parquet(artifact_dir / "indicators.parquet", columns=["bar_type"])["bar_type"].astype(str)
+                    common = set(bar_types.unique()) & set(ind_types.unique())
+                    if common:
+                        chosen = next(iter(common))
+            except Exception:
+                pass
         if chosen is None and not bar_types.empty:
             chosen = bar_types.value_counts().index[0]
         if chosen is not None:
             bars = bars[bar_types == chosen].copy()
+    resolved_timeframe = _parse_timeframe(chosen) if chosen else timeframe
     bars["_time"] = bars[time_col].map(_time_ms)
     if start is not None:
         bars = bars[bars["_time"] >= start]
@@ -126,9 +148,13 @@ def load_chart(artifact_dir: Path, symbol: str | None, start: int | None, end: i
         plot_config = json.loads(plot_path.read_text(encoding="utf-8"))
         indicators = pd.read_parquet(indicators_path, filters=[("symbol", "==", selected)])
         ibt = _column(indicators, "bar_type")
-        if ibt and timeframe:
-            mask = indicators[ibt].astype(str).str.contains(_bar_type_fragment(timeframe), regex=False)
-            indicators = indicators[mask]
+        if ibt:
+            if chosen and (indicators[ibt].astype(str) == chosen).any():
+                indicators = indicators[indicators[ibt].astype(str) == chosen]
+            elif timeframe:
+                mask = indicators[ibt].astype(str).str.contains(_bar_type_fragment(timeframe), regex=False)
+                if mask.any():
+                    indicators = indicators[mask]
         it = _column(indicators, "ts_init", "timestamp", "ts_event")
         configured = list(plot_config.get("main_plot", {}))
         configured += [column for pane in plot_config.get("subplots", {}).values() for column in pane]
@@ -145,5 +171,5 @@ def load_chart(artifact_dir: Path, symbol: str | None, start: int | None, end: i
                         for _, row in indicators[indicators[column].notna()].iterrows()
                     ]
     return {"symbol": selected, "symbols": symbols, "bars": candle_rows, "fills": fills,
-            "timeframe": timeframe, "truncated": truncated, "plot_config": plot_config,
+            "timeframe": resolved_timeframe, "truncated": truncated, "plot_config": plot_config,
             "indicator_series": indicator_series}

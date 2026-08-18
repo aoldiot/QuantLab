@@ -23,7 +23,23 @@
 .symbol-list > button.active {
   box-shadow: inset 0 0 0 1px var(--cyan), inset 3px 0 var(--cyan);
 }
-.main-chart { position: relative; }
+
+.main-chart-wrapper {
+  position: relative;
+  width: 100%;
+  min-height: 500px;
+}
+.trade-pulse-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  overflow: hidden;
+}
+.main-chart {
+  min-height: 500px;
+  width: 100%;
+}
 .trade-pulse {
   position: absolute;
   z-index: 5;
@@ -41,4 +57,300 @@
   0% { transform: scale(.7); box-shadow: 0 0 0 0 currentColor; opacity: 1; }
   65% { transform: scale(1.65); box-shadow: 0 0 0 9px transparent; opacity: .8; }
   100% { transform: scale(.7); box-shadow: 0 0 0 0 transparent; opacity: 1; }
+}
+
+/* =========================================================================
+   Interactive Indicator Legends (Toolbar & Overlays)
+   ========================================================================= */
+
+.indicator-toolbar-sections {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.indicator-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.indicator-section-tag {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.indicator-section-tag.main-tag {
+  background: #0f2b3e;
+  color: #38bdf8;
+  border: 1px solid #1e5277;
+}
+.indicator-section-tag.sub-tag {
+  background: #251b38;
+  color: #c084fc;
+  border: 1px solid #4a346e;
+}
+
+.section-divider {
+  width: 1px;
+  height: 20px;
+  background: #1f3246;
+  margin: 0 2px;
+}
+
+.legend-chips-container {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.indicator-legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+  border: 1px solid #23374d;
+  background: #0b1723;
+  color: #cbd8e5;
+}
+
+.indicator-legend-chip:hover {
+  background: #112435;
+  border-color: #355373;
+}
+
+.indicator-legend-chip.active {
+  background: #0e2434;
+  border-color: #215c7a;
+  color: #edf5fc;
+}
+
+.indicator-legend-chip.inactive {
+  opacity: 0.45;
+  border-style: dashed;
+  background: #08111a;
+  color: #647b90;
+}
+
+.indicator-legend-chip.inactive .chip-label {
+  text-decoration: line-through;
+}
+
+.legend-color-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.multi-color-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.multi-color-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.indicator-legend-chip svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.75;
+}
+
+.indicator-legend-chip.active svg {
+  color: var(--cyan);
+  opacity: 1;
+}
+
+/* =========================================================================
+   Chart Floating Info & Legend Overlay (TradingView style)
+   ========================================================================= */
+
+.chart-floating-overlay {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 4;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: calc(100% - 100px);
+}
+
+.ohlcv-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 11px;
+  color: #8fa5ba;
+  background: rgba(8, 17, 26, 0.85);
+  backdrop-filter: blur(8px);
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(34, 52, 70, 0.7);
+  width: fit-content;
+}
+
+.ohlcv-legend-row b {
+  color: #eef5fb;
+}
+
+.ohlcv-val {
+  color: #c9d8e7;
+}
+
+.main-legend-items-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  pointer-events: auto;
+}
+
+.overlay-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  background: rgba(11, 22, 33, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(35, 55, 75, 0.8);
+  color: #cbd8e5;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.overlay-legend-item:hover {
+  background: #14283b;
+  border-color: #355b80;
+}
+
+.overlay-legend-item.dimmed {
+  opacity: 0.35;
+  border-style: dashed;
+}
+
+.overlay-legend-item .item-val {
+  color: #eef5fb;
+  font-weight: 500;
+  margin-left: 2px;
+}
+
+.overlay-legend-item svg {
+  width: 11px;
+  height: 11px;
+  color: #728a9f;
+}
+
+/* =========================================================================
+   Subplot Chart Headers
+   ========================================================================= */
+
+.sub-chart {
+  position: relative;
+  border-top: 1px solid #263748;
+  min-height: 180px;
+  width: 100%;
+}
+
+.sub-chart-header {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.sub-chart-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(8, 17, 26, 0.82);
+  backdrop-filter: blur(6px);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(35, 53, 72, 0.6);
+  pointer-events: auto;
+}
+
+.sub-chart-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: #c9dcef;
+}
+
+.sub-chart-legend-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: #8aa1b6;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+.sub-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sub-legend-item b {
+  color: #edf5fc;
+  font-weight: 500;
+}
+
+.sub-chart-close-btn {
+  pointer-events: auto;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #24384d;
+  background: rgba(13, 26, 38, 0.85);
+  border-radius: 4px;
+  color: #8fa5ba;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sub-chart-close-btn:hover {
+  background: #1b2f42;
+  color: #ff7582;
+  border-color: #63333c;
+}
+
+.sub-chart-close-btn svg {
+  width: 12px;
+  height: 12px;
 }

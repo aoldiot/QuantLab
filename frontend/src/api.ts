@@ -81,6 +81,7 @@ export const api={
   saveLlmConfig:(data:unknown)=>request<LlmConfiguration>('/settings/llm',{method:'PUT',body:JSON.stringify(data)}),
   testLlmConfig:(deep=false)=>request<{ok:boolean;message:string}>(`/settings/llm/test?deep=${deep}`,{method:'POST'}),
   testHermesConfig:()=>request<{ok:boolean;message:string}>('/settings/llm/test-hermes',{method:'POST'}),
+  testDshConfig:()=>request<{ok:boolean;message:string;reasoning?:string}>('/settings/llm/test-dsh',{method:'POST'}),
   gitConfig:()=>request<GitConfiguration>('/settings/git'),
   saveGitConfig:(data:unknown)=>request<GitConfiguration>('/settings/git',{method:'PUT',body:JSON.stringify(data)}),
   testGitConfig:()=>request<{ok:boolean;message:string}>('/settings/git/test',{method:'POST'}),
@@ -106,6 +107,7 @@ export const api={
   researchProject:(id:string)=>request<ResearchProject>('/research/'+id),
   researchMessages:(id:string)=>request<ResearchMessage[]>(`/research/${id}/messages`),
   sendResearchMessage:(id:string,content:string)=>request<ResearchMessage[]>(`/research/${id}/messages`,{method:'POST',body:JSON.stringify({content})}),
+  runDshPipeline:(id:string,content:string)=>request<{ok:boolean;strategy_name?:string;final_summary?:string;candidate?:any;review?:any;backtest?:any;robustness?:any}>(`/research/${id}/dsh/run`,{method:'POST',body:JSON.stringify({content})}),
   researchStrategy:(id:string,strategyName?:string)=>{
     const qs=strategyName?`?strategy_name=${encodeURIComponent(strategyName)}`:''
     return request<{ok:boolean;strategy_name?:string;code?:string;error?:string}>(`/research/${id}/strategy${qs}`)
@@ -138,5 +140,6 @@ export const api={
   confirmRun:(id:string,data?:{ignore_missing_data?:boolean})=>request<Run>('/backtests/'+id+'/confirm',{method:'POST',body:JSON.stringify(data??{})}),
   cancelRun:(id:string)=>request<Run>('/backtests/'+id+'/cancel',{method:'POST'}),
   checkBacktestCatalog:(data:{symbols:string[];timeframes:string[];start_date:string;end_date:string;venue?:string;catalog_path?:string|null})=>request<import('./types').CatalogCheckResponse>('/backtests/check-catalog',{method:'POST',body:JSON.stringify(data)}),
+  dashboardStats:()=>request<import('./types').DashboardStats>('/dashboard/stats'),
 }
 
