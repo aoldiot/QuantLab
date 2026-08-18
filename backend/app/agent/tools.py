@@ -22,7 +22,11 @@ from ..models import BacktestRun, ResearchProject, RunStatus, Strategy, Strategy
 from ..runner import execute_backtest
 from ..strategy_contract import load_manifest, sanitize_strategy_slug, validate_parameters
 from ..strategy_files import _path, save_strategy_code, STRATEGY_DIR
-from .strategy_verifier import verify_strategy_file, VerificationResult
+from .strategy_verifier import (
+    extract_python_strategy_code,
+    verify_strategy_file,
+    VerificationResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -654,13 +658,7 @@ async def write_strategy_code(
             db_config=cfg,
         )
 
-        code_match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", content)
-        if code_match:
-            extracted_code = code_match.group(1).strip()
-        elif "class " in content and "Strategy" in content:
-            extracted_code = content.strip()
-        else:
-            extracted_code = ""
+        extracted_code = extract_python_strategy_code(content)
 
         if extracted_code:
             eval_file.write_text(extracted_code, encoding="utf-8")
@@ -924,12 +922,15 @@ async def execute_backtest_tool(
 
 def get_strategy_code_tool(strategy_name: str) -> dict[str, Any]:
     """Retrieve the Python code of a strategy."""
-    strategy_name = strategy_name.strip().lower()
-    p = _path(strategy_name)
+    clean_name = strategy_name.strip().lower().replace("-", "_")
+    try:
+        p = _path(clean_name)
+    except Exception as e:
+        return {"ok": False, "error": f"策略名称不合法或不存在: {e}"}
     if not p.exists():
-        return {"ok": False, "error": f"策略文件不存在：{strategy_name}.py"}
+        return {"ok": False, "error": f"策略文件不存在：{clean_name}.py"}
     code = p.read_text(encoding="utf-8")
-    return {"ok": True, "strategy_name": strategy_name, "code": code}
+    return {"ok": True, "strategy_name": clean_name, "code": code}
 
 
 def get_available_data_tool() -> dict[str, Any]:

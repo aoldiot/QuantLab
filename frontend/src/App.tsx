@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import {
   BarChart3,
   BrainCircuit,
   Database,
+  FileDown,
   FlaskConical,
   Gauge,
   Layers3,
@@ -13,6 +15,7 @@ import {
 import { Link, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import ProtectedRoute from './ProtectedRoute';
+import ExportModal from './ExportModal';
 import Dashboard from './pages/Dashboard';
 import Strategies from './pages/Strategies';
 import StrategyDetail from './pages/StrategyDetail';
@@ -47,6 +50,7 @@ function Placeholder({ title }: { title: string }) {
 function MainLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   const handleLogout = async () => {
     await logout();
@@ -69,6 +73,15 @@ function MainLayout() {
           ))}
         </div>
         <div className="nav-user-actions">
+          <button
+            type="button"
+            className="nav-export-btn"
+            onClick={() => setExportModalOpen(true)}
+            title="导出策略研究记录与 DSH 调试日志"
+          >
+            <FileDown size={13} />
+            <span>导出日志</span>
+          </button>
           <div className="nav-user-badge">
             <UserIcon size={13} />
             <span>{user || '用户'}</span>
@@ -84,6 +97,7 @@ function MainLayout() {
           </button>
         </div>
       </nav>
+      <ExportModal isOpen={exportModalOpen} onClose={() => setExportModalOpen(false)} />
       <main>
         <Routes>
           <Route path="/" element={<Dashboard />} />

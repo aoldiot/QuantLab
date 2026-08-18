@@ -138,7 +138,49 @@ export const api={
   runLogs:(id:string)=>request<import('./types').BacktestLogsResponse>('/backtests/'+id+'/logs'),
   confirmRun:(id:string,data?:{ignore_missing_data?:boolean})=>request<Run>('/backtests/'+id+'/confirm',{method:'POST',body:JSON.stringify(data??{})}),
   cancelRun:(id:string)=>request<Run>('/backtests/'+id+'/cancel',{method:'POST'}),
+  exportResearchUrl:(id:string,format:'markdown'|'json'='markdown')=>{
+    const token = localStorage.getItem(AUTH_TOKEN_KEY)
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
+    const base = getApiBaseUrl()
+    return `${base}/research/${id}/export?format=${format}${tokenParam}`
+  },
+  downloadResearchExport:async(id:string,format:'markdown'|'json'='markdown',filename?:string)=>{
+    const token = localStorage.getItem(AUTH_TOKEN_KEY)
+    const authHeaders: Record<string, string> = {}
+    if (token) {
+      authHeaders['Authorization'] = `Bearer ${token}`
+    }
+    const base = getApiBaseUrl()
+    const r = await fetch(`${base}/research/${id}/export?format=${format}`, {
+      headers: authHeaders,
+    })
+    if (!r.ok) {
+      throw new Error('导出日志失败')
+    }
+    const blob = await r.blob()
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    // Try getting filename from Content-Disposition header
+    const disposition = r.headers.get('Content-Disposition')
+    let downloadName = filename
+    if (!downloadName && disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^";]+)"?/)
+      if (match && match[1]) {
+        downloadName = match[1]
+      }
+    }
+    if (!downloadName) {
+      downloadName = `quantlab_research_${id}_${Date.now()}.${format === 'markdown' ? 'md' : 'json'}`
+    }
+    a.download = downloadName
+    document.body.appendChild(a)
+    a.click()
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(a)
+  },
   checkBacktestCatalog:(data:{symbols:string[];timeframes:string[];start_date:string;end_date:string;venue?:string;catalog_path?:string|null})=>request<import('./types').CatalogCheckResponse>('/backtests/check-catalog',{method:'POST',body:JSON.stringify(data)}),
   dashboardStats:()=>request<import('./types').DashboardStats>('/dashboard/stats'),
 }
+
 

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ from .agent.tools import (
     write_strategy_code,
     write_strategy_with_claude,
 )
+from .agent.strategy_verifier import extract_python_strategy_code
 from .config import settings
 from .db import get_db, SessionLocal
 from .models import (
@@ -1505,34 +1506,230 @@ async def get_project_strategy(
     ).all()
 
     for m in asst_msgs:
-        code_blocks = re.findall(r"```python\s*(.*?)\s*```", m.content, re.DOTALL)
-        for code_block in code_blocks:
-            if (
-                len(code_block) > 500
-                and "STRATEGY_MANIFEST" in code_block
-                and "StrategyConfig" in code_block
-                and "calculate_indicators" in code_block
-                and "Strategy" in code_block
-            ):
-                slug_match = re.search(r'slug\s*=\s*["\']([a-zA-Z0-9_\-]+)["\']', code_block)
-                derived_slug = sanitize_strategy_slug(slug_match.group(1)) if slug_match else "custom_strategy"
-                try:
-                    ast.parse(code_block)
-                    save_strategy_code(derived_slug, code_block)
-                    strat_rec = await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
-                    if strat_rec and strat_rec[0] and not project.strategy_id:
-                        project.strategy_id = strat_rec[0].id
-                        project.updated_at = datetime.now(UTC)
-                        await db.commit()
-                    return {
-                        "ok": True,
-                        "strategy_name": derived_slug,
-                        "code": code_block,
-                    }
-                except Exception:
-                    pass
+        code_block = extract_python_strategy_code(m.content)
+        if (
+            len(code_block) > 200
+            and "STRATEGY_MANIFEST" in code_block
+            and "StrategyConfig" in code_block
+            and "calculate_indicators" in code_block
+            and "Strategy" in code_block
+        ):
+            slug_match = re.search(r'slug\s*=\s*["\']([a-zA-Z0-9_\-]+)["\']', code_block)
+            derived_slug = sanitize_strategy_slug(slug_match.group(1)) if slug_match else "custom_strategy"
+            try:
+                ast.parse(code_block)
+                save_strategy_code(derived_slug, code_block)
+                strat_rec = await ensure_strategy_db_record(derived_slug, db, project_id=project.id)
+                if strat_rec and strat_rec[0] and not project.strategy_id:
+                    project.strategy_id = strat_rec[0].id
+                    project.updated_at = datetime.now(UTC)
+                    await db.commit()
+                return {
+                    "ok": True,
+                    "strategy_name": derived_slug,
+                    "code": code_block,
+                }
+            except Exception:
+                pass
 
     return {"ok": False, "message": "尚未生成策略代码"}
+
+
+@router.get("/{project_id}/export")
+async def export_research_project(
+    project_id: str,
+    format: str = "markdown",
+    db: AsyncSession = Depends(get_db),
+):
+    """Export complete research dialogue, DSH prompts, reasoning, tool calls, sandbox logs, and strategy code."""
+    project = await _project(project_id, db)
+
+    # 1. Fetch messages
+    messages_rows = (
+        await db.scalars(
+            select(ResearchMessage)
+            .where(ResearchMessage.project_id == project.id)
+            .order_by(ResearchMessage.created_at)
+        )
+    ).all()
+
+    # 2. Fetch DSH events
+    from .dsh.runtime import dsh_runtime
+    dsh_events = [e.to_dict() for e in dsh_runtime.get_session_events(f"dsh_project_{project.id}")]
+
+    # 3. Fetch writing log
+    writing_log = get_writing_log_tool(project.id)
+
+    # 4. Fetch Strategy Code
+    strategy_info = await get_project_strategy(project.id, db=db)
+    strategy_slug = strategy_info.get("strategy_name") if isinstance(strategy_info, dict) else None
+    strategy_code = strategy_info.get("code") if isinstance(strategy_info, dict) else ""
+
+    # 5. Fetch Backtests
+    backtests_data = await list_project_backtests(project.id, db=db)
+
+    clean_title = sanitize_strategy_slug(project.title) or "research"
+    now_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+
+    if format.lower() == "json":
+        data = {
+            "project": _project_out(project),
+            "system_prompt": RESEARCH_INSTRUCTIONS.strip(),
+            "messages": [_message_out(m) for m in messages_rows],
+            "dsh_events": dsh_events,
+            "writing_log": writing_log,
+            "strategy": {
+                "slug": strategy_slug,
+                "code": strategy_code,
+            },
+            "backtests": backtests_data,
+            "exported_at": datetime.now(UTC).isoformat(),
+        }
+        filename = f"quantlab_research_{clean_title}_{now_str}.json"
+        content_bytes = json.dumps(data, indent=2, ensure_ascii=False, default=str).encode("utf-8")
+        return Response(
+            content=content_bytes,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # Default format: Markdown
+    md_lines = []
+    md_lines.append("# 量化策略全流程研究与 DSH 调试审计报告")
+    md_lines.append("")
+    md_lines.append(f"- **策略/项目名称**: {project.title}")
+    md_lines.append(f"- **研究项目 ID**: `{project.id}`")
+    md_lines.append(f"- **创建时间**: {project.created_at.isoformat() if project.created_at else ''}")
+    md_lines.append(f"- **当前状态**: `{project.status.value}`")
+    md_lines.append(f"- **关联策略标识**: `{strategy_slug or '未关联'}`")
+    md_lines.append(f"- **导出时间**: {datetime.now(UTC).isoformat()}")
+    md_lines.append("")
+    md_lines.append("---")
+    md_lines.append("")
+    md_lines.append("## 一、 策略研究假设与背景")
+    md_lines.append(project.original_idea or "（未填写初始量化假设）")
+    if project.conclusion_summary:
+        md_lines.append(f"\n- **研究结论评估**: {project.conclusion_summary}")
+    if project.conclusion_next_step:
+        md_lines.append(f"- **下一步推进建议**: {project.conclusion_next_step}")
+    md_lines.append("")
+    md_lines.append("---")
+    md_lines.append("")
+    md_lines.append("## 二、 DSH 首席量化架构师系统提示词 (System Prompt)")
+    md_lines.append("```markdown")
+    md_lines.append(RESEARCH_INSTRUCTIONS.strip())
+    md_lines.append("```")
+    md_lines.append("")
+    md_lines.append("---")
+    md_lines.append("")
+    md_lines.append("## 三、 完整对话研讨、提示词与工具调用流")
+    md_lines.append("")
+
+    for idx, msg in enumerate(messages_rows, 1):
+        ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S") if msg.created_at else ""
+        role_label = msg.role.upper()
+        if msg.role == "assistant":
+            role_label = "ASSISTANT (Quant Lead)"
+        elif msg.role == "tool":
+            role_label = "TOOL RESULT"
+        elif msg.message_type == "tool_call":
+            role_label = "TOOL CALL"
+
+        md_lines.append(f"### [{idx}] {ts} · `{role_label}`")
+
+        # Check reasoning / CoT
+        reasoning = ""
+        if isinstance(msg.metadata_json, dict):
+            reasoning = msg.metadata_json.get("reasoning") or msg.metadata_json.get("thought") or ""
+        if reasoning:
+            md_lines.append("> **DeepSeek CoT 思考链 (Reasoning)**:")
+            for r_line in reasoning.splitlines():
+                md_lines.append(f"> {r_line}")
+            md_lines.append("")
+
+        # Message content / tool call details
+        if msg.message_type == "tool_call" and isinstance(msg.metadata_json, dict):
+            tool_name = msg.metadata_json.get("tool_name") or msg.metadata_json.get("name") or "unknown_tool"
+            tool_args = msg.metadata_json.get("arguments") or msg.metadata_json.get("args") or {}
+            md_lines.append(f"**调用工具**: `{tool_name}`")
+            md_lines.append("```json")
+            md_lines.append(json.dumps(tool_args, indent=2, ensure_ascii=False))
+            md_lines.append("```")
+        elif msg.message_type in ("tool_result", "tool_output") and isinstance(msg.metadata_json, dict):
+            tool_name = msg.metadata_json.get("tool_name") or "tool"
+            tool_res = msg.metadata_json.get("result") or msg.content
+            md_lines.append(f"**工具执行结果 (`{tool_name}`)**:")
+            if isinstance(tool_res, (dict, list)):
+                md_lines.append("```json")
+                md_lines.append(json.dumps(tool_res, indent=2, ensure_ascii=False))
+                md_lines.append("```")
+            else:
+                md_lines.append(str(tool_res))
+        else:
+            md_lines.append(msg.content)
+
+        md_lines.append("")
+
+    md_lines.append("---")
+    md_lines.append("")
+    md_lines.append("## 四、 4 级 Pre-Flight 运行期沙盒与自愈日志")
+    if writing_log:
+        status_text = writing_log.get("status", "IDLE")
+        progress = writing_log.get("progress", 0)
+        logs = writing_log.get("logs", "")
+        steps = writing_log.get("steps") or []
+        md_lines.append(f"- **沙盒状态**: `{status_text}` ({progress}%)")
+        if steps:
+            md_lines.append("- **4 级验证步骤结果**:")
+            for s in steps:
+                ok_mark = "✅ PASS" if s.get("ok") else "❌ FAIL"
+                md_lines.append(f"  - `[{s.get('level')}]` {s.get('name')}: **{ok_mark}** - {s.get('message')}")
+        md_lines.append("")
+        if logs:
+            md_lines.append("**执行日志输出**:")
+            md_lines.append("```text")
+            md_lines.append(logs)
+            md_lines.append("```")
+    else:
+        md_lines.append("（暂无沙盒执行日志）")
+    md_lines.append("")
+
+    md_lines.append("---")
+    md_lines.append("")
+    md_lines.append("## 五、 生成的 NautilusTrader 策略源码")
+    if strategy_code:
+        md_lines.append("```python")
+        md_lines.append(strategy_code)
+        md_lines.append("```")
+    else:
+        md_lines.append("（尚未生成或持久化策略代码）")
+    md_lines.append("")
+
+    md_lines.append("---")
+    md_lines.append("")
+    md_lines.append("## 六、 回测历史与绩效归因记录")
+    if backtests_data:
+        md_lines.append("| 回测名称 | 状态 | 收益率 (Return) | 夏普比率 (Sharpe) | 最大回撤 (MaxDD) | 胜率 (WinRate) | 创建时间 |")
+        md_lines.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+        for b in backtests_data:
+            metrics = b.get("metrics") or {}
+            ret = f"{metrics.get('total_return_pct', metrics.get('return_pct', 0)):.2f}%" if isinstance(metrics.get('total_return_pct') or metrics.get('return_pct'), (int, float)) else "-"
+            sharpe = f"{metrics.get('sharpe_ratio', 0):.2f}" if isinstance(metrics.get('sharpe_ratio'), (int, float)) else "-"
+            max_dd = f"{metrics.get('max_drawdown_pct', 0):.2f}%" if isinstance(metrics.get('max_drawdown_pct'), (int, float)) else "-"
+            win_rate = f"{metrics.get('win_rate_pct', 0):.2f}%" if isinstance(metrics.get('win_rate_pct'), (int, float)) else "-"
+            c_time = str(b.get("created_at") or "")[:19]
+            md_lines.append(f"| {b.get('name')} | `{b.get('status')}` | {ret} | {sharpe} | {max_dd} | {win_rate} | {c_time} |")
+    else:
+        md_lines.append("（暂无回测记录）")
+    md_lines.append("")
+
+    filename = f"quantlab_research_{clean_title}_{now_str}.md"
+    content_bytes = "\n".join(md_lines).encode("utf-8")
+    return Response(
+        content=content_bytes,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{project_id}/archive")

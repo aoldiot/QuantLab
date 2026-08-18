@@ -17,6 +17,9 @@ import {
   Database,
   ExternalLink,
   FileCode,
+  FileDown,
+  FileJson,
+  FileText,
   FlaskConical,
   LineChart,
   Loader2,
@@ -1701,6 +1704,23 @@ export default function Research(){
   const[drawerTab,setDrawerTab]=useState<'code'|'backtests'|'writer_log'>('code')
   const[expandedTools,setExpandedTools]=useState<Record<string,boolean>>({})
 
+  // Export log state
+  const[exportMenuOpen,setExportMenuOpen]=useState(false)
+  const[exportingLog,setExportingLog]=useState(false)
+
+  const handleExportLog = async (fmt: 'markdown' | 'json') => {
+    if (!project) return
+    setExportingLog(true)
+    setExportMenuOpen(false)
+    try {
+      await api.downloadResearchExport(project.id, fmt)
+    } catch (err: any) {
+      alert(err?.message || '导出日志失败')
+    } finally {
+      setExportingLog(false)
+    }
+  }
+
   const timeline=useRef<HTMLDivElement|null>(null)
   const textareaRef=useRef<HTMLTextAreaElement|null>(null)
   const isComposingRef=useRef(false)
@@ -2385,6 +2405,38 @@ export default function Research(){
                   >
                     <FlaskConical size={14}/>回测列表 ({runs.length})
                   </button>
+                  <div className="header-export-container" style={{ position: 'relative' }}>
+                    <button
+                      className="button tool-btn header-export-btn"
+                      title="导出策略研究记录与 DSH 调试日志"
+                      onClick={() => setExportMenuOpen((o) => !o)}
+                      disabled={exportingLog}
+                    >
+                      {exportingLog ? <Loader2 size={14} className="spin text-cyan" /> : <FileDown size={14} />}
+                      导出日志
+                      <ChevronDown size={11} />
+                    </button>
+                    {exportMenuOpen && (
+                      <div className="header-export-dropdown">
+                        <button
+                          type="button"
+                          className="header-export-item"
+                          onClick={() => handleExportLog('markdown')}
+                        >
+                          <FileText size={13} className="text-cyan" />
+                          <span>导出 Markdown 报告 (.md)</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="header-export-item"
+                          onClick={() => handleExportLog('json')}
+                        >
+                          <FileJson size={13} className="text-amber" />
+                          <span>导出 JSON 原始数据 (.json)</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <button className="button icon-btn" title={project.status==='ARCHIVED'?'重新打开':'归档研究'} onClick={handleArchive}>
                     {project.status==='ARCHIVED'?<RotateCcw size={14}/>:<Archive size={14}/>}
                   </button>

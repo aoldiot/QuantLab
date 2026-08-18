@@ -117,6 +117,81 @@ def verify_strategy_source(source_code: str, strategy_name: str = "temp_strategy
             pass
 
 
+def extract_python_strategy_code(content: str) -> str:
+    """Robustly extract the full Python strategy code block from LLM output.
+
+    Handles:
+    1. Multiple code blocks (e.g. ```json ..., ```markdown ..., ```python ...) by scoring blocks
+       based on Python strategy keywords (STRATEGY_MANIFEST, StrategyConfig, calculate_indicators, Strategy).
+    2. Code fence info strings (e.g. ```python:backend/app/strategies/xxx.py, ```python filename=xxx.py).
+    3. Accidental leading artifacts or header tags on line 1 (e.g. :path/to/file.py, python:path).
+    4. Naked code without code fence blocks.
+    """
+    if not content or not content.strip():
+        return ""
+
+    import re
+
+    # 1. Regex to match all fenced blocks: ```[info_string]\n[code_content]```
+    fenced_pattern = r"```([^\n]*)\n([\s\S]*?)```"
+    matches = re.findall(fenced_pattern, content)
+
+    candidates: list[tuple[int, str]] = []
+    for info, raw_code in matches:
+        info_lower = info.strip().lower()
+        cleaned_code = raw_code.strip()
+
+        # If the first line starts with a colon or info tag (e.g. ":backend/app/...", "filename=...", "python:...")
+        lines = cleaned_code.splitlines()
+        while lines and (
+            lines[0].startswith(":")
+            or lines[0].startswith("python:")
+            or lines[0].startswith("filename=")
+            or (lines[0].startswith("[") and lines[0].endswith("]") and ".py" in lines[0])
+        ):
+            lines = lines[1:]
+        cleaned_code = "\n".join(lines).strip()
+
+        # Score candidate
+        score = 0
+        if "STRATEGY_MANIFEST" in cleaned_code:
+            score += 10
+        if "StrategyConfig" in cleaned_code:
+            score += 5
+        if "Strategy" in cleaned_code:
+            score += 5
+        if "calculate_indicators" in cleaned_code:
+            score += 5
+        if any(lang in info_lower for lang in ("python", "py")):
+            score += 3
+        if "from decimal import Decimal" in cleaned_code or "import pandas as pd" in cleaned_code:
+            score += 2
+
+        candidates.append((score, cleaned_code))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_code = candidates[0]
+        if best_score > 0:
+            return best_code
+
+    # 2. Fallback if no clean ``` ``` was closed, but content contains Strategy definitions
+    if "class " in content and "Strategy" in content and "STRATEGY_MANIFEST" in content:
+        naked = re.sub(r"^```[^\n]*\n", "", content.strip(), flags=re.MULTILINE)
+        naked = re.sub(r"\n```$", "", naked, flags=re.MULTILINE)
+        lines = naked.splitlines()
+        while lines and (
+            lines[0].startswith(":")
+            or lines[0].startswith("python:")
+            or lines[0].startswith("filename=")
+            or (lines[0].startswith("[") and lines[0].endswith("]") and ".py" in lines[0])
+        ):
+            lines = lines[1:]
+        return "\n".join(lines).strip()
+
+    return ""
+
+
 def _check_nautilus_ast_rules(tree: ast.AST) -> list[str]:
     """Check for forbidden or commonly hallucinated NautilusTrader API calls."""
     errors: list[str] = []

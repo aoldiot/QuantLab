@@ -628,4 +628,84 @@ def test_bollinger_mean_reversion_strategy_passes_verification():
     assert all(step.ok for step in res.steps)
 
 
+def test_extract_python_strategy_code_with_various_llm_markdown_artifacts():
+    from app.agent.strategy_verifier import extract_python_strategy_code
+    import ast
+
+    # Case 1: Markdown with colon path in info string (e.g. ```python:backend/app/strategies/my_strat.py)
+    llm_output_1 = """这里是修改后的代码：
+```python:backend/app/strategies/multi_filter_breakout.py
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+```
+希望对您有帮助！"""
+    code1 = extract_python_strategy_code(llm_output_1)
+    assert not code1.startswith(":")
+    assert not code1.startswith("python:")
+    assert code1.startswith("from decimal import Decimal")
+    ast.parse(code1)
+
+    # Case 2: Markdown with json block before python block
+    llm_output_2 = """```json
+{"parameters": {"fast": 12}}
+```
+```python
+from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return df
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+```"""
+    code2 = extract_python_strategy_code(llm_output_2)
+    assert not code2.startswith("json")
+    assert code2.startswith("from decimal import Decimal")
+    ast.parse(code2)
+
+
+
 

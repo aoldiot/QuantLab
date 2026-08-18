@@ -32,7 +32,7 @@ from ..models import (
     StrategyVersion,
 )
 from ..schemas import AgentApplyRequest, AgentSessionCreate, BacktestCreate
-from .strategy_verifier import verify_strategy_file
+from .strategy_verifier import extract_python_strategy_code, verify_strategy_file
 
 logger = logging.getLogger(__name__)
 
@@ -351,15 +351,12 @@ async def run_prompt(session: AgentSession, prompt: str) -> None:
             )
 
             # Extract python code
-            code_match = re.search(r"```(?:python)?\s*([\s\S]*?)\s*```", content)
-            if code_match:
-                extracted_code = code_match.group(1).strip()
-                summary_text = re.sub(r"```(?:python)?\s*[\s\S]*?\s*```", "", content).strip()
-            elif "class " in content and "Strategy" in content:
-                extracted_code = content.strip()
-                summary_text = "策略代码已生成并保存。"
+            extracted_code = extract_python_strategy_code(content)
+            if extracted_code:
+                summary_text = re.sub(r"```[^\n]*\n[\s\S]*?```", "", content).strip()
+                if not summary_text:
+                    summary_text = "策略代码已生成并保存。"
             else:
-                extracted_code = ""
                 summary_text = content.strip()
 
             if extracted_code and session.permission_mode != "plan":
