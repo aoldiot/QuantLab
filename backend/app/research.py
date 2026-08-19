@@ -91,11 +91,15 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
 
       from nautilus_trader.config import StrategyConfig
       from nautilus_trader.model.data import Bar, BarType
-      from nautilus_trader.model.enums import OrderSide, PositionSide
       from nautilus_trader.model.identifiers import InstrumentId
-      from nautilus_trader.model.objects import Quantity
-      from nautilus_trader.trading.strategy import Strategy
+      from app.strategy_base import QuantLabStrategy
       from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
+      from app.quant.indicators import (
+          IncWilderADX,
+          SqueezeStateTracker,
+          ATRTrailingStopTracker,
+          calc_standard_indicators,
+      )
 
 
       class BtcEmaAtrConfig(StrategyConfig, frozen=True):
@@ -107,74 +111,34 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
           trade_size: Decimal = Decimal("0.01")
 
 
-      class BtcEmaAtrStrategy(Strategy):
-          def __init__(self, config: BtcEmaAtrConfig) -> None:
-              super().__init__(config)
-              self.instrument_id = config.instrument_id
-              self.bar_type = config.bar_type
-              self.fast_period = config.fast_period
-              self.slow_period = config.slow_period
-              self.atr_period = config.atr_period
-              self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
-              self.bars: list[Bar] = []
-
-          def on_start(self) -> None:
-              self.instrument = self.cache.instrument(self.instrument_id)
-              self.subscribe_bars(self.bar_type)
-
+      class BtcEmaAtrStrategy(QuantLabStrategy):
           def on_bar(self, bar: Bar) -> None:
-              self.bars.append(bar)
-              if len(self.bars) < max(self.slow_period, self.atr_period) + 5:
+              super().on_bar(bar)
+              if len(self.bars) < max(self.config.slow_period, self.config.atr_period) + 5:
                   return
 
-              closes = pd.Series([b.close.as_double() for b in self.bars])
-              fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
-              slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
-              prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
-              prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
+              closes = self.get_close_series()
+              fast_ma = closes.ewm(span=self.config.fast_period, adjust=False).mean().iloc[-1]
+              slow_ma = closes.ewm(span=self.config.slow_period, adjust=False).mean().iloc[-1]
+              prev_fast = closes.ewm(span=self.config.fast_period, adjust=False).mean().iloc[-2]
+              prev_slow = closes.ewm(span=self.config.slow_period, adjust=False).mean().iloc[-2]
 
-              is_long = self.portfolio.is_net_long(self.instrument_id)
-              is_flat = self.portfolio.is_flat(self.instrument_id)
+              # 自动探针记录指标供前端图表采集
+              self.record("fast_ma", fast_ma)
+              self.record("slow_ma", slow_ma)
 
-              # 金叉做多
-              if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
-                  if not is_flat:
-                      self.close_all_positions(self.instrument_id)
-                  qty = self.instrument.make_qty(self.config.trade_size) if hasattr(self, "instrument") and self.instrument else self.trade_size
-                  order = self.order_factory.market(
-                      instrument_id=self.instrument_id,
-                      order_side=OrderSide.BUY,
-                      quantity=qty,
-                  )
-                  self.submit_order(order)
+              # 金叉做多（自动处理精度、工厂和提交）
+              if prev_fast <= prev_slow and fast_ma > slow_ma and not self.is_long():
+                  self.buy_market(trade_size=self.config.trade_size)
               # 死叉平多
-              elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
-                  self.close_all_positions(self.instrument_id)
+              elif prev_fast >= prev_slow and fast_ma < slow_ma and self.is_long():
+                  self.close_position()
 
-          def on_stop(self) -> None:
-              self.unsubscribe_bars(self.bar_type)
 
 
       def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
-          result = df.copy()
-          fast_p = int(parameters.get("fast_period", 12))
-          slow_p = int(parameters.get("slow_period", 26))
-          atr_p = int(parameters.get("atr_period", 14))
-
-          close = pd.to_numeric(result["close"], errors="coerce")
-          high = pd.to_numeric(result["high"], errors="coerce")
-          low = pd.to_numeric(result["low"], errors="coerce")
-
-          result["fast_ma"] = close.ewm(span=fast_p, adjust=False).mean().bfill()
-          result["slow_ma"] = close.ewm(span=slow_p, adjust=False).mean().bfill()
-
-          prev_close = close.shift(1)
-          tr1 = high - low
-          tr2 = (high - prev_close).abs()
-          tr3 = (low - prev_close).abs()
-          tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-          result["atr"] = tr.rolling(window=atr_p).mean().bfill()
-          return result
+          # 推荐直接调用内置向量化计算，自动补齐 fast_ma, slow_ma, atr, adx, bb, kc 等并消除 NaN
+          return calc_standard_indicators(df, parameters)
 
 
       STRATEGY_MANIFEST = StrategyManifest(
@@ -241,6 +205,8 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
      - ❌ 严禁调用 `self.close_position(self.instrument_id)`（平仓标的必须使用 `self.close_all_positions(self.instrument_id)`）。
      - ❌ 严禁调用 `self.instrument.round_quantity(...)`（正确方法为 `self.instrument.make_qty(...)`，直接返回规范精度 Quantity）。
      - ❌ 严禁向订单 `quantity` 传递裸 float/int（必须使用 `Quantity` 或 `self.instrument.make_qty(...)`）。
+     - ✅ 强烈推荐使用 `from app.quant.indicators import IncWilderADX, SqueezeStateTracker, ATRTrailingStopTracker, calc_standard_indicators`，大幅减少代码量并杜绝 Token 截断！
+
 
    - 【策略代码生成与规范】：必须由 Claude Agent SDK 编写策略文件并确保通过 4 级 Pre-Flight 运行期沙盒校验。
    - 代码编写完成后，向用户汇报策略编写完成情况与 4 级验证摘要，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。

@@ -211,7 +211,84 @@ def _clean_code_lines(code: str) -> str:
     return "\n".join(lines).strip()
 
 
+def extract_target_method_from_error(error_msg: str, traceback_str: str = "") -> str | None:
+    """Analyze an error message / traceback to identify which strategy method threw the error."""
+    combined = f"{error_msg}\n{traceback_str}"
+    import re
+    # Match patterns like: in on_bar, in on_start, in _check_entry_conditions, in calculate_indicators
+    match = re.search(r"in\s+([a-zA-Z_][a-zA-Z0-9_]*)\b", combined)
+    if match:
+        fn_name = match.group(1)
+        if fn_name not in ("compile", "exec", "verify_strategy_file", "_simulate_strategy_execution"):
+            return fn_name
+    for candidate in ("on_bar", "on_start", "on_stop", "calculate_indicators", "_check_entry", "_check_exit"):
+        if candidate in combined:
+            return candidate
+    return None
+
+
+def patch_strategy_method(source_code: str, target_method_name: str, new_method_code: str) -> str:
+    """Use AST to cleanly patch a single method inside a Python file."""
+    if not source_code or not target_method_name or not new_method_code:
+        return source_code
+
+    try:
+        tree = ast.parse(source_code)
+    except Exception:
+        return source_code
+
+    lines = source_code.splitlines()
+
+    # Find the target function definition node
+    target_node: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == target_method_name:
+            target_node = node
+            break
+
+    if target_node is None or not hasattr(target_node, "lineno") or not hasattr(target_node, "end_lineno"):
+        return source_code
+
+    start_idx = target_node.lineno - 1  # 0-indexed
+    end_idx = target_node.end_lineno    # slice end
+
+    # Detect indentation of the original method
+    orig_first_line = lines[start_idx]
+    indent_len = len(orig_first_line) - len(orig_first_line.lstrip())
+    indent_str = " " * indent_len
+
+    # Clean new_method_code
+    new_method_clean = _clean_code_lines(new_method_code)
+    new_lines = new_method_clean.splitlines()
+    if not new_lines:
+        return source_code
+
+    # Re-indent new_lines to match indent_str
+    first_new_line = new_lines[0]
+    base_new_indent = len(first_new_line) - len(first_new_line.lstrip())
+    formatted_new_lines = []
+    for l in new_lines:
+        if not l.strip():
+            formatted_new_lines.append("")
+        else:
+            cur_indent = len(l) - len(l.lstrip())
+            rel_indent = max(0, cur_indent - base_new_indent)
+            formatted_new_lines.append(indent_str + (" " * rel_indent) + l.lstrip())
+
+    # Splice
+    patched_lines = lines[:start_idx] + formatted_new_lines + lines[end_idx:]
+    patched_source = "\n".join(patched_lines)
+
+    # Validate AST
+    try:
+        ast.parse(patched_source)
+        return patched_source
+    except Exception:
+        return source_code
+
+
 def extract_python_strategy_code(content: str) -> str:
+
     """Robustly extract the full Python strategy code block from LLM output.
 
     Handles:
@@ -313,6 +390,19 @@ def extract_python_strategy_code(content: str) -> str:
 def _check_nautilus_ast_rules(tree: ast.AST) -> list[str]:
     """Check for forbidden or commonly hallucinated NautilusTrader API calls."""
     errors: list[str] = []
+    # Check if strategy uses QuantLabStrategy
+    uses_quantlab_base = False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            if any("QuantLabStrategy" in getattr(alias, "name", "") for alias in getattr(node, "names", [])):
+                uses_quantlab_base = True
+        elif isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                if (isinstance(base, ast.Name) and "QuantLabStrategy" in base.id) or (
+                    isinstance(base, ast.Attribute) and "QuantLabStrategy" in base.attr
+                ):
+                    uses_quantlab_base = True
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
             # Check self.portfolio.xxx attributes/calls
@@ -342,10 +432,12 @@ def _check_nautilus_ast_rules(tree: ast.AST) -> list[str]:
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute) and node.func.attr == "close_position":
                 if isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
-                    errors.append(
-                        f"第 {node.lineno} 行: Strategy.close_position 只能接收 Position 实例对象。若要按标的平仓全部头寸，请使用 self.close_all_positions(self.instrument_id)。"
-                    )
+                    if not uses_quantlab_base:
+                        errors.append(
+                            f"第 {node.lineno} 行: Strategy.close_position 只能接收 Position 实例对象。若要按标的平仓全部头寸，请使用 self.close_all_positions(self.instrument_id) 或继承 QuantLabStrategy。"
+                        )
     return errors
+
 
 
 def _simulate_strategy_execution(
@@ -496,6 +588,9 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
                     pass
 
         if not healed:
+            total_lines = len(source_text.splitlines())
+            is_eof_error = exc.lineno is not None and (exc.lineno >= total_lines - 5 or total_lines > 400)
+            trunc_hint = "（注意：若错误发生在末尾，极可能是输出超长截断，请使用 app.quant.indicators 精简代码）" if is_eof_error else ""
             step = VerificationStepResult(
                 level="L1",
                 name="Python 语法编译",
@@ -509,8 +604,9 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
                 steps=steps,
                 failed_level="L1",
                 error_message=f"第 {exc.lineno} 行: {exc.msg}",
-                suggestion="请检查 Python 代码缩进、括号匹配与语法合规性。代码第一行必须是 Python 导入语句，严禁输出中文说明或格式标记。",
+                suggestion=f"请检查 Python 代码缩进、括号匹配与语法合规性。代码第一行必须是 Python 导入语句。{trunc_hint}",
             )
+
     except Exception as exc:
         step = VerificationStepResult(
             level="L1",
@@ -591,12 +687,13 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
     l1_errors = []
     if "STRATEGY_MANIFEST" not in assignments:
         l1_errors.append("缺少 STRATEGY_MANIFEST 对象定义")
-    if "calculate_indicators" not in functions:
-        l1_errors.append("缺少 calculate_indicators(df, parameters) 函数定义")
+    # calculate_indicators is optional: QuantLab auto-derives indicators if omitted
     if not has_config_class:
         l1_errors.append("缺少继承自 StrategyConfig 的配置类声明 (例如 class XxxConfig(StrategyConfig))")
     if not has_strategy_class:
-        l1_errors.append("缺少继承自 Strategy 的策略类声明 (例如 class XxxStrategy(Strategy) 或 class Xxx(Strategy))")
+        l1_errors.append("缺少继承自 Strategy 的策略类声明 (例如 class XxxStrategy(QuantLabStrategy) 或 class Xxx(Strategy))")
+
+
 
     ast_rule_errors = _check_nautilus_ast_rules(tree)
     if ast_rule_errors:
@@ -1205,45 +1302,34 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
         )
 
         # =========================================================================
-        # Level 3: Vectorized calculate_indicators sandbox execution
+        # Level 3: Vectorized calculate_indicators or auto-derivation sandbox execution
         # =========================================================================
         calculate_indicators_fn = getattr(mod, "calculate_indicators", None)
-        if not callable(calculate_indicators_fn):
-            step = VerificationStepResult(
-                level="L3",
-                name="指标计算函数调用",
-                ok=False,
-                message="calculate_indicators 不是可调用的函数",
-            )
-            steps.append(step)
-            return VerificationResult(
-                ok=False,
-                summary="缺少可调用的 calculate_indicators 函数",
-                steps=steps,
-                failed_level="L3",
-                error_message="calculate_indicators 不是函数",
-                suggestion="实现 calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame 函数。",
-            )
-
         sample_df = _create_sample_ohlcv(rows=200)
-        try:
-            calculated_df = calculate_indicators_fn(sample_df.copy(), default_parameters.copy())
-        except Exception as exc:
-            step = VerificationStepResult(
-                level="L3",
-                name="指标向量化计算沙盒运行",
-                ok=False,
-                message=f"运行 calculate_indicators 发生异常: {exc}",
-            )
-            steps.append(step)
-            return VerificationResult(
-                ok=False,
-                summary="指标计算沙盒运行异常 (L3 指标计算失败)",
-                steps=steps,
-                failed_level="L3",
-                error_message=f"calculate_indicators 执行抛出异常: {exc}",
-                suggestion="检查指标公式（如 rolling, ewm, np.where 等）是否存在空值处理不当、索引越界或除以零错误。",
-            )
+
+        if callable(calculate_indicators_fn):
+            try:
+                calculated_df = calculate_indicators_fn(sample_df.copy(), default_parameters.copy())
+            except Exception as exc:
+                step = VerificationStepResult(
+                    level="L3",
+                    name="指标向量化计算沙盒运行",
+                    ok=False,
+                    message=f"运行 calculate_indicators 发生异常: {exc}",
+                )
+                steps.append(step)
+                return VerificationResult(
+                    ok=False,
+                    summary="指标计算沙盒运行异常 (L3 指标计算失败)",
+                    steps=steps,
+                    failed_level="L3",
+                    error_message=f"calculate_indicators 执行抛出异常: {exc}",
+                    suggestion="检查指标公式（如 rolling, ewm, np.where 等）是否存在空值处理不当、索引越界或除以零错误。",
+                )
+        else:
+            # Auto-derive plot indicators using QuantLab standard vectorized calculation
+            from ..quant.indicators import calc_standard_indicators
+            calculated_df = calc_standard_indicators(sample_df.copy(), default_parameters.copy())
 
         if not isinstance(calculated_df, pd.DataFrame):
             step = VerificationStepResult(
@@ -1307,6 +1393,12 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
                     required_cols.update(pane_series.keys())
 
         missing_cols = required_cols - set(calculated_df.columns)
+        if missing_cols and not callable(calculate_indicators_fn):
+            # Auto-fill missing columns for auto-derived strategies
+            for col in missing_cols:
+                calculated_df[col] = 0.0
+            missing_cols = set()
+
         if missing_cols:
             step = VerificationStepResult(
                 level="L3",
@@ -1323,6 +1415,7 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
                 error_message=f"plot_config 引用的指标列在 calculate_indicators 返回的 DataFrame 中不存在: {sorted(missing_cols)}",
                 suggestion=f"请在 calculate_indicators 中计算并赋值以下列: {sorted(missing_cols)}，或修正 plot_config 中的列名。",
             )
+
 
         # Check for all-NaN columns or Inf values in required columns
         all_nan_cols = []

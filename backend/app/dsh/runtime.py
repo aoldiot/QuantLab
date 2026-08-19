@@ -54,6 +54,7 @@ class DSHRuntimeManager:
     def __init__(self):
         self._sessions: dict[str, list[AgentEvent]] = {}
         self._active_status: dict[str, dict[str, Any]] = {}
+        self.last_call_meta: dict[str, Any] = {}
 
     def get_session_events(self, session_id: str) -> list[AgentEvent]:
         return self._sessions.get(session_id, [])
@@ -82,6 +83,9 @@ class DSHRuntimeManager:
             "updated_at": datetime.now(UTC).isoformat(),
         }
 
+    def reset_status(self, session_id: str) -> None:
+        self._active_status.pop(session_id, None)
+
     def get_status(self, session_id: str) -> dict[str, Any]:
         return self._active_status.get(
             session_id,
@@ -103,7 +107,8 @@ class DSHRuntimeManager:
         tools: list[dict[str, Any]] | None = None,
         db_config: LlmConfiguration | None = None,
         temperature: float = 0.2,
-    ) -> tuple[str, list[dict[str, Any]], str]:
+        return_meta: bool = False,
+    ) -> tuple[str, list[dict[str, Any]], str] | tuple[str, list[dict[str, Any]], str, dict[str, Any]]:
         """Execute a completion with function tool-calling against configured LLM backend."""
         # 1. Resolve LLM configuration
         base_url = "https://api.deepseek.com/v1"
@@ -185,13 +190,30 @@ class DSHRuntimeManager:
                         continue
                     if response.status_code != 200:
                         logger.warning("LLM API (%s) 返回非200状态码: %s %s", target_url, response.status_code, response.text)
-                        return f"[API Error {response.status_code}]: {response.text}", [], ""
+                        err_text = f"[API Error {response.status_code}]: {response.text}"
+                        meta_err = {"finish_reason": "error", "is_truncated": False, "error": err_text}
+                        self.last_call_meta = meta_err
+                        if return_meta:
+                            return err_text, [], "", meta_err
+                        return err_text, [], ""
 
                     data = response.json()
                     choice = data.get("choices", [{}])[0]
                     msg = choice.get("message", {})
                     content = msg.get("content") or ""
                     reasoning = msg.get("reasoning_content") or ""
+
+                    # Extract finish_reason & truncation status
+                    finish_reason = choice.get("finish_reason") or data.get("stop_reason") or ""
+                    is_truncated = finish_reason in ("length", "max_tokens")
+                    usage = data.get("usage", {})
+                    meta = {
+                        "finish_reason": finish_reason,
+                        "is_truncated": is_truncated,
+                        "model": model,
+                        "usage": usage,
+                    }
+                    self.last_call_meta = meta
 
                     # Check Anthropic message format if present
                     if not content and "content" in data and isinstance(data["content"], list):
@@ -234,6 +256,8 @@ class DSHRuntimeManager:
                                     "arguments": block.get("input", {}),
                                 })
 
+                    if return_meta:
+                        return content, tool_calls, reasoning, meta
                     return content, tool_calls, reasoning
 
             except Exception as exc:
@@ -241,7 +265,12 @@ class DSHRuntimeManager:
                 logger.warning("调用 LLM 服务 (%s) 遇到异常: %s", target_url, exc)
                 continue
 
+        err_meta = {"finish_reason": "error", "is_truncated": False, "error": last_error}
+        self.last_call_meta = err_meta
+        if return_meta:
+            return last_error or "[LLM Exception]: 连接失败", [], "", err_meta
         return last_error or "[LLM Exception]: 连接失败", [], ""
+
 
 
 dsh_runtime = DSHRuntimeManager()

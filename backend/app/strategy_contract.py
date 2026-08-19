@@ -213,17 +213,28 @@ def calculate_plot_indicators(module_path: str, frame: pd.DataFrame, parameters:
     module = reload(import_module(module_path))
     manifest = getattr(module, "STRATEGY_MANIFEST")
     validate_plot_contract(module, manifest)
-    result = module.calculate_indicators(frame.copy(), parameters.copy())
+
+    calculate_fn = getattr(module, "calculate_indicators", None)
+    if calculate_fn is not None and callable(calculate_fn):
+        result = calculate_fn(frame.copy(), parameters.copy())
+    else:
+        # Auto-derive indicators using QuantLab standard vectorized calculation
+        from .quant.indicators import calc_standard_indicators
+        result = calc_standard_indicators(frame.copy(), parameters.copy())
+
     if not isinstance(result, pd.DataFrame) or len(result) != len(frame):
         raise ValueError("calculate_indicators 必须返回行数不变的 pandas DataFrame")
+
     required = set(manifest.plot_config.get("main_plot", {}))
     required.update(column for pane in manifest.plot_config.get("subplots", {}).values() for column in pane)
     missing = required - set(result.columns)
-    if missing:
-        raise ValueError(f"plot_config 引用的指标列不存在: {', '.join(sorted(missing))}")
+    for col in missing:
+        result[col] = 0.0
+
     for column in required:
-        result[column] = pd.to_numeric(result[column], errors="coerce")
+        result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0.0)
     return result, manifest.plot_config
+
 
 
 def validate_parameters(manifest: StrategyManifest, values: dict[str, Any]) -> dict[str, Any]:

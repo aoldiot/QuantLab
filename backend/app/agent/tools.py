@@ -23,25 +23,25 @@ from ..runner import execute_backtest
 from ..strategy_contract import load_manifest, sanitize_strategy_slug, validate_parameters
 from ..strategy_files import _path, save_strategy_code, STRATEGY_DIR
 from .strategy_verifier import (
-    extract_python_strategy_code,
-    verify_strategy_file,
     VerificationResult,
+    extract_python_strategy_code,
+    extract_target_method_from_error,
+    patch_strategy_method,
+    verify_strategy_file,
 )
 
 logger = logging.getLogger(__name__)
 
 NAUTILUS_DEVELOPER_GUIDE = """
-【NautilusTrader 策略开发核心速查表与规范】
+【QuantLab & NautilusTrader 策略开发核心速查表与规范】
 1. 策略命名与文件规范（严禁使用简陋的 Strategy/Custom/CustomStrategy）：
 - 必须根据策略的核心量化逻辑、指标、标的与交易模式命名为具体的蛇形英文标识符 (slug)，例如：
   - `volatility_squeeze_breakout`（波动率挤压突破策略）
   - `btc_ema_atr_trend`（BTC EMA ATR 趋势策略）
   - `eth_rsi_mean_reversion`（ETH RSI 均值回归策略）
-  - `bollinger_momentum_breakout`（布林带动量突破策略）
-- 严禁直接使用空泛的 "Strategy", "MyStrategy", "CustomStrategy", "TradingStrategy"！
 - 策略配置类与策略类必须采用 PascalCase 风格且与标识符对应：例如 `VolatilitySqueezeBreakoutConfig` 与 `VolatilitySqueezeBreakoutStrategy`。
 
-2. 依赖与模块导入规范：
+2. 依赖与模块导入推荐（强烈推荐使用 QuantLabStrategy 极简高阶基类）：
 ```python
 from decimal import Decimal
 import pandas as pd
@@ -49,14 +49,18 @@ import numpy as np
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar, BarType
-from nautilus_trader.model.enums import OrderSide, PositionSide
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.objects import Quantity
-from nautilus_trader.trading.strategy import Strategy
+from app.strategy_base import QuantLabStrategy
 from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
+from app.quant.indicators import (
+    IncWilderADX,
+    SqueezeStateTracker,
+    ATRTrailingStopTracker,
+    calc_standard_indicators,
+)
 ```
 
-3. 核心四大导出结构规范（严禁遗漏任何一项）：
+3. 核心导出结构规范（极简结构，行数仅需 100~200 行）：
 - 结构 1：`StrategyConfig` 子类（继承自 `StrategyConfig, frozen=True`）：
   ```python
   class XxxConfig(StrategyConfig, frozen=True):
@@ -67,71 +71,40 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
       atr_period: int = 14
       trade_size: Decimal = Decimal("0.01")
   ```
-- 结构 2：`Strategy` 子类（继承自 `Strategy`）：
+- 结构 2：`Strategy` 子类（继承自 `QuantLabStrategy`）：
   ```python
-  class XxxStrategy(Strategy):
-      def __init__(self, config: XxxConfig) -> None:
-          super().__init__(config)
-          self.instrument_id = config.instrument_id
-          self.bar_type = config.bar_type
-          self.fast_period = config.fast_period
-          self.slow_period = config.slow_period
-          self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
-          self.bars: list[Bar] = []
-
-      def on_start(self) -> None:
-          self.instrument = self.cache.instrument(self.instrument_id)
-          self.subscribe_bars(self.bar_type)
-
+  class XxxStrategy(QuantLabStrategy):
       def on_bar(self, bar: Bar) -> None:
-          self.bars.append(bar)
-          if len(self.bars) < self.slow_period + 5:
+          # 1. 提取 Pandas 序列进行快速计算
+          closes = self.get_close_series()
+          if len(closes) < self.config.slow_period + 5:
               return
 
-          closes = pd.Series([b.close.as_double() for b in self.bars])
-          fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
-          slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
-          prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
-          prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
+          fast_ma = closes.ewm(span=self.config.fast_period, adjust=False).mean().iloc[-1]
+          slow_ma = closes.ewm(span=self.config.slow_period, adjust=False).mean().iloc[-1]
+          
+          # 2. 自动探针记录指标（前端图表自动采集，无需手写 calculate_indicators 向量化重算）
+          self.record("fast_ma", fast_ma)
+          self.record("slow_ma", slow_ma)
 
-          is_long = self.portfolio.is_net_long(self.instrument_id)
-          is_flat = self.portfolio.is_flat(self.instrument_id)
-
-          if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
-              if not is_flat:
-                  self.close_all_positions(self.instrument_id)
-              qty = self.instrument.make_qty(self.config.trade_size) if hasattr(self, "instrument") and self.instrument else self.trade_size
-              order = self.order_factory.market(
-                  instrument_id=self.instrument_id,
-                  order_side=OrderSide.BUY,
-                  quantity=qty,
-              )
-              self.submit_order(order)
-          elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
-              self.close_all_positions(self.instrument_id)
-
-      def on_stop(self) -> None:
-          self.unsubscribe_bars(self.bar_type)
+          # 3. 高阶原子交易接口（自动处理精度、工厂和提交）
+          if fast_ma > slow_ma and not self.is_long():
+              self.buy_market(trade_size=self.config.trade_size)
+          elif fast_ma < slow_ma and self.is_long():
+              self.close_position()
   ```
-- 结构 3：`calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame`：
-  - 必须返回行数完全相同的 DataFrame（严禁 dropna）。
-  - **CRITICAL：必须计算并在返回的 DataFrame 中包含 `plot_config` 中声明的所有指标列！**
-  - 对 rolling/ewm 计算产生的头部 NaN，必须使用 `.bfill()` 或 `.fillna(0.0)` 填充，保证预热后无 NaN：
+- 结构 3：`calculate_indicators`（**完全可选 Optional**）：
+  - 继承 `QuantLabStrategy` 时，无需手写复杂的 `calculate_indicators`，系统会自动推导图表指标。
+  - 如需显式声明，仅需一行代码：
   ```python
   def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
-      result = df.copy()
-      fast_p = int(parameters.get("fast_period", 12))
-      slow_p = int(parameters.get("slow_period", 26))
-      close = pd.to_numeric(result["close"], errors="coerce")
-      result["fast_ma"] = close.ewm(span=fast_p, adjust=False).mean().bfill()
-      result["slow_ma"] = close.ewm(span=slow_p, adjust=False).mean().bfill()
-      return result
+      return calc_standard_indicators(df, parameters)
   ```
 - 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：
   - `strategy_path="app.strategies.{slug}:XxxStrategy"`（必须带 `app.strategies.{slug}:` 前缀）
   - `config_path="app.strategies.{slug}:XxxConfig"`（必须带 `app.strategies.{slug}:` 前缀）
-  - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`，且必须满足 `minimum <= default <= maximum`。
-  - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`（`primary_timeframe` 必须包含在 `timeframes` 中）。
+  - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`。
+  - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`。
   - `plot_config` 必须是双层嵌套字典规范：
     ```python
     plot_config = {
@@ -141,7 +114,6 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
             "slow_ma": {"type": "line", "color": "#00aaff"},
         },
         "subplots": {
-            # 第一层为面板标题，第二层为 DataFrame 指标列名
             "ATR": {
                 "atr": {"type": "line", "color": "#ff55ff"}
             }
@@ -150,13 +122,12 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
     ```
 
 4. NautilusTrader API 常见禁忌与标准用法（CRITICAL）：
-- ❌ 严禁调用 `self.portfolio.account_balance()`（Portfolio 无此方法！如需获取账户净值请使用 `self.portfolio.equity(self.instrument_id.venue)`）。
-- ❌ 严禁调用 `self.portfolio.is_net_flat(...)`（正确方法为 `self.portfolio.is_flat(self.instrument_id)`）。
-- ❌ 严禁调用 `self.portfolio.position(...)`（正确方法为 `self.portfolio.net_position(self.instrument_id)` 或 `self.portfolio.is_flat(...)`）。
-- ❌ 严禁调用 `self.close_position(self.instrument_id)`（平仓标的必须使用 `self.close_all_positions(self.instrument_id)`）。
-- ❌ 严禁调用 `self.instrument.round_quantity(...)`（正确方法为 `self.instrument.make_qty(...)`，直接返回规范精度 Quantity）。
-- ❌ 严禁向订单 `quantity` 传递裸 float/int（必须使用 `Quantity` 或 `self.instrument.make_qty(...)`）。
+- ❌ 严禁调用 `self.portfolio.account_balance()`（如需获取账户净值请使用 `self.get_equity()` 或 `self.portfolio.equity(venue)`）。
+- ❌ 严禁调用 `self.portfolio.is_net_flat(...)`（直接使用 `self.is_flat()` 或 `self.portfolio.is_flat(...)`）。
+- ❌ 严禁向订单 `quantity` 传递裸 float/int（直接使用 `self.buy_market()` 或 `self.make_qty(...)`）。
 """
+
+
 
 TOOL_DEFINITIONS = [
     {
@@ -587,13 +558,15 @@ async def write_strategy_code(
         except Exception:
             pass
 
-    max_self_heal_turns = 12
+    max_self_heal_turns = 5
     eval_file = work_dir / f"{strategy_name}_staging.py"
     if existing_code:
         eval_file.write_text(existing_code, encoding="utf-8")
 
     v_res = None
     stdout_lines: list[str] = []
+    history_lengths: list[int] = []
+    history_errors: list[str] = []
 
     from app.dsh.runtime import dsh_runtime
 
@@ -620,8 +593,8 @@ async def write_strategy_code(
 1. 只输出包含完整策略代码的单一 Python 代码块（```python ... ```）。
 2. 代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），严禁在代码块开头输出任何中文说明、路径标签（如 :backend/app/... 或 filename=...）或重复的 ```python 标记！
 3. 必须包含四大核心导出声明：`{class_prefix}Config`（继承自 StrategyConfig）、`{class_prefix}Strategy`（继承自 Strategy）、`calculate_indicators` 与 `STRATEGY_MANIFEST`。
-4. 必须确保 `calculate_indicators` 计算了 `plot_config` 中声明的全部指标列，且使用 `.bfill().fillna(0.0)` 处理头部 NaN。
-5. 确保所有指标和信号严格向量化与事件驱动计算正确，杜绝未来函数。
+4. 强烈推荐使用 `from app.quant.indicators import ...` 复用内置指标库，保持代码精简紧凑（建议控制在 250 行以内），杜绝 Token 截断。
+5. 必须确保 `calculate_indicators` 计算了 `plot_config` 中声明的全部指标列（可直接调用 `calc_standard_indicators(df, parameters)`）。
 6. 不要输出任何多余的寒暄或解释，直接输出可编译执行的完整 Python 代码。
 """
     current_dsh_prompt = dsh_base_prompt
@@ -633,45 +606,35 @@ async def write_strategy_code(
                 heal_progress,
                 log_line=f"[SELF-HEAL] 触发沙盒自愈修复 (第 {heal_turn} 轮)...",
             )
-            current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
-            current_dsh_prompt = f"""
-【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level if v_res else 'L1'})】
-你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒检测到以下错误：
 
-- 错误级别: {v_res.failed_level if v_res else 'L1'}
-- 错误摘要: {v_res.summary if v_res else '代码缺失或校验失败'}
-- 错误详情: {v_res.error_message if v_res else '文件缺失'}
-- 修复建议: {v_res.suggestion if v_res else '请生成完整的 NautilusTrader 策略代码'}
-
-当前暂存代码内容：
-```python
-{current_code[:30000]}
-```
-
-【修复任务（CRITICAL）】
-1. 请根据报错信息针对性修复语法、缩进、括号匹配与 API 契约问题。
-2. 保证代码结构紧凑清晰，完整输出全部代码直至 `STRATEGY_MANIFEST` 结尾，严禁在末尾或函数中途截断！
-3. 代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），直接输出单一标准的 ```python ... ``` 代码块，严禁输出任何文字前缀或路径标签。
-"""
         else:
             _update_status("正在生成策略代码...", 30, log_line=f"启动策略编写: target={strategy_name}.py")
 
         logger.info("代码生成引擎开始生成策略 %s (turn=%d)...", strategy_name, heal_turn)
-        heal_temperature = min(0.6, 0.2 + 0.05 * heal_turn) if heal_turn > 0 else 0.2
-        content, _, reasoning = await dsh_runtime.call_llm(
+        heal_temperature = min(0.5, 0.15 + 0.08 * heal_turn) if heal_turn > 0 else 0.15
+        content, _, reasoning, meta = await dsh_runtime.call_llm(
             messages=[{"role": "user", "content": current_dsh_prompt}],
             system_prompt="你是 QuantLab 首席量化策略架构师与代码开发专家。只输出符合 NautilusTrader 规范的完整 Python 代码块，第一行为导入语句。",
             db_config=cfg,
             temperature=heal_temperature,
+            return_meta=True,
         )
 
         extracted_code = extract_python_strategy_code(content)
+        code_len = len(extracted_code)
+        history_lengths.append(code_len)
+
+        is_truncated = bool(
+            meta.get("is_truncated")
+            or meta.get("finish_reason") in ("length", "max_tokens")
+            or (code_len > 22000 and "STRATEGY_MANIFEST" not in extracted_code)
+        )
 
         if extracted_code:
             eval_file.write_text(extracted_code, encoding="utf-8")
-            stdout_lines.append(f"\n[生成代码字符数: {len(extracted_code)}]\n")
+            stdout_lines.append(f"\n[生成代码字符数: {code_len}]\n")
             with log_file.open("a", encoding="utf-8") as f:
-                f.write(f"\n[生成代码字符数: {len(extracted_code)}]\n")
+                f.write(f"\n[生成代码字符数: {code_len}]\n")
                 f.flush()
 
             _update_status(
@@ -687,6 +650,9 @@ async def write_strategy_code(
                     90,
                     log_line=f"[{mark} {step.level}] {step.name}: {step.message}",
                 )
+            err_sig = f"{v_res.failed_level}:{v_res.error_message}" if not v_res.ok else "OK"
+            history_errors.append(err_sig)
+
             if v_res.ok:
                 break
         else:
@@ -697,11 +663,84 @@ async def write_strategy_code(
                 error_message="未能从模型回复中提取到包含 Python 代码的代码块（```python ... ```）",
                 suggestion="请直接输出完整的 Python 策略代码，并用 ```python 和 ``` 代码块包裹。",
             )
+            history_errors.append("L1:no_code")
             _update_status(
                 "未能提取到 Python 代码块",
                 min(85, 45 + int(heal_turn * (40 / max_self_heal_turns))),
                 log_line="[ERROR] 模型回复中未包含有效的 Python 策略代码块 (```python ... ```)",
             )
+
+        # Check if we should prepare a self-healing prompt for the next turn
+        if heal_turn < max_self_heal_turns:
+            is_deadlock = (
+                len(history_lengths) >= 2
+                and abs(history_lengths[-1] - history_lengths[-2]) < 100
+                and len(history_errors) >= 2
+                and history_errors[-1] == history_errors[-2]
+            )
+
+            current_code = eval_file.read_text(encoding="utf-8") if eval_file.exists() else ""
+
+            if is_truncated or is_deadlock or ("STRATEGY_MANIFEST" not in current_code and code_len > 18000):
+                # Trigger Compact Refactoring Mode to break out of truncation / repetition loops
+                logger.warning(
+                    "策略 %s 触发紧凑重构模式 (truncated=%s, deadlock=%s, len=%d)",
+                    strategy_name,
+                    is_truncated,
+                    is_deadlock,
+                    code_len,
+                )
+                current_dsh_prompt = f"""
+【CRITICAL 警告：检测到代码输出超出 Token 上限被截断或陷入重复生成死循环】
+上一轮生成的代码长度为 {code_len} 字符，由于篇幅过长导致在末尾被强制截断或重复报错：
+- 错误级别: {v_res.failed_level if v_res else 'L1'}
+- 错误详情: {v_res.error_message if v_res else '代码截断未完成'}
+
+【强制紧凑重构模式 (Compact Refactoring Mode)】
+你必须立即执行以下重构，严格将代码行数控制在 250 行以内，杜绝 Token 溢出：
+1. 必须使用 QuantLab 内置通用指标与组件库（严禁在策略文件内重新手写 IncWilderADX、Squeeze 状态机或数学平滑公式）：
+```python
+from app.quant.indicators import (
+    IncWilderADX,
+    SqueezeStateTracker,
+    ATRTrailingStopTracker,
+    calc_standard_indicators,
+)
+```
+2. calculate_indicators 函数必须直接精简为：
+```python
+def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+    return calc_standard_indicators(df, parameters)
+```
+3. 移除所有冗长行内中文注释，合并多余的中间状态，精简参数列表。
+4. 只输出单一标准的 ```python ... ``` 代码块，确保完整输出直至 `STRATEGY_MANIFEST` 结尾！
+"""
+            else:
+                target_method = extract_target_method_from_error(v_res.error_message) if v_res else None
+                method_hint = f"\n- **定位出错方法**: `{target_method}`，请重点检查并修复该方法的实现。" if target_method else ""
+
+                # Normal targeted self-healing
+                current_dsh_prompt = f"""
+【QuantLab 策略 Pre-Flight 自动化验证沙盒未通过 ({v_res.failed_level if v_res else 'L1'})】
+你在编写 `backend/app/strategies/{strategy_name}.py` 时，沙盒检测到以下错误：
+
+- 错误级别: {v_res.failed_level if v_res else 'L1'}
+- 错误摘要: {v_res.summary if v_res else '代码缺失或校验失败'}
+- 错误详情: {v_res.error_message if v_res else '文件缺失'}{method_hint}
+- 修复建议: {v_res.suggestion if v_res else '请生成完整的 NautilusTrader 策略代码'}
+
+当前暂存代码片段：
+```python
+{current_code[:15000]}
+```
+
+【修复任务（CRITICAL）】
+1. 请根据报错信息针对性修复语法、缩进、括号匹配与 API 契约问题。
+2. 保持代码结构紧凑清晰，强烈推荐继承 `from app.strategy_base import QuantLabStrategy` 并复用 `from app.quant.indicators import ...`，无需手写繁琐的胶水代码。
+3. 代码第一行必须为 Python 导入语句（如 `from decimal import Decimal`），直接输出单一标准的 ```python ... ``` 代码块，严禁输出任何文字前缀或路径标签。
+"""
+
+
 
     if eval_file.exists() and v_res is None:
         v_res = verify_strategy_file(eval_file, strategy_name=strategy_name)

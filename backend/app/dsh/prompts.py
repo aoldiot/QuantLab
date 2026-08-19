@@ -22,13 +22,20 @@ import numpy as np
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, PositionSide
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.objects import Quantity
-from nautilus_trader.trading.strategy import Strategy
+from app.strategy_base import QuantLabStrategy
 from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
+from app.quant.indicators import (
+    IncWilderADX,
+    SqueezeStateTracker,
+    ATRTrailingStopTracker,
+    calc_standard_indicators,
+)
 ```
 
-3. 核心四大导出结构规范（严禁遗漏任何一项）：
+3. 核心导出结构规范（极简结构，行数仅需 100~200 行）：
 - 结构 1：`StrategyConfig` 子类（继承自 `StrategyConfig, frozen=True`）：
   ```python
   class XxxConfig(StrategyConfig, frozen=True):
@@ -39,71 +46,38 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
       atr_period: int = 14
       trade_size: Decimal = Decimal("0.01")
   ```
-- 结构 2：`Strategy` 子类（继承自 `Strategy`）：
+- 结构 2：`Strategy` 子类（继承自 `QuantLabStrategy`）：
   ```python
-  class XxxStrategy(Strategy):
-      def __init__(self, config: XxxConfig) -> None:
-          super().__init__(config)
-          self.instrument_id = config.instrument_id if isinstance(config.instrument_id, InstrumentId) else InstrumentId.from_str(str(config.instrument_id))
-          self.bar_type = config.bar_type if isinstance(config.bar_type, BarType) else BarType.from_str(str(config.bar_type))
-          self.fast_period = config.fast_period
-          self.slow_period = config.slow_period
-          self.trade_size = Quantity.from_str(str(config.trade_size)) if isinstance(config.trade_size, (Decimal, float, str)) else config.trade_size
-          self.bars: list[Bar] = []
-
-      def on_start(self) -> None:
-          self.instrument = self.cache.instrument(self.instrument_id)
-          self.subscribe_bars(self.bar_type)
-
+  class XxxStrategy(QuantLabStrategy):
       def on_bar(self, bar: Bar) -> None:
-          self.bars.append(bar)
-          if len(self.bars) < self.slow_period + 5:
+          closes = self.get_close_series()
+          if len(closes) < self.config.slow_period + 5:
               return
 
-          closes = pd.Series([b.close.as_double() for b in self.bars])
-          fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
-          slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
-          prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]
-          prev_slow = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-2]
+          fast_ma = closes.ewm(span=self.config.fast_period, adjust=False).mean().iloc[-1]
+          slow_ma = closes.ewm(span=self.config.slow_period, adjust=False).mean().iloc[-1]
+          
+          # 自动探针记录指标供前端图表采集（无需额外手写冗长向量化图表逻辑）
+          self.record("fast_ma", fast_ma)
+          self.record("slow_ma", slow_ma)
 
-          is_long = self.portfolio.is_net_long(self.instrument_id)
-          is_flat = self.portfolio.is_flat(self.instrument_id)
-
-          if prev_fast <= prev_slow and fast_ma > slow_ma and not is_long:
-              if not is_flat:
-                  self.close_all_positions(self.instrument_id)
-              qty = self.instrument.make_qty(self.config.trade_size) if hasattr(self, "instrument") and self.instrument else self.trade_size
-              order = self.order_factory.market(
-                  instrument_id=self.instrument_id,
-                  order_side=OrderSide.BUY,
-                  quantity=qty,
-              )
-              self.submit_order(order)
-          elif prev_fast >= prev_slow and fast_ma < slow_ma and is_long:
-              self.close_all_positions(self.instrument_id)
-
-      def on_stop(self) -> None:
-          self.unsubscribe_bars(self.bar_type)
+          if fast_ma > slow_ma and not self.is_long():
+              self.buy_market(trade_size=self.config.trade_size)
+          elif fast_ma < slow_ma and self.is_long():
+              self.close_position()
   ```
-- 结构 3：`calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame`：
-  - 必须返回行数完全相同的 DataFrame（严禁 dropna）。
-  - **CRITICAL：必须计算并在返回的 DataFrame 中包含 `plot_config` 中声明的所有指标列！**
-  - 对 rolling/ewm 计算产生的头部 NaN，必须使用 `.bfill()` 或 `.fillna(0.0)` 填充，保证预热后无 NaN：
+- 结构 3：`calculate_indicators`（可选）：
+  - 继承 `QuantLabStrategy` 时，无需手写复杂的 `calculate_indicators`，系统会自动推导图表指标。
+  - 如需显式声明，仅需一行代码：
   ```python
   def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
-      result = df.copy()
-      fast_p = int(parameters.get("fast_period", 12))
-      slow_p = int(parameters.get("slow_period", 26))
-      close = pd.to_numeric(result["close"], errors="coerce")
-      result["fast_ma"] = close.ewm(span=fast_p, adjust=False).mean().bfill()
-      result["slow_ma"] = close.ewm(span=slow_p, adjust=False).mean().bfill()
-      return result
+      return calc_standard_indicators(df, parameters)
   ```
 - 结构 4：`STRATEGY_MANIFEST = StrategyManifest(...)`：
   - `strategy_path="app.strategies.{slug}:XxxStrategy"`（必须带 `app.strategies.{slug}:` 前缀）
   - `config_path="app.strategies.{slug}:XxxConfig"`（必须带 `app.strategies.{slug}:` 前缀）
-  - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`，且必须满足 `minimum <= default <= maximum`。
-  - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`（`primary_timeframe` 必须包含在 `timeframes` 中）。
+  - `parameters`: 参数字典，每个参数必须为 `ParameterSpec(title="中文名", type="integer"|"number"|"boolean", default=..., minimum=..., maximum=...)`。
+  - `timeframes=("15m", "1h", "4h", "1d")`, `primary_timeframe="1h"`。
   - `plot_config` 必须是双层嵌套字典规范：
     ```python
     plot_config = {
@@ -113,13 +87,13 @@ from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode
             "slow_ma": {"type": "line", "color": "#00aaff"},
         },
         "subplots": {
-            # 第一层为面板标题，第二层为 DataFrame 指标列名
             "ATR": {
                 "atr": {"type": "line", "color": "#ff55ff"}
             }
         }
     }
     ```
+
 
 4. NautilusTrader API 常见禁忌与标准用法（CRITICAL）：
 - ❌ 严禁调用 `self.portfolio.account_balance()`（Portfolio 无此方法！如需获取账户净值请使用 `self.portfolio.equity(self.instrument_id.venue)`）。
