@@ -293,13 +293,6 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
     output_path = work_dir / "worker-result.json"
     payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    source_root = work_dir / "source"
-    snapshot_backend = source_root / "backend"
-    strategies_dir = snapshot_backend / "app" / "strategies"
-    strategies_dir.mkdir(parents=True, exist_ok=True)
-    (snapshot_backend / "app" / "__init__.py").write_text("", encoding="utf-8")
-    (strategies_dir / "__init__.py").write_text("", encoding="utf-8")
-
     module_entry = strategy.get("module") or strategy.get("entrypoint", "")
     module_name = module_entry.partition(":")[0].rsplit(".", 1)[-1]
     strategy_code = strategy.get("code")
@@ -314,20 +307,58 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
                           error_message=err_msg)
             return
 
-    (strategies_dir / f"{module_name}.py").write_text(strategy_code, encoding="utf-8")
-
-    # Copy platform runtime files into sandbox
     current_app = Path(__file__).resolve().parent
-    runtime_files = (
-        (current_app / "config.py", snapshot_backend / "app" / "config.py"),
-        (current_app / "strategy_contract.py", snapshot_backend / "app" / "strategy_contract.py"),
-        (current_app / "backtests" / "builder.py", snapshot_backend / "app" / "backtests" / "builder.py"),
-        (current_app / "backtests" / "worker.py", snapshot_backend / "app" / "backtests" / "worker.py"),
-        (current_app / "backtests" / "analytics.py", snapshot_backend / "app" / "backtests" / "analytics.py"),
-    )
-    for current_file, snapshot_file in runtime_files:
-        snapshot_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(current_file, snapshot_file)
+    if settings.backtest_sandbox:
+        # Isolated snapshot: strategy file already lives in backend/app/strategies/
+        # from write_strategy_code, so fall back to the on-disk copy instead of
+        # embedding code into the sandbox (keeps a single source of truth).
+        source_root = work_dir / "source"
+        snapshot_backend = source_root / "backend"
+        strategies_dir = snapshot_backend / "app" / "strategies"
+        strategies_dir.mkdir(parents=True, exist_ok=True)
+        (snapshot_backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+        (strategies_dir / "__init__.py").write_text("", encoding="utf-8")
+        (strategies_dir / f"{module_name}.py").write_text(strategy_code, encoding="utf-8")
+
+        # Copy platform runtime files into sandbox
+        runtime_files = (
+            (current_app / "config.py", snapshot_backend / "app" / "config.py"),
+            (current_app / "strategy_contract.py", snapshot_backend / "app" / "strategy_contract.py"),
+            (current_app / "strategy_base.py", snapshot_backend / "app" / "strategy_base.py"),
+            (current_app / "backtests" / "builder.py", snapshot_backend / "app" / "backtests" / "builder.py"),
+            (current_app / "backtests" / "worker.py", snapshot_backend / "app" / "backtests" / "worker.py"),
+            (current_app / "backtests" / "analytics.py", snapshot_backend / "app" / "backtests" / "analytics.py"),
+        )
+        # quant package: strategies import app.quant.indicators etc. at module load.
+        # The full app/quant/__init__.py eagerly imports DB-backed submodules
+        # (strategy_manager -> app.models), which do not belong in the isolated
+        # sandbox; ship a lazy __getattr__ shim instead so any submodule resolves.
+        quant_target = snapshot_backend / "app" / "quant"
+        quant_target.mkdir(parents=True, exist_ok=True)
+        for q_file in (current_app / "quant").glob("*.py"):
+            shutil.copy2(q_file, quant_target / q_file.name)
+        lazy_init = (
+            "import importlib\n"
+            "def __getattr__(name):\n"
+            "    import importlib\n"
+            "    return getattr(importlib.import_module('.' + name, __name__), name)\n"
+            "def __dir__():\n"
+            "    import pkgutil\n"
+            "    return sorted(getattr(m, '__name__') for m in pkgutil.iter_modules([__path__[0]]))\n"
+        )
+        (quant_target / "__init__.py").write_text(lazy_init, encoding="utf-8")
+        for current_file, snapshot_file in runtime_files:
+            snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(current_file, snapshot_file)
+        worker_cwd = str(snapshot_backend)
+        append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] 沙箱模式：工作区 {worker_cwd}")
+    else:
+        # Host mode: run the worker against the live backend so strategies that
+        # import app.quant / app.strategy_base / app.db resolve directly. The
+        # strategy file is already in backend/app/strategies/ on disk.
+        worker_cwd = str(current_app)
+        (current_app / "strategies").mkdir(parents=True, exist_ok=True)
+        append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] 主机模式：直接运行工作区 {worker_cwd}")
 
     append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] 启动 NautilusTrader BacktestNode 子进程...")
     await _update(run_id, stage="运行 NautilusTrader BacktestNode", progress=35)
@@ -337,7 +368,7 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
         "app.backtests.worker",
         str(payload_path),
         str(output_path),
-        cwd=str(snapshot_backend),
+        cwd=worker_cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )

@@ -6,8 +6,6 @@ in QuantLab to dramatically reduce boilerplate code and prevent token truncation
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
 
 import numpy as np
@@ -411,8 +409,23 @@ def calc_standard_indicators(
     result["donchian_mid"] = ((result["donchian_upper"] + result["donchian_lower"]) / 2.0).bfill().fillna(0.0)
 
     # Volume MA (20)
-    vol_p = int(p.get("vol_ma_period") or p.get("volume_period") or 20)
+    vol_p = int(p.get("vol_ma_period") or p.get("volume_period") or p.get("volume_avg_period") or 20)
     result["vol_ma"] = volume.rolling(window=vol_p, min_periods=1).mean().bfill().fillna(0.0)
+    result["volume_avg"] = result["vol_ma"]
+
+    # Common MA / Custom Aliases
+    ma20_p = int(p.get("ma20_period") or 20)
+    ma50_p = int(p.get("ma50_period") or 50)
+    result["ma20"] = close.rolling(window=ma20_p, min_periods=1).mean().bfill().fillna(0.0)
+    result["ma50"] = close.rolling(window=ma50_p, min_periods=1).mean().bfill().fillna(0.0)
+
+    # 4h BB Mid (approximation on 1h data using 4x period if not separately resampled)
+    bb4h_p = int(p.get("bb_4h_period") or 20)
+    result["bb_4h_mid"] = close.rolling(window=bb4h_p * 4, min_periods=1).mean().bfill().fillna(0.0)
+
+    # Runtime Execution Probe Placeholders (for safe plot_config resolution)
+    result["stop_loss_price"] = 0.0
+    result["trailing_stop_price"] = 0.0
 
     # RSI (14)
     rsi_p = int(p.get("rsi_period") or 14)

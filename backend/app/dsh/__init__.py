@@ -1,18 +1,29 @@
-"""DeepSeek Harness (DSH) Multi-Agent Orchestration Package.
+"""DeepSeek Harness (DSH) integration package.
 
-Provides agent roles (Quant Lead, Researcher, Developer, Reviewer) connected in a star topology,
-session management, and QuantLab deterministic tool calling bindings.
+The official DSH SDK spawns the bundled agent runtime per research project.
+The runtime loads the QuantLab domain-tools plugin (backend/dsh_runtime) which
+talks to FastAPI over the HTTP bridge (app.dsh.bridge). The engine
+(app.dsh.engine) drives turns, maps SDK events, and persists them.
 """
 
-from .orchestrator import DSHOrchestrator
-from .runtime import AgentEvent, DSHRuntimeManager, dsh_runtime
-from .tools import DSH_TOOL_DEFINITIONS, dispatch_dsh_tool_call
+from .bridge import router as bridge_router
+from .engine import (
+    cancel_turn,
+    get_live_session_events,
+    get_session_events,
+    get_status,
+    run_llm_connectivity_test,
+    run_turn,
+    shutdown_all,
+)
 
 __all__ = [
-    "DSH_TOOL_DEFINITIONS",
-    "AgentEvent",
-    "DSHOrchestrator",
-    "DSHRuntimeManager",
-    "dispatch_dsh_tool_call",
-    "dsh_runtime",
+    "bridge_router",
+    "cancel_turn",
+    "get_live_session_events",
+    "get_session_events",
+    "get_status",
+    "run_llm_connectivity_test",
+    "run_turn",
+    "shutdown_all",
 ]

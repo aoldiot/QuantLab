@@ -64,8 +64,12 @@ class ParameterSpec:
     max_value: float | None = None
     min: float | None = None
     max: float | None = None
+    name: str = ""
+    options: list[Any] | None = None
 
     def __post_init__(self):
+        if not self.title and self.name:
+            self.title = self.name
         if self.minimum is None:
             if self.min_value is not None:
                 self.minimum = self.min_value
@@ -142,6 +146,17 @@ class StrategyManifest:
                         object.__setattr__(self, "mode", StrategyMode(first.upper()))
                     except Exception:
                         pass
+
+        # Normalize parameters if passed as list or tuple of ParameterSpec
+        if isinstance(self.parameters, (list, tuple)):
+            converted_params: dict[str, Any] = {}
+            for i, p in enumerate(self.parameters):
+                if isinstance(p, ParameterSpec):
+                    k = getattr(p, "name", "") or getattr(p, "title", "") or f"param_{i}"
+                    converted_params[k] = p
+                else:
+                    converted_params[f"param_{i}"] = p
+            object.__setattr__(self, "parameters", converted_params)
 
         raw_slug = self.slug or self.strategy_id or self.id or "strategy"
         actual_slug = sanitize_strategy_slug(raw_slug)

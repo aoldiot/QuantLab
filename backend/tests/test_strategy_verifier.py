@@ -623,7 +623,71 @@ STRATEGY_MANIFEST = StrategyManifest(
 
 
 def test_bollinger_mean_reversion_strategy_passes_verification():
-    res = verify_strategy_file(Path("app/strategies/bollinger_mean_reversion.py"), strategy_name="bollinger_mean_reversion")
+    code = """from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from app.strategy_base import QuantLabStrategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+from app.quant.indicators import calc_standard_indicators
+
+class BollingerMeanReversionConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+    bb_period: int = 20
+    bb_std: float = 2.0
+    trade_size: Decimal = Decimal("0.01")
+
+class BollingerMeanReversionStrategy(QuantLabStrategy):
+    def on_bar(self, bar) -> None:
+        super().on_bar(bar)
+        closes = self.get_close_series()
+        if len(closes) < self.config.bb_period + 5:
+            return
+        ma = closes.rolling(self.config.bb_period).mean().iloc[-1]
+        std = closes.rolling(self.config.bb_period).std().iloc[-1]
+        upper = ma + self.config.bb_std * std
+        lower = ma - self.config.bb_std * std
+        self.record("bb_upper", upper)
+        self.record("bb_lower", lower)
+        self.record("bb_mid", ma)
+        if bar.close < lower and not self.is_long():
+            self.buy_market(trade_size=self.config.trade_size)
+        elif bar.close > upper and self.is_long():
+            self.close_position()
+
+def calculate_indicators(df: pd.DataFrame, parameters: dict) -> pd.DataFrame:
+    return calc_standard_indicators(df, parameters)
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="bollinger_mean_reversion",
+    name="Bollinger Mean Reversion",
+    version="1.0.0",
+    description="Bollinger mean reversion strategy",
+    category="mean_reversion",
+    strategy_path="app.strategies.bollinger_mean_reversion:BollingerMeanReversionStrategy",
+    config_path="app.strategies.bollinger_mean_reversion:BollingerMeanReversionConfig",
+    parameters={
+        "bb_period": ParameterSpec(title="布林带周期", type="integer", default=20, minimum=5, maximum=100),
+        "bb_std": ParameterSpec(title="布林带标准差", type="number", default=2.0, minimum=0.5, maximum=5.0),
+        "trade_size": ParameterSpec(title="下单数量", type="number", default=0.01, minimum=0.0001, maximum=100.0),
+    },
+    timeframes=("15m", "1h"),
+    primary_timeframe="1h",
+    plot_config={
+        "main_plot": {
+            "close": {"type": "line", "color": "#ffffff"},
+            "bb_upper": {"type": "line", "color": "#00aaff"},
+            "bb_lower": {"type": "line", "color": "#00aaff"},
+            "bb_mid": {"type": "line", "color": "#ffaa00"},
+        },
+        "subplots": {},
+    },
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+)
+"""
+    res = verify_strategy_source(code, strategy_name="bollinger_mean_reversion")
     assert res.ok is True
     assert all(step.ok for step in res.steps)
 
@@ -898,3 +962,74 @@ STRATEGY_MANIFEST = StrategyManifest(
     assert disk_content.startswith("from decimal import Decimal")
     # Verify it compiles cleanly
     compile(disk_content, str(saved_path), "exec")
+
+
+def test_invalid_nautilus_indicator_average_import_rejected():
+    code = """from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.trading.strategy import Strategy
+from nautilus_trader.indicators.average import ExponentialMovingAverage
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+
+class MyConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+
+class MyStrategy(Strategy):
+    def on_bar(self, bar):
+        pass
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="my_strat",
+    strategy_path="app.strategies.my_strat:MyStrategy",
+    config_path="app.strategies.my_strat:MyConfig",
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+"""
+    res = verify_strategy_source(code, strategy_name="my_strat")
+    assert res.ok is False
+    assert res.failed_level == "L1"
+    assert "nautilus_trader.indicators.average" in res.error_message
+
+
+def test_parameter_spec_name_and_list_parameters_auto_converted():
+    code = """from decimal import Decimal
+import pandas as pd
+from nautilus_trader.config import StrategyConfig
+from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
+from app.strategy_base import QuantLabStrategy
+from app.strategy_contract import ParameterSpec, StrategyManifest, StrategyMode
+from app.quant.indicators import calc_standard_indicators
+
+class CustomConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+    bar_type: BarType
+    fast_period: int = 12
+
+class CustomStrategy(QuantLabStrategy):
+    def on_bar(self, bar):
+        pass
+
+def calculate_indicators(df, p):
+    return calc_standard_indicators(df, p)
+
+STRATEGY_MANIFEST = StrategyManifest(
+    slug="custom_strat",
+    strategy_path="app.strategies.custom_strat:CustomStrategy",
+    config_path="app.strategies.custom_strat:CustomConfig",
+    parameters=[
+        ParameterSpec(name="fast_period", type="integer", default=12, minimum=2, maximum=100),
+    ],
+    mode=StrategyMode.SINGLE_INSTRUMENT,
+    plot_config={"main_plot": {}, "subplots": {}},
+)
+"""
+    res = verify_strategy_source(code, strategy_name="custom_strat")
+    assert res.ok is True
+    assert all(step.ok for step in res.steps)
+

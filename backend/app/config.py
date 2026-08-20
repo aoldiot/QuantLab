@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     artifact_root: Path = BACKEND_DIR / "data" / "backtests"
     catalog_path: Path = BACKEND_DIR / "catalog"
     backtest_timeout_seconds: int = 3600
+    backtest_sandbox: bool = True
     instrument_id_template: str = "{symbol}-PERP.{venue}"
     strategy_repo_path: Path = PROJECT_ROOT
     strategy_git_repo_path: Path = BACKEND_DIR / "data" / "strategy-repository"
@@ -26,6 +27,13 @@ class Settings(BaseSettings):
     auth_password: str = "admin123"
     auth_jwt_secret: str = "quantlab-secure-jwt-secret-key-2026-production"
     auth_token_expire_hours: int = 168
+    dsh_bridge_token: str = ""
+    dsh_max_tokens: int = 32768
+    dsh_bridge_url: str = "http://127.0.0.1:8000/api"
+    dsh_research_timeout_seconds: int = 180
+    dsh_research_max_tool_calls: int = 5
+    dsh_tool_result_max_chars: int = 8000
+    dsh_web_search_timeout_seconds: int = 12
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @field_validator("data_root", "artifact_root", "catalog_path", "strategy_git_repo_path", mode="after")

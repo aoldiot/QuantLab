@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
-import uuid
 from datetime import UTC, datetime
 
-import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,9 +79,6 @@ async def get_config(db: AsyncSession) -> LlmConfiguration:
     return config
 
 
-MAX_API_RETRIES = 5
-
-
 def format_llm_error(exc: Exception) -> str:
     err_str = str(exc).strip()
     hint = ""
@@ -137,21 +131,27 @@ async def save_llm_configuration(data: LlmConfigurationUpdate, db: AsyncSession 
 
 @router.post("/test")
 async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(get_db)):
+    """Verify connectivity through the DeepSeek Harness SDK (not raw HTTP)."""
     config = await get_config(db)
-    from app.dsh.runtime import dsh_runtime
-    
+
+    api_key = decrypt_api_key(config.api_key_encrypted) if config.api_key_encrypted else ""
+    base_url = (config.base_url or "").strip()
+    model = (config.model or "").strip()
     test_prompt = "请测试工具调用能力，回复 quantlab-agent-ok" if deep else "请只回复 quantlab-ok"
     try:
-        res_text, tool_calls, reasoning = await dsh_runtime.call_llm(
-            messages=[{"role": "user", "content": test_prompt}],
-            system_prompt="你是 QuantLab 测试助手。请简洁确认连接状态。",
-            db_config=config,
+        from app.dsh import engine as dsh_engine
+
+        ok, message = await dsh_engine.run_llm_connectivity_test(
+            base_url=base_url or None,
+            api_key=api_key or None,
+            model=model or None,
+            prompt=test_prompt,
         )
-        if "[API Error" in res_text or "[LLM Exception]" in res_text:
-            raise RuntimeError(res_text)
-            
+        if not ok:
+            raise RuntimeError(message)
+
         config.last_test_ok = True
-        config.last_test_message = res_text[:500] or "quantlab-ok"
+        config.last_test_message = message or "quantlab-ok"
     except Exception as exc:
         config.last_test_ok = False
         config.last_test_message = format_llm_error(exc)[:1000]

@@ -1,4 +1,4 @@
-import type {AgentSession,AgentStoredMessage,ChartData,GitConfiguration,LlmConfiguration,PermissionMode,ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile,StrategyGitStatus,StrategyVersion} from './types'
+import type {ChartData,GitConfiguration,LlmConfiguration,ResearchDecision,ResearchMessage,ResearchProject,ResearchRun,Run,Strategy,StrategyFile,StrategyGitStatus,StrategyVersion} from './types'
 export const AUTH_TOKEN_KEY = 'quantlab_token'
 export const AUTH_USER_KEY = 'quantlab_user'
 export function getApiBaseUrl(): string {
@@ -11,20 +11,6 @@ export function getApiBaseUrl(): string {
   return 'http://localhost:8000/api'
 }
 
-export const agentSocketUrl = (sessionId: string) => {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY)
-  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-  const base = getApiBaseUrl()
-  if (base.startsWith('http://')) {
-    return `${base.replace(/^http:\/\//, 'ws://')}/agent/ws/${sessionId}${tokenParam}`
-  }
-  if (base.startsWith('https://')) {
-    return `${base.replace(/^https:\/\//, 'wss://')}/agent/ws/${sessionId}${tokenParam}`
-  }
-  const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = typeof window !== 'undefined' ? window.location.host : 'localhost:8000'
-  return `${proto}//${host}${base}/agent/ws/${sessionId}${tokenParam}`
-}
 function errorText(detail:unknown):string{if(typeof detail==='string')return detail;if(Array.isArray(detail))return detail.map(x=>{if(typeof x==='object'&&x){const e=x as {loc?:unknown[];msg?:string};return `${e.loc?.slice(1).join('.')||'参数'}：${e.msg||'格式错误'}`}return String(x)}).join('；');if(detail&&typeof detail==='object')return JSON.stringify(detail);return '请求失败'}
 async function request<T>(path:string,init?:RequestInit):Promise<T>{
   const token = localStorage.getItem(AUTH_TOKEN_KEY)
@@ -85,34 +71,26 @@ export const api={
   saveGitConfig:(data:unknown)=>request<GitConfiguration>('/settings/git',{method:'PUT',body:JSON.stringify(data)}),
   testGitConfig:()=>request<{ok:boolean;message:string}>('/settings/git/test',{method:'POST'}),
   backupGit:()=>request<{ok:boolean;message:string;files_count:number;commit?:string}>('/settings/git/backup',{method:'POST'}),
-  createAgentSession:(client_id:string,strategy_name:string,permission_mode:PermissionMode)=>request<AgentSession>('/agent/sessions',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',strategy_name,permission_mode})}),
-  agentSessions:(clientId?:string,strategyName?:string)=>{
-    const qs=new URLSearchParams()
-    if(clientId)qs.set('client_id',clientId)
-    if(strategyName)qs.set('strategy_name',strategyName)
-    const qStr=qs.toString()
-    return request<AgentSession[]>(`/agent/sessions${qStr?'?'+qStr:''}`)
-  },
-  agentMessages:(sessionId:string)=>request<AgentStoredMessage[]>(`/agent/sessions/${sessionId}/messages`),
-  agentDiff:(sessionId:string)=>request<{diff:string;files:{path:string;additions:number;deletions:number}[];additions:number;deletions:number}>(`/agent/sessions/${sessionId}/diff`),
-  applyAgent:(sessionId:string)=>request<{applied:boolean;requires_publish_confirmation:boolean}>(`/agent/sessions/${sessionId}/apply`,{method:'POST',body:JSON.stringify({create_version:false})}),
-  rejectAgent:(sessionId:string)=>request<{rejected:boolean}>(`/agent/sessions/${sessionId}/reject`,{method:'POST'}),
-  cancelAgent:(sessionId:string)=>request<AgentSession>(`/agent/sessions/${sessionId}/cancel`,{method:'POST'}),
   researchProjects:(clientId?:string)=>{
     const qs=clientId?`?client_id=${encodeURIComponent(clientId)}`:''
     return request<ResearchProject[]>(`/research${qs}`)
   },
-  createResearch:(title:string,original_idea?:string,client_id?:string)=>request<ResearchProject>('/research',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',title,original_idea:original_idea||''})}),
+  createResearch:(title:string,original_idea?:string,client_id?:string,source_project_id?:string)=>request<ResearchProject>('/research',{method:'POST',body:JSON.stringify({client_id:client_id||'default_client',title,original_idea:original_idea||'',source_project_id:source_project_id||null})}),
   researchProject:(id:string)=>request<ResearchProject>('/research/'+id),
   researchMessages:(id:string)=>request<ResearchMessage[]>(`/research/${id}/messages`),
   sendResearchMessage:(id:string,content:string)=>request<ResearchMessage[]>(`/research/${id}/messages`,{method:'POST',body:JSON.stringify({content})}),
   runDshPipeline:(id:string,content:string)=>request<{ok:boolean;strategy_name?:string;final_summary?:string;candidate?:any;review?:any;backtest?:any;robustness?:any}>(`/research/${id}/dsh/run`,{method:'POST',body:JSON.stringify({content})}),
+  runDshAction:(id:string,data:import('./types').DshActionRequest)=>request<{ok:boolean;kicked_off:boolean;action:import('./types').DshAction;phase:string;message?:string;proposal?:Record<string,any>}>(`/research/${id}/dsh/action`,{method:'POST',body:JSON.stringify(data)}),
+  cancelDshPipeline:(id:string)=>request<{ok:boolean;message:string}>(`/research/${id}/dsh/cancel`,{method:'POST'}),
+  dshPending:(id:string)=>request<import('./types').DshApproval[]>(`/research/${id}/dsh/pending`),
+  dshApprove:(id:string,request_id:string,approved:boolean,feedback?:string)=>request<{ok:boolean;request_id:string;status:string;feedback:string}>(`/research/${id}/dsh/approve`,{method:'POST',body:JSON.stringify({request_id,approved,feedback:feedback||''})}),
   researchStrategy:(id:string,strategyName?:string)=>{
     const qs=strategyName?`?strategy_name=${encodeURIComponent(strategyName)}`:''
     return request<{ok:boolean;strategy_name?:string;code?:string;error?:string}>(`/research/${id}/strategy${qs}`)
   },
   researchWritingLog:(id:string)=>request<import('./types').ResearchWritingLog>(`/research/${id}/writing-log`),
   researchThinkingStatus:(id:string)=>request<import('./types').ResearchThinkingStatus>(`/research/${id}/thinking-status`),
+  dshLiveEvents:(id:string)=>request<import('./types').DshLiveEventsResponse>(`/research/${id}/dsh/events`),
   researchRuns:(id:string)=>request<ResearchRun[]>(`/research/${id}/backtests`),
   archiveResearch:(id:string)=>request<ResearchProject>(`/research/${id}/archive`,{method:'POST'}),
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),
@@ -182,5 +160,3 @@ export const api={
   checkBacktestCatalog:(data:{symbols:string[];timeframes:string[];start_date:string;end_date:string;venue?:string;catalog_path?:string|null})=>request<import('./types').CatalogCheckResponse>('/backtests/check-catalog',{method:'POST',body:JSON.stringify(data)}),
   dashboardStats:()=>request<import('./types').DashboardStats>('/dashboard/stats'),
 }
-
-

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import html
 import logging
+import re
 from typing import Any
 
+import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.models import ResearchMessage, ResearchProject
 
 from app.quant.backtest import run_nautilus_backtest
 from app.quant.experiment import run_vectorized_experiment
@@ -28,6 +35,37 @@ from app.quant.strategy_manager import (
 logger = logging.getLogger(__name__)
 
 DSH_TOOL_DEFINITIONS = [
+    {
+        "name": "quant_get_capabilities",
+        "description": "获取精简的 QuantLab 平台能力、研究阶段边界和标准工作流，无需读取项目源码",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "quant_get_research_context",
+        "description": "获取当前研究项目的对话摘要、阶段和关联策略信息；只返回研究所需上下文",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "quant_get_strategy_context",
+        "description": "获取用户明确指定的当前策略代码与状态，结果受长度限制，禁止任意文件路径",
+        "parameters": {
+            "type": "object",
+            "properties": {"strategy_name": {"type": "string"}},
+            "required": ["strategy_name"],
+        },
+    },
+    {
+        "name": "quant_web_research",
+        "description": "受控联网检索量化论文、市场机制和公开资料，最多返回 5 条带来源结果",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 5},
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "quant_market_data_query",
         "description": "查询 QuantLab 本地 Parquet 行情数据目录中的标的、时间周期、数据跨度及历史行情统计特征",
@@ -205,6 +243,55 @@ async def dispatch_dsh_tool_call(
 ) -> dict[str, Any]:
     """Execute a QuantLab deterministic tool requested via DSH Tool Calling interface."""
     logger.info("DSH 工具调度: %s, 参数: %s", tool_name, arguments)
+
+    if tool_name == "quant_get_capabilities":
+        return {
+            "ok": True,
+            "platform": "QuantLab / NautilusTrader",
+            "research_workflow": ["RESEARCH", "AWAITING_IMPLEMENTATION_APPROVAL", "IMPLEMENTATION", "AWAITING_BACKTEST_APPROVAL", "BACKTEST", "ANALYSIS"],
+            "research_tools": ["market_data", "factor_analysis", "vectorized_experiment", "web_research", "current_strategy_context"],
+            "implementation": "用户批准后通过 write_strategy_code 写入，并自动执行 L1-L4 Pre-Flight",
+            "backtest": "用户确认参数后由 execute_backtest_tool 调用正式 NautilusTrader 引擎",
+            "constraints": ["研究阶段不读取项目源码", "不虚构回测结果", "写代码和正式回测均需审批"],
+        }
+
+    if tool_name == "quant_get_research_context":
+        if db is None or not project_id:
+            return {"ok": False, "error": "缺少研究项目上下文"}
+        project = await db.get(ResearchProject, project_id)
+        rows = (await db.scalars(
+            select(ResearchMessage).where(ResearchMessage.project_id == project_id).order_by(ResearchMessage.created_at.desc()).limit(8)
+        )).all()
+        return {
+            "ok": True,
+            "project": {"id": project_id, "title": project.title if project else "", "phase": getattr(project, "research_phase", "RESEARCH") if project else "RESEARCH"},
+            "recent_messages": [{"role": row.role, "content": row.content[:1500]} for row in reversed(rows)],
+        }
+
+    if tool_name == "quant_get_strategy_context":
+        name = str(arguments.get("strategy_name") or "").strip()
+        code = get_strategy_code(name)
+        if code is None:
+            return {"ok": False, "error": f"策略不存在: {name}.py"}
+        return {"ok": True, "strategy_name": name, "code": code[:12000], "truncated": len(code) > 12000}
+
+    if tool_name == "quant_web_research":
+        query = str(arguments.get("query") or "").strip()
+        limit = max(1, min(int(arguments.get("max_results") or 5), 5))
+        if not query or len(query) > 300:
+            return {"ok": False, "error": "检索词不能为空且不能超过 300 字符"}
+        try:
+            async with httpx.AsyncClient(timeout=settings.dsh_web_search_timeout_seconds, follow_redirects=True) as client:
+                response = await client.get("https://html.duckduckgo.com/html/", params={"q": query}, headers={"User-Agent": "QuantLab-DSH/1.0"})
+                response.raise_for_status()
+            links = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', response.text, re.DOTALL)
+            results = []
+            for url, title in links[:limit]:
+                clean_title = html.unescape(re.sub(r"<[^>]+>", "", title)).strip()
+                results.append({"title": clean_title, "url": html.unescape(url), "source": "DuckDuckGo"})
+            return {"ok": True, "query": query, "results": results, "result_count": len(results)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"联网检索失败：{exc}"}
 
     if tool_name == "quant_market_data_query":
         action = arguments.get("action", "list_instruments")

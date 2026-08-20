@@ -178,25 +178,28 @@ class LlmConfigurationUpdate(BaseModel):
     default_permission_mode: PermissionMode = "default"
 
 
-class AgentSessionCreate(BaseModel):
-    client_id: str = Field(default="default_client", max_length=100)
-    strategy_name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
-    permission_mode: PermissionMode = "default"
-
-
-class AgentApplyRequest(BaseModel):
-    create_version: bool = False
-    description: str | None = Field(default=None, max_length=500)
-
-
 class ResearchProjectCreate(BaseModel):
     client_id: str = Field(default="default_client", max_length=100)
     title: str = Field(min_length=1, max_length=200)
     original_idea: str = Field(default="", max_length=20_000)
+    source_project_id: str | None = Field(default=None, max_length=36)
 
 
 class ResearchMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=30_000)
+
+
+class DshActionRequest(BaseModel):
+    action: Literal["WRITE_STRATEGY", "RUN_BACKTEST", "FIX_ERROR", "ANALYZE_BACKTEST"]
+    content: str = Field(default="", max_length=4000)
+    run_id: str | None = Field(default=None, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class DshApproveRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=64)
+    approved: bool
+    feedback: str = Field(default="", max_length=2000)
 
 
 class StrategySpecificationUpdate(BaseModel):
@@ -222,15 +225,6 @@ class ResearchConclusionUpdate(BaseModel):
 class ResearchIterationCreate(BaseModel):
     target: Literal["DISCUSSING", "SPEC_REVIEW", "READY_FOR_BACKTEST"]
     reason: str = Field(min_length=1, max_length=5_000)
-
-
-class ResearchWriteStrategyRequest(BaseModel):
-    strategy_name: str = Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")
-    instructions: str = Field(min_length=1, max_length=50_000)
-    specification: dict[str, Any] | None = None
-    is_fix: bool = False
-    error_context: str | None = Field(default=None, max_length=50_000)
-    project_id: str | None = None
 
 
 class DashboardRecentRun(BaseModel):
@@ -292,4 +286,3 @@ class DashboardStatsOut(BaseModel):
     research: ResearchStats
     catalog: CatalogStats
     system: SystemHealthStats
-

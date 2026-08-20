@@ -1,9 +1,9 @@
-import asyncio
 import re
 import shutil
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -12,8 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .agent.service import cleanup_expired_worktrees, repair_agent_session_paths
-from .agent.service import router as agent_router
 from .auth import AuthMiddleware
 from .auth import router as auth_router
 from .backtest_service import confirm_and_start_backtest, create_backtest_run
@@ -21,6 +19,7 @@ from .backtests.chart_data import load_chart
 from .config import settings
 from .data_downloads import router as data_downloads_router
 from .db import SessionLocal, get_db
+from .dsh import bridge_router as dsh_bridge_router
 from .git_config import router as git_config_router
 from .git_versions import code_hash, manifest_hash
 from .llm_config import router as llm_config_router
@@ -119,9 +118,9 @@ async def lifespan(app: FastAPI):
     ensure_strategy_storage()
     await fail_interrupted_backtests()
     await seed()
-    await repair_agent_session_paths()
-    await asyncio.to_thread(cleanup_expired_worktrees)
     yield
+    from .dsh import shutdown_all
+    shutdown_all()
 
 
 app = FastAPI(title="QuantLab API", version="0.1.0", lifespan=lifespan)
@@ -138,7 +137,7 @@ app.include_router(auth_router)
 app.include_router(strategy_files_router)
 app.include_router(llm_config_router)
 app.include_router(git_config_router)
-app.include_router(agent_router)
+app.include_router(dsh_bridge_router)
 app.include_router(data_downloads_router)
 app.include_router(research_router)
 

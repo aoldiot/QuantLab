@@ -17,11 +17,9 @@ export type ChartData={symbol:string;symbols:string[];bars:ChartBar[];fills:Char
 export type PermissionMode='plan'|'default'|'acceptEdits'|'bypassPermissions'
 export type LlmConfiguration={configured:boolean;base_url?:string;api_key_masked?:string;auth_type?:'api_key'|'auth_token';model?:string;small_fast_model?:string|null;timeout_seconds?:number;max_turns?:number;default_permission_mode?:PermissionMode;last_test_ok?:boolean|null;last_test_message?:string|null;last_tested_at?:string|null;updated_at?:string}
 export type GitConfiguration={configured:boolean;repository_path?:string;remote_url?:string;username?:string;password_masked?:string;auto_push?:boolean;last_backup_at?:string|null;last_backup_ok?:boolean|null;last_backup_message?:string|null;updated_at?:string}
-export type AgentSession={id:string;client_id:string;strategy_name:string;permission_mode:PermissionMode;status:string;sdk_session_id:string|null;error_message:string|null;created_at:string;updated_at:string}
-export type AgentStoredMessage={id:string;role:string;event_type:string;content:Record<string,unknown>;created_at:string}
 export type ResearchSpecification={id:string;version:number;status:'DRAFT'|'APPROVED'|'SUPERSEDED';content:Record<string,any>;created_at:string;approved_at:string|null}
 export type ResearchConclusion={verdict:'SUPPORTED'|'REJECTED'|'INCONCLUSIVE';summary:string;next_step:string}
-export type ResearchProject={id:string;client_id:string;title:string;original_idea:string;status:string;strategy_id:string|null;implementation_session_id:string|null;latest_backtest_id:string|null;conclusion:ResearchConclusion|null;archived_at:string|null;created_at:string;updated_at:string;specification:ResearchSpecification|null;is_busy?:boolean}
+export type ResearchProject={id:string;client_id:string;title:string;original_idea:string;status:string;research_phase?:'RESEARCH'|'AWAITING_IMPLEMENTATION_APPROVAL'|'IMPLEMENTATION'|'AWAITING_BACKTEST_APPROVAL'|'BACKTEST'|'RESULT_REVIEW'|'ANALYSIS';strategy_id:string|null;implementation_session_id:string|null;latest_backtest_id:string|null;conclusion:ResearchConclusion|null;archived_at:string|null;created_at:string;updated_at:string;specification:ResearchSpecification|null;is_busy?:boolean}
 export type ResearchMessage={id:string;role:'user'|'assistant'|'system'|'tool';content:string;message_type:string;metadata:Record<string,any>;created_at:string}
 export type ResearchDecision={id:string;question:string;options:string[];recommendation:string|null;impact:string|null;status:'PENDING'|'RESOLVED'|'DISMISSED';answer:string|null;origin:'DISCUSSION'|'SPECIFICATION';source_message_id:string|null;created_at:string;resolved_at:string|null}
 export type ResearchRun={id:string;name:string;status:string;stage:string;progress:number;metrics:Record<string,number|null>|null;error_message?:string|null;config?:Record<string,any>|null;created_at:string}
@@ -35,8 +33,12 @@ export interface CatalogCheckResponse{ok:boolean;has_missing:boolean;catalog_exi
 export interface BacktestLogsResponse{id:string;status:string;stage:string;progress:number;logs:string;error_message?:string|null}
 export interface VerificationStep{level:string;name:string;ok:boolean;message:string;details?:Record<string,unknown>}
 export interface ResearchWritingLog{status:'IDLE'|'RUNNING'|'COMPLETED'|'FAILED';stage:string;progress:number;strategy_name:string;logs:string;updated_at?:string;steps?:VerificationStep[]}
-export interface ResearchThinkingStatus{status:'IDLE'|'THINKING'|'WAITING_APPROVAL'|'TOOL_RUNNING'|'GENERATING';step:string;thought:string;updated_at?:string}
-export interface CodeApprovalData{strategy_name:string;strategy_summary:string;key_rules:string[];parameter_specs?:Record<string,any>}
+export interface ResearchThinkingStatus{status:'IDLE'|'THINKING'|'WAITING_APPROVAL'|'TOOL_RUNNING'|'GENERATING'|'FAILED';step:string;thought:string;updated_at?:string;phase?:string;error?:string;metrics?:{phase?:string;elapsed_ms?:number;tool_call_count?:number;max_step?:number;recovered_empty_response?:boolean}}
+export interface DshLiveEvent{seq:number;turn_id:string;received_at:string;type:string;kind?:string;chunk_type?:string;text?:string;reasoning?:string;stream_key?:string;turn?:number;step?:number|Record<string,any>;tool?:{name?:string;arguments?:any;arguments_raw?:string;input?:Record<string,any>;args?:Record<string,any>};result?:any;call_id?:string;status?:string;reason?:string}
+export interface DshLiveEventsResponse{events:DshLiveEvent[];status:{project_id:string;status:string;stage:string;progress:number;error:string;updated_at:string}}
+export interface DshApproval{request_id:string;project_id:string;tool:string;proposal_key?:string;arguments:Record<string,any>;status:'pending'|'approved'|'declined';feedback:string;created_at:string;summary?:string;message?:string}
+export type DshAction='WRITE_STRATEGY'|'RUN_BACKTEST'|'FIX_ERROR'|'ANALYZE_BACKTEST'
+export interface DshActionRequest{action:DshAction;content?:string;run_id?:string;arguments?:Record<string,any>}
 export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}
 
 export interface DashboardRecentRun {
@@ -99,4 +101,3 @@ export interface DashboardStats {
   catalog: DashboardCatalogStats
   system: DashboardSystemStats
 }
-

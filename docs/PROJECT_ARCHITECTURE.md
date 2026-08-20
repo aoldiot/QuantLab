@@ -382,8 +382,8 @@ erDiagram
 | `/api/strategy-files` | 策略文件、Git 状态和提交 |
 | `/api/backtests` | 回测创建、查询、取消、删除与图表 |
 | `/api/data` | 标的查询、下载任务创建与进度 |
-| `/api/research` | 研究项目、消息、决策审批、规格、实现、发布、回测、分析、结论与迭代 |
-| `/api/agent` | Agent 会话、消息、diff、应用/拒绝、WebSocket |
+| `/api/research` | 研究项目、消息、决策审批、规格、实现、发布、回测、分析、结论与迭代（消息与 DSH 编排见 `/research/{id}/dsh/*`） |
+| `/api/dsh-tools` | DSH HTTP 插件桥工具调用（`write_strategy_code` / `execute_backtest_tool` / `verify_strategy_file` / `dispatch_tool_call`，含审批注册表） |
 | `/api/settings/llm` | LLM 配置保存与连通性测试 |
 | `/api/settings/git` | Git 远端配置保存与连通性测试 |
 

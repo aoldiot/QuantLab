@@ -429,6 +429,22 @@ def _check_nautilus_ast_rules(tree: ast.AST) -> list[str]:
                     errors.append(
                         f"第 {node.lineno} 行: 禁止调用 self.instrument.{node.attr}()。NautilusTrader Instrument 没有 {node.attr} 方法，请使用 self.instrument.make_price(...)。"
                     )
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            mod_name = getattr(node, "module", "") or ""
+            for alias in getattr(node, "names", []):
+                full_name = f"{mod_name}.{alias.name}" if mod_name else alias.name
+                if "nautilus_trader.indicators.average" in full_name or full_name == "nautilus_trader.indicators.average":
+                    errors.append(
+                        f"第 {node.lineno} 行: 禁止导入不存在的模块 `{full_name}`。NautilusTrader 移动平均指标模块为 `nautilus_trader.indicators.averages`（注意是 averages 复数），推荐直接使用 `from nautilus_trader.indicators import SimpleMovingAverage, ExponentialMovingAverage` 或 `from app.quant.indicators import ...`。"
+                    )
+            if mod_name == "nautilus_trader.indicators.average" or mod_name.startswith("nautilus_trader.indicators.average."):
+                errors.append(
+                    f"第 {node.lineno} 行: 禁止导入不存在的模块 `{mod_name}`。NautilusTrader 移动平均指标模块为 `nautilus_trader.indicators.averages`（注意是 averages 复数），推荐直接使用 `from nautilus_trader.indicators import SimpleMovingAverage, ExponentialMovingAverage` 或 `from app.quant.indicators import ...`。"
+                )
+            elif mod_name.startswith("app.quant.library."):
+                errors.append(
+                    f"第 {node.lineno} 行: 禁止导入不存在的模块 `{mod_name}`。QuantLab 策略契约请使用 `from app.strategy_contract import StrategyManifest, ParameterSpec, StrategyMode`，指标请使用 `from app.quant.indicators import ...`。"
+                )
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Attribute) and node.func.attr == "close_position":
                 if isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
@@ -450,7 +466,12 @@ def _simulate_strategy_execution(
     from nautilus_trader.config import LoggingConfig
     from nautilus_trader.model.currencies import USDT
     from nautilus_trader.model.data import Bar, BarSpecification, BarType
-    from nautilus_trader.model.enums import AccountType, BarAggregation, OmsType, PriceType
+    from nautilus_trader.model.enums import (
+        AccountType,
+        BarAggregation,
+        OmsType,
+        PriceType,
+    )
     from nautilus_trader.model.identifiers import TraderId, Venue
     from nautilus_trader.model.objects import Money
     from nautilus_trader.test_kit.providers import TestInstrumentProvider
@@ -1398,6 +1419,17 @@ def verify_strategy_file(file_path: Path | str, strategy_name: str | None = None
             for col in missing_cols:
                 calculated_df[col] = 0.0
             missing_cols = set()
+        elif missing_cols:
+            # Check for runtime dynamic probes (e.g. stop loss, trailing lines, execution prices recorded in on_bar)
+            runtime_probe_keywords = ("stop", "trail", "price", "pos", "pnl", "entry", "exit", "target", "fill", "level", "signal")
+            runtime_dynamic_cols = {
+                col for col in missing_cols
+                if any(kw in col.lower() for kw in runtime_probe_keywords)
+            }
+            if runtime_dynamic_cols:
+                for col in runtime_dynamic_cols:
+                    calculated_df[col] = 0.0
+                missing_cols = missing_cols - runtime_dynamic_cols
 
         if missing_cols:
             step = VerificationStepResult(

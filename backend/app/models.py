@@ -182,6 +182,7 @@ class ResearchProject(Base):
     title: Mapped[str] = mapped_column(String(200))
     original_idea: Mapped[str] = mapped_column(Text)
     status: Mapped[ResearchStatus] = mapped_column(Enum(ResearchStatus), default=ResearchStatus.DISCUSSING, index=True)
+    research_phase: Mapped[str] = mapped_column(String(40), default="RESEARCH", server_default="RESEARCH", index=True)
     conversation_id: Mapped[str] = mapped_column("hermes_conversation", String(200), unique=True)
     strategy_id: Mapped[str | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
     implementation_session_id: Mapped[str | None] = mapped_column(ForeignKey("agent_sessions.id", ondelete="SET NULL"), nullable=True)

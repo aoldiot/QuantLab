@@ -96,47 +96,6 @@ const server = http.createServer((req, res) => {
   serveFile(res, targetPath);
 });
 
-// 4. WebSocket reverse proxy for Agent websocket
-server.on('upgrade', (req, clientSocket, head) => {
-  const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (parsedUrl.pathname.startsWith('/api/agent/ws/')) {
-    const proxyReq = http.request({
-      host: BACKEND_HOST,
-      port: BACKEND_PORT,
-      path: req.url,
-      method: req.method,
-      headers: {
-        ...req.headers,
-        host: `${BACKEND_HOST}:${BACKEND_PORT}`,
-      },
-    });
-
-    proxyReq.on('upgrade', (proxyRes, targetSocket, proxyHead) => {
-      clientSocket.write(
-        `HTTP/1.1 101 Switching Protocols\r\n` +
-          Object.entries(proxyRes.headers)
-            .map(([k, v]) => `${k}: ${v}\r\n`)
-            .join('') +
-          '\r\n'
-      );
-      if (proxyHead && proxyHead.length) {
-        clientSocket.write(proxyHead);
-      }
-      targetSocket.pipe(clientSocket);
-      clientSocket.pipe(targetSocket);
-    });
-
-    proxyReq.on('error', (err) => {
-      console.error('WebSocket proxy error:', err.message);
-      clientSocket.destroy();
-    });
-
-    proxyReq.end();
-  } else {
-    clientSocket.destroy();
-  }
-});
-
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`QuantLab Web UI listening on http://0.0.0.0:${PORT}`);
 });

@@ -94,6 +94,7 @@ async def run_nautilus_backtest(
 
         config_dict = {
             "name": run_name,
+            "strategy_name": strategy_name,
             "strategy_version_id": version_obj.id,
             "strategy_parameters": resolved_params,
             "venue": "BINANCE",
@@ -131,6 +132,9 @@ async def run_nautilus_backtest(
             status=RunStatus.RUNNING,
         )
         s.add(run)
+        await s.flush()
+        if p_id and proj_record:
+            proj_record.latest_backtest_id = run.id
         await s.commit()
         await s.refresh(run)
 

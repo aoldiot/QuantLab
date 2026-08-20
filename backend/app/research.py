@@ -7,21 +7,17 @@ import logging
 import re
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent.tools import (
-    TOOL_DEFINITIONS,
-    dispatch_tool_call,
     ensure_strategy_db_record,
     get_strategy_code_tool,
     get_writing_log_tool,
-    write_strategy_code,
-    write_strategy_with_claude,
 )
 from .agent.strategy_verifier import extract_python_strategy_code
 from .config import settings
@@ -31,13 +27,15 @@ from .models import (
     ResearchMessage,
     ResearchProject,
     ResearchStatus,
+    RunStatus,
     Strategy,
     StrategyVersion,
 )
 from .schemas import (
+    DshActionRequest,
+    DshApproveRequest,
     ResearchMessageCreate,
     ResearchProjectCreate,
-    ResearchWriteStrategyRequest,
 )
 from .strategy_contract import sanitize_strategy_slug
 from .strategy_files import _path, save_strategy_code, PERSISTENT_STRATEGY_DIR, STRATEGY_DIR
@@ -48,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)，由 DeepSeek Harness (DSH) 驱动。
 你的职责是与用户全流程完成量化策略的研讨、设计、开发、回测与归因分析。使用简体中文。
+所有用户可见正文、阶段说明和工具调用前说明必须使用简体中文。不要向用户叙述“加载技能、阅读提示词、遵循系统指令”等内部准备过程；需要调用技能或工具时直接执行，并只报告对研究有意义的进展与结果。
 
 【角色与原则】
 1. 核心定位：你是全流程量化总主控 (Quant Lead powered by DeepSeek Harness)。你负责策略假设研讨、规则设计、调用 QuantLab 确定性工具、调度策略编写、回测执行与指标归因分析。
@@ -66,12 +65,13 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
      严禁直接输出空洞简短的一两句话就要求用户批准！必须先在文本回复中向用户完整输出上述包含详细逻辑、指标公式、入场出场规则、风控和参数表格的策略设计方案！
 
 3. 编码审批机制与代码生成（CRITICAL - 审批通过后由 DSH 调用 Pre-Flight 运行期沙盒编写策略）：
-   - 【严禁擅自直接写码】：当策略逻辑设计方案在正文中完整输出后，在方案末尾附上 ```code_approval 机器块（或调用工具 `propose_code_approval`）向用户发起编码审批请求，必须在参数中完整传入 `strategy_name`（建议的小写英文下划线策略名）、`strategy_summary` 与 `key_rules`，严禁传递空参数 `{}`。
-   - 【用户批准后编写代码】：只有当用户在界面中点击「批准并开始编写代码」、或在对话中明确回复“同意”、“批准”、“开始编写代码”后，你才可以开始进行策略代码编写与沙盒自愈。
+   - 【严禁擅自直接写码】：当策略逻辑设计方案在正文中完整输出后，调用工具 `write_strategy_code` 提交完整策略代码（必须完整传入 `strategy_name` 与 `code`，严禁传递空参数 `{}`）。该工具会进入审批桩并返回 `awaiting_approval`，此时请立即结束本轮并向用户清晰说明待审批内容，等待用户批准。
+   - 【用户批准后编写代码】：用户批准后平台会直接执行已审核的原始 `write_strategy_code` 参数并展示 L1–L4 结果；不要再次调用该工具，也不要再次要求审批。
+   - 只有 `write_strategy_code` 已实际返回 `awaiting_approval` 时，才能声称页面存在审批操作。禁止仅在正文中虚构“批准并开始编写代码”按钮。
    - 【由 DSH 驱动 QuantLab 策略生成并完成 4 级沙盒自愈（严禁私自手写未经验证代码）】：
      用户在前端点击「批准并开始编写代码」或表达同意即代表已授予完全的代码写入权限，系统界面不存在二级的“批准写入”按钮！
      【极其关键】：编写策略文件必须通过 QuantLab 的 Strategy Manager 与沙盒验证机制执行。
-     必须使用专用工具 `write_strategy_with_claude`（必须完整传入 `strategy_name` 与 `instructions`/`specification`，严禁传空字典 `{}`），或通过 `quant_save_strategy_code` 生成策略，并自动运行 4 级 Pre-Flight 运行期沙盒检测与自愈。
+     必须使用专用工具 `write_strategy_code`（参数含 `strategy_name` 与完整 `code`），经审批落盘后自动运行 4 级 Pre-Flight 运行期沙盒检测；如需复核可用只读工具 `verify_strategy_file`。任何校验失败（L1~L4）都必须在会话内针对报错自愈修复后重新校验，严禁绕开沙盒直接保存代码。
      严禁在回复中要求用户点击不存在的“批准写入按钮”或等待二次写入授权！
    - 【Pre-Flight 4 级全自动验证沙盒保证】：
      代码生成后系统会自动执行 4 级沙盒检测（L1 静态语法 -> L2 契约与类加载 -> L3 200根Bar指标计算覆盖与NaN检测 -> L4 Nautilus 运行时实例化与生命周期钩子）。若检测到错误会自动在会话内自愈修复，确保交付的代码直接可运行！
@@ -208,14 +208,14 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
      - ✅ 强烈推荐使用 `from app.quant.indicators import IncWilderADX, SqueezeStateTracker, ATRTrailingStopTracker, calc_standard_indicators`，大幅减少代码量并杜绝 Token 截断！
 
 
-   - 【策略代码生成与规范】：必须由 Claude Agent SDK 编写策略文件并确保通过 4 级 Pre-Flight 运行期沙盒校验。
+   - 【策略代码生成与规范】：必须由 DeepSeek Harness (DSH) Agent 生成完整策略代码，并通过 `write_strategy_code` 工具写入策略文件且确保通过 4 级 Pre-Flight 运行期沙盒校验。
    - 代码编写完成后，向用户汇报策略编写完成情况与 4 级验证摘要，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。
 
 4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测，且必须先查验 Catalog 真实数据）：
    - 【严格限制生成时机】：只有当用户在对话中【明确提出要进行回测】（例如明确表达“进行回测”、“回测一下”、“运行回测”等意图）时，你才可以生成回测参数方案。
    - 【必须先查验 Catalog 真实可用数据】：在生成回测方案前，你必须调用工具 `get_available_data` 或通过终端检查本地 Catalog 中已存在的交易标的、K线周期与历史起止时间，**严禁臆测本地不存在的远期时间区间**（否则会导致回测 0 根 Bar 空转）！
    - 在用户未明确要求回测之前（如策略讨论、代码编写完成阶段），严禁擅自生成回测参数方案，更严禁直接调用 `execute_backtest` 执行回测！
-   - 当用户要求回测时，根据策略 Manifest 规范与可用行情数据提出合理的回测参数，调用工具 `propose_backtest_params` 或输出如下格式的机器块生成回测参数方案卡片：
+   - 当用户要求回测时，根据策略 Manifest 规范与可用行情数据提出合理的回测参数，必须调用 `propose_backtest_params` 生成可编辑的参数方案卡片，然后停止并等待用户确认。只有该工具成功返回后才能声称“卡片已生成”。如果工具不可用，才可在正文末尾输出如下格式的 `backtest_params` 机器块作为兼容回退。此阶段不要调用 `execute_backtest_tool`：
 
 ```backtest_params
 {
@@ -269,31 +269,159 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
    - **【安全红线 - 严禁改代码与回测】**：在归因分析时，**严格只分析指标与交易原因，严禁修改策略代码，严禁调用 `execute_backtest` 启动回测**。
 """
 
-TOOL_CALL_REGEX = re.compile(
-    r"```(?:tool_call|function_call|json:tool_call)\s*(\{.*?\})\s*```",
-    re.DOTALL | re.IGNORECASE,
-)
+RESEARCH_PHASE_INSTRUCTIONS = """你是 QuantLab 策略研究负责人。当前阶段严格限定为 RESEARCH（策略研究），使用简体中文。
 
-BACKTEST_PARAMS_REGEX = re.compile(
-    r"```(?:backtest_params|json:backtest_params)\s*(\{.*?\})\s*```",
-    re.DOTALL | re.IGNORECASE,
-)
+目标：根据当前对话提出可审阅的《量化策略设计方案》，而不是理解或审计 QuantLab 项目源码。
+你已经拥有 QuantLab 平台能力工具；不得使用终端、Bash、任意文件系统读取或加载 nautilus-strategy-author 开发技能。
+研究规则已完整注入系统上下文，不要调用 skill 工具重复加载研究技能，也不要向用户报告加载技能等内部准备过程。
+仅在确有必要时调用研究工具：平台能力、当前关联策略、行情数据、因子实验或联网资料。联网资料必须给出来源。
+单轮最多调用 5 次工具；连续调用 3 次后必须停止探索并形成结论。不得读取 verifier、builder、strategy_base、指标库或其他项目内部实现。
+若用户提到现有策略，只能通过 quant_get_strategy_context 获取该策略上下文。
 
-CODE_APPROVAL_REGEX = re.compile(
-    r"```(?:code_approval|json:code_approval)\s*(\{.*?\})\s*```",
-    re.DOTALL | re.IGNORECASE,
-)
+最终必须输出完整 Markdown《量化策略设计方案》，至少包含：假设与收益来源、适用标的/周期、指标公式、入场/出场、风险与仓位、参数表、防过拟合建议，以及需要用户确认的下一步。
+研究方案完成前不得写代码或执行正式回测。如用户希望开发，可调用 write_strategy_code 仅提交审批提案；收到 awaiting_approval 后立即结束本轮。
+无论资料是否完整，都必须基于已知信息给出明确结论；禁止以工具调用或内部准备说明作为最终答案。
+"""
 
-THINKING_REGEX = re.compile(
-    r"<think>(.*?)</think>",
-    re.DOTALL | re.IGNORECASE,
-)
 
+IMPLEMENTATION_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略实现负责人。当前阶段严格限定为 IMPLEMENTATION（策略编码），使用简体中文。
+
+用户已经完成策略方案确认并明确要求开始编码。不要重新输出研究方案，不要再次询问实现授权，不要执行回测。
+你会在本轮用户提示中收到完整原始需求与最新确认；直接依据这些内容生成完整、可运行的单文件 Python 策略。
+
+必须满足以下交付契约：
+1. 完整导出 StrategyConfig、Strategy、calculate_indicators、STRATEGY_MANIFEST，配置字段、Manifest 参数、指标列和 plot_config 必须一致。
+2. 禁止使用 portfolio.account_balance、portfolio.is_net_flat、portfolio.position、close_position、instrument.round_quantity；订单数量必须使用 Quantity 或 instrument.make_qty。
+3. calculate_indicators 必须覆盖 plot_config 声明的全部列，并对头部 NaN 使用 bfill().fillna(0.0)。
+4. strategy_path/config_path 必须使用 app.strategies.{slug}:ClassName；不得输出残缺代码、占位符或省略实现。
+5. 代码生成完成后必须立即调用 write_strategy_code，完整传入 strategy_name 与 code。收到 awaiting_approval 后立即停止本轮，简短告知用户审批卡已生成。
+6. 只有 write_strategy_code 真实返回 awaiting_approval 后才能声称存在审批卡。不得用 Markdown 代码块冒充审批或直接写入文件。
+"""
+
+
+def _instructions_for_phase(phase: str) -> str:
+    if phase == "RESEARCH":
+        return RESEARCH_PHASE_INSTRUCTIONS
+    if phase == "IMPLEMENTATION":
+        return IMPLEMENTATION_PHASE_INSTRUCTIONS
+    return RESEARCH_INSTRUCTIONS
+
+
+INTENT_PHASES = {
+    "DISCUSS_STRATEGY": "RESEARCH",
+    "MODIFY_STRATEGY_PLAN": "RESEARCH",
+    "START_IMPLEMENTATION": "IMPLEMENTATION",
+    "MODIFY_STRATEGY_CODE": "IMPLEMENTATION",
+    "REQUEST_BACKTEST": "BACKTEST",
+    "MODIFY_BACKTEST_PARAMS": "BACKTEST",
+    "ANALYZE_BACKTEST": "RESULT_REVIEW",
+    "VIEW_STRATEGY_CODE": "RESULT_REVIEW",
+}
+
+
+def _implementation_prompt(
+    project: ResearchProject,
+    user_confirmation: str,
+    approved_plan: str = "",
+) -> str:
+    return (
+        "用户已明确确认进入策略编码阶段。请直接生成完整策略代码，并调用 write_strategy_code 提交真实审批提案。"
+        "不要重新研究、不要再次询问授权、不要执行回测。\n\n"
+        f"【完整原始需求】\n{project.original_idea.strip()}\n\n"
+        f"【已确认的最新研究方案】\n{approved_plan.strip()}\n\n"
+        f"【用户最新确认与范围调整】\n{user_confirmation.strip()}"
+    )
+
+
+async def _recent_intent_context(
+    project_id: str,
+    db: AsyncSession,
+    limit: int = 12,
+) -> list[dict[str, str]]:
+    rows = (
+        await db.scalars(
+            select(ResearchMessage)
+            .where(
+                ResearchMessage.project_id == project_id,
+                ResearchMessage.role.in_(["user", "assistant"]),
+            )
+            .order_by(ResearchMessage.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        {"role": row.role, "content": (row.content or "")[-6000:]}
+        for row in reversed(rows)
+    ]
+
+
+def _intent_routed_prompt(intent_result: dict[str, Any], user_message: str) -> str:
+    normalized = intent_result.get("normalized_request") or user_message
+    return (
+        "【DSH 意图管理结果】\n"
+        f"意图：{intent_result['intent']}\n"
+        f"规范化请求：{normalized}\n\n"
+        "请依据该意图与当前项目上下文完成本轮任务；卡片必须由真实工具调用产生。\n\n"
+        f"【用户原始输入】\n{user_message}"
+    )
+
+
+_FAST_INTENT_COMMANDS = {
+    "开始编写策略代码": "START_IMPLEMENTATION",
+    "编写策略代码": "START_IMPLEMENTATION",
+    "执行回测": "REQUEST_BACKTEST",
+    "运行回测": "REQUEST_BACKTEST",
+    "修复策略代码": "MODIFY_STRATEGY_CODE",
+    "修复报错": "MODIFY_STRATEGY_CODE",
+    "回测结果分析": "ANALYZE_BACKTEST",
+    "分析回测结果": "ANALYZE_BACKTEST",
+}
+
+
+def _fast_intent_decision(user_message: str, pending: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Route only exact, unambiguous commands; nuanced text still goes to DSH."""
+    normalized = re.sub(r"[\s。！!，,]+", "", user_message).strip()
+    if pending and normalized in {"批准", "确认", "同意", "批准并继续"}:
+        if len(pending) != 1:
+            return None
+        intent = "APPROVE_PENDING_ACTION"
+        request_id = str(pending[0].get("request_id") or "")
+    elif pending and normalized in {"拒绝", "取消", "不同意"}:
+        if len(pending) != 1:
+            return None
+        intent = "REJECT_PENDING_ACTION"
+        request_id = str(pending[0].get("request_id") or "")
+    elif not pending and normalized in _FAST_INTENT_COMMANDS:
+        intent = _FAST_INTENT_COMMANDS[normalized]
+        request_id = ""
+    else:
+        return None
+    return {
+        "intent": intent,
+        "confidence": 1.0,
+        "normalized_request": user_message.strip(),
+        "needs_clarification": False,
+        "clarification_question": "",
+        "pending_request_id": request_id,
+        "reason": "明确的固定动作指令，使用本地快速路由。",
+    }
+
+
+_ACTION_INSTRUCTIONS = {
+    "WRITE_STRATEGY": "本轮是固定写码动作。直接实现，不重复研究；最多进行一次集中验证，随后提交 write_strategy_code 审批并停止。",
+    "RUN_BACKTEST": "本轮是固定回测动作。只补齐回测参数并生成参数卡，不讨论策略方案，不修改代码，不做结果分析。",
+    "FIX_ERROR": "本轮是单次定向修复。只读取指定失败记录和当前策略，完成一次修复与集中验证后提交 write_strategy_code；禁止回测。",
+    "ANALYZE_BACKTEST": "本轮只分析指定回测记录。不得修改代码、生成参数或重新回测；直接输出简洁归因结论。",
+}
+
+
+def _instructions_for_task(phase: str, task_profile: str = "") -> str:
+    base = _instructions_for_phase(phase)
+    focused = _ACTION_INSTRUCTIONS.get(task_profile)
+    return f"{base}\n\n【固定动作约束】\n{focused}" if focused else base
 
 ACTIVE_RESEARCH_TASKS: dict[str, asyncio.Task[Any]] = {}
-RESEARCH_LOCKS: dict[str, asyncio.Lock] = {}
 RESEARCH_THINKING_STATUS: dict[str, dict[str, Any]] = {}
-HERMES_THINKING_STATUS = RESEARCH_THINKING_STATUS
 
 
 def _set_thinking_status(project_id: str, status: str, step: str, thought: str = ""):
@@ -305,12 +433,6 @@ def _set_thinking_status(project_id: str, status: str, step: str, thought: str =
     }
 
 
-def _get_project_lock(project_id: str) -> asyncio.Lock:
-    if project_id not in RESEARCH_LOCKS:
-        RESEARCH_LOCKS[project_id] = asyncio.Lock()
-    return RESEARCH_LOCKS[project_id]
-
-
 def _project_out(project: ResearchProject) -> dict[str, Any]:
     task = ACTIVE_RESEARCH_TASKS.get(project.id)
     is_busy = task is not None and not task.done()
@@ -320,6 +442,7 @@ def _project_out(project: ResearchProject) -> dict[str, Any]:
         "title": project.title,
         "original_idea": project.original_idea,
         "status": project.status.value,
+        "research_phase": project.research_phase or "RESEARCH",
         "strategy_id": project.strategy_id,
         "latest_backtest_id": project.latest_backtest_id,
         "is_busy": is_busy,
@@ -348,392 +471,84 @@ def _message_out(msg: ResearchMessage) -> dict[str, Any]:
     }
 
 
+async def _build_session_handoff(source: ResearchProject, db: AsyncSession) -> str:
+    """Build a bounded, deterministic handoff without copying conversation history."""
+    strategy = await db.get(Strategy, source.strategy_id) if source.strategy_id else None
+    latest_run = await db.get(BacktestRun, source.latest_backtest_id) if source.latest_backtest_id else None
+    recent_rows = (
+        await db.scalars(
+            select(ResearchMessage)
+            .where(
+                ResearchMessage.project_id == source.id,
+                ResearchMessage.role.in_(["user", "assistant"]),
+            )
+            .order_by(ResearchMessage.created_at.desc())
+            .limit(6)
+        )
+    ).all()
+
+    lines = [
+        "## 会话交接摘要",
+        "",
+        "这是从上一轮研究生成的结构化背景。新会话拥有独立上下文，不会复制完整历史消息。",
+        "",
+        f"- 来源会话：{source.title}",
+        f"- 当前阶段：{source.research_phase or 'RESEARCH'}",
+    ]
+    if strategy:
+        lines.append(f"- 关联策略：{strategy.name}（`{strategy.slug}`）")
+    if source.original_idea:
+        lines.extend(["", "### 原始策略目标", source.original_idea[:1_500]])
+    if source.conclusion_summary or source.conclusion_next_step:
+        lines.extend([
+            "",
+            "### 已确认结论",
+            source.conclusion_summary or "暂无正式结论",
+        ])
+        if source.conclusion_next_step:
+            lines.append(f"下一步：{source.conclusion_next_step}")
+    if latest_run:
+        lines.extend([
+            "",
+            "### 最近回测",
+            f"- 回测 ID：`{latest_run.id}`",
+            f"- 状态：{latest_run.status.value} · {latest_run.stage}",
+            f"- 配置：`{json.dumps(latest_run.config or {}, ensure_ascii=False, default=str)[:1_500]}`",
+            f"- 指标：`{json.dumps(latest_run.metrics or {}, ensure_ascii=False, default=str)[:1_500]}`",
+        ])
+    if recent_rows:
+        lines.extend(["", "### 最近决策摘要"])
+        for row in reversed(recent_rows):
+            label = "用户" if row.role == "user" else "Quant Lead"
+            compact = re.sub(r"\s+", " ", row.content or "").strip()[:700]
+            if compact:
+                lines.append(f"- {label}：{compact}")
+    return "\n".join(lines)[:8_000]
+
+
+async def _session_handoff_context(project_id: str, db: AsyncSession) -> str:
+    rows = (
+        await db.scalars(
+            select(ResearchMessage)
+            .where(
+                ResearchMessage.project_id == project_id,
+                ResearchMessage.role == "assistant",
+            )
+            .order_by(ResearchMessage.created_at.desc())
+            .limit(20)
+        )
+    ).all()
+    for row in rows:
+        if (row.metadata_json or {}).get("event_type") == "session_handoff":
+            return (row.content or "")[:8_000]
+    return ""
+
+
 async def _project(project_id: str, db: AsyncSession) -> ResearchProject:
     project = await db.get(ResearchProject, project_id)
     if not project:
         raise HTTPException(404, "研究项目不存在")
     return project
-
-
-def _parse_llm_response(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
-    """Extract message text, tool calls, and reasoning/thinking content from LLM response payload."""
-    text_parts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    reasoning_parts: list[str] = []
-
-    # 1. Check standard OpenAI tool_calls and reasoning
-    choices = payload.get("choices", [])
-    if choices:
-        choice = choices[0]
-        msg = choice.get("message", {})
-        if msg.get("reasoning_content"):
-            reasoning_parts.append(str(msg["reasoning_content"]))
-        elif msg.get("thought"):
-            reasoning_parts.append(str(msg["thought"]))
-        elif msg.get("reasoning"):
-            reasoning_parts.append(str(msg["reasoning"]))
-
-        if msg.get("content"):
-            text_parts.append(str(msg["content"]))
-        for tc in msg.get("tool_calls", []):
-            fn = tc.get("function", {})
-            try:
-                args = (
-                    json.loads(fn.get("arguments", "{}"))
-                    if isinstance(fn.get("arguments"), str)
-                    else fn.get("arguments", {})
-                )
-            except Exception:
-                args = {}
-            tool_calls.append({"name": fn.get("name"), "arguments": args, "id": tc.get("id")})
-
-    # 2. Check /responses output schema
-    for item in payload.get("output", []):
-        kind = item.get("type")
-        if kind in ("thought", "reasoning"):
-            for part in item.get("content", []):
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    reasoning_parts.append(part["text"])
-                elif isinstance(part, str):
-                    reasoning_parts.append(part)
-        elif kind == "message":
-            for part in item.get("content", []):
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    text_parts.append(part["text"])
-        elif kind == "function_call":
-            name = item.get("name")
-            args = item.get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    args = {}
-            tool_calls.append({"name": name, "arguments": args, "id": item.get("id")})
-
-    if not text_parts and isinstance(payload.get("output_text"), str):
-        text_parts.append(payload["output_text"])
-
-    full_text = "\n".join(text_parts).strip()
-
-    # 3. Extract <think>...</think> if present inside content
-    think_matches = THINKING_REGEX.findall(full_text)
-    if think_matches:
-        for tm in think_matches:
-            reasoning_parts.append(tm.strip())
-        full_text = THINKING_REGEX.sub("", full_text).strip()
-
-    # 4. Fallback regex extraction if model wrote tool calls in text
-    if not tool_calls:
-        for match in TOOL_CALL_REGEX.finditer(full_text):
-            try:
-                parsed = json.loads(match.group(1).strip())
-                if isinstance(parsed, dict) and "name" in parsed:
-                    tool_calls.append(
-                        {
-                            "name": parsed.get("name"),
-                            "arguments": parsed.get("arguments") or parsed.get("parameters") or {},
-                        }
-                    )
-            except Exception:
-                pass
-
-    reasoning_content = "\n\n".join(reasoning_parts).strip()
-    return full_text, tool_calls, reasoning_content
-
-
-_parse_hermes_response = _parse_llm_response
-
-
-async def _call_research_llm_stream(
-    project: ResearchProject,
-    prompt: str,
-    instructions: str = RESEARCH_INSTRUCTIONS,
-    tools: list[dict[str, Any]] | None = None,
-    db: AsyncSession | None = None,
-) -> tuple[str, list[dict[str, Any]], str]:
-    """Invoke DeepSeek Harness (DSH) LLM streaming endpoint with real-time reasoning and tool execution."""
-    from app.dsh.runtime import dsh_runtime
-    from app.llm_config import decrypt_api_key
-    from app.models import LlmConfiguration
-
-    cfg = await db.get(LlmConfiguration, 1) if db else None
-
-    # Construct chat messages history
-    chat_messages: list[dict[str, Any]] = []
-    if db is not None:
-        prev_rows = (
-            await db.scalars(
-                select(ResearchMessage)
-                .where(ResearchMessage.project_id == project.id)
-                .order_by(ResearchMessage.created_at)
-            )
-        ).all()
-        for row in prev_rows[-20:]:
-            if row.role in ("user", "assistant"):
-                chat_messages.append({"role": row.role, "content": row.content})
-            elif row.role == "tool":
-                chat_messages.append({"role": "user", "content": f"【工具执行结果】：\n{row.content}"})
-    if not chat_messages or chat_messages[-1].get("content") != prompt:
-        chat_messages.append({"role": "user", "content": prompt})
-
-    # Resolve DeepSeek Harness primary LLM configuration
-    base_url = "https://api.deepseek.com/v1"
-    api_key = ""
-    model = "deepseek-chat"
-    timeout_seconds = 120
-
-    if cfg is not None:
-        if cfg.base_url and cfg.model:
-            base_url = cfg.base_url.rstrip("/")
-            api_key = decrypt_api_key(cfg.api_key_encrypted) if cfg.api_key_encrypted else ""
-            model = cfg.model
-            timeout_seconds = cfg.timeout_seconds or 120
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Session-Id": project.conversation_id,
-    }
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers["x-api-key"] = api_key
-        headers["anthropic-version"] = "2023-06-01"
-
-    # Format tools according to OpenAI function tool format
-    tool_defs = tools or TOOL_DEFINITIONS
-    openai_tools = []
-    for t in tool_defs:
-        if "function" in t:
-            openai_tools.append(t)
-        else:
-            openai_tools.append({
-                "type": "function",
-                "function": {
-                    "name": t.get("name"),
-                    "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
-                },
-            })
-
-    from app.dsh.runtime import normalize_llm_endpoint
-
-    primary_endpoint = normalize_llm_endpoint(base_url)
-    candidate_endpoints: list[str] = [primary_endpoint]
-    clean_url = base_url.rstrip("/")
-    if f"{clean_url}/v1/chat/completions" not in candidate_endpoints:
-        candidate_endpoints.append(f"{clean_url}/v1/chat/completions")
-    if f"{clean_url}/chat/completions" not in candidate_endpoints:
-        candidate_endpoints.append(f"{clean_url}/chat/completions")
-    if f"{clean_url}/v1/messages" not in candidate_endpoints:
-        candidate_endpoints.append(f"{clean_url}/v1/messages")
-    if f"{clean_url}/responses" not in candidate_endpoints:
-        candidate_endpoints.append(f"{clean_url}/responses")
-
-    timeout = httpx.Timeout(timeout_seconds)
-    full_text_chunks: list[str] = []
-    reasoning_chunks: list[str] = []
-    tool_calls_map: dict[int, dict[str, Any]] = {}
-
-    _set_thinking_status(
-        project.id,
-        "THINKING",
-        "DeepSeek Harness (DSH) 正在深度思考量化假设与指标计算规则...",
-    )
-
-    last_stream_err = ""
-    stream_success = False
-    for endpoint in candidate_endpoints:
-        if endpoint.endswith("/responses"):
-            body = {
-                "model": model,
-                "conversation": project.conversation_id,
-                "input": prompt,
-                "instructions": instructions,
-                "tools": openai_tools,
-                "store": True,
-                "stream": True,
-            }
-        elif endpoint.endswith("/messages"):
-            body = {
-                "model": model,
-                "max_tokens": 4096,
-                "messages": chat_messages,
-                "system": instructions,
-                "stream": True,
-                "temperature": 0.2,
-            }
-        else:
-            body = {
-                "model": model,
-                "messages": [{"role": "system", "content": instructions}, *chat_messages],
-                "tools": openai_tools,
-                "stream": True,
-                "temperature": 0.2,
-            }
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream("POST", endpoint, headers=headers, json=body) as resp:
-                    if resp.status_code == 404 and len(candidate_endpoints) > 1:
-                        err_body = await resp.aread()
-                        last_stream_err = f"404: {err_body.decode('utf-8', errors='replace')}"
-                        continue
-                    if resp.status_code != 200:
-                        err_body = await resp.aread()
-                        logger.warning("DSH LLM Stream API (%s) 返回非200状态码 (%s): %s", endpoint, resp.status_code, err_body)
-                        break
-
-                    cur_event = ""
-                    async for raw_line in resp.aiter_lines():
-                        if not raw_line:
-                            continue
-                        if raw_line.startswith("event:"):
-                            cur_event = raw_line[6:].strip()
-                            continue
-                        if not raw_line.startswith("data:"):
-                            continue
-
-                        data_str = raw_line[5:].strip()
-                        if data_str == "[DONE]":
-                            break
-
-                        # Handle custom tool progress events
-                        if cur_event.startswith("hermes.tool") or cur_event.startswith("dsh.tool"):
-                            try:
-                                t_info = json.loads(data_str)
-                                t_tool = t_info.get("tool") or t_info.get("label") or "量化工具"
-                                t_status = t_info.get("status", "running")
-                                _set_thinking_status(
-                                    project.id,
-                                    "TOOL_RUNNING",
-                                    f"DeepSeek Harness 正在调度工具: {t_tool} ({t_status})...",
-                                    thought="".join(reasoning_chunks),
-                                )
-                            except Exception:
-                                pass
-                            cur_event = ""
-                            continue
-
-                        try:
-                            chunk = json.loads(data_str)
-                        except Exception:
-                            continue
-
-                        choices = chunk.get("choices", [])
-                        if choices:
-                            delta = choices[0].get("delta", {})
-                            if delta.get("reasoning_content"):
-                                r_c = str(delta["reasoning_content"])
-                                reasoning_chunks.append(r_c)
-                                _set_thinking_status(
-                                    project.id,
-                                    "THINKING",
-                                    "DeepSeek Harness (DSH) 正在深度思考量化假设与指标计算规则...",
-                                    thought="".join(reasoning_chunks),
-                                )
-                            elif delta.get("thought"):
-                                r_c = str(delta["thought"])
-                                reasoning_chunks.append(r_c)
-                                _set_thinking_status(
-                                    project.id,
-                                    "THINKING",
-                                    "DeepSeek Harness (DSH) 正在深度思考量化假设与指标计算规则...",
-                                    thought="".join(reasoning_chunks),
-                                )
-
-                            if delta.get("content"):
-                                c = str(delta["content"])
-                                full_text_chunks.append(c)
-                                _set_thinking_status(
-                                    project.id,
-                                    "GENERATING",
-                                    "DeepSeek Harness 正在组织方案与调度指令...",
-                                    thought="".join(reasoning_chunks),
-                                )
-
-                            for tc in delta.get("tool_calls", []):
-                                idx = tc.get("index", 0)
-                                if idx not in tool_calls_map:
-                                    tool_calls_map[idx] = {
-                                        "id": tc.get("id", ""),
-                                        "name": tc.get("function", {}).get("name", ""),
-                                        "arguments": "",
-                                    }
-                                if tc.get("id"):
-                                    tool_calls_map[idx]["id"] = tc["id"]
-                                if tc.get("function", {}).get("name"):
-                                    tool_calls_map[idx]["name"] = tc["function"]["name"]
-                                if tc.get("function", {}).get("arguments"):
-                                    tool_calls_map[idx]["arguments"] += tc["function"]["arguments"]
-
-                        for item in chunk.get("output", []):
-                            k = item.get("type")
-                            if k in ("thought", "reasoning"):
-                                for part in item.get("content", []):
-                                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                                        reasoning_chunks.append(part["text"])
-                                    elif isinstance(part, str):
-                                        reasoning_chunks.append(part)
-                            elif k == "message":
-                                for part in item.get("content", []):
-                                    if isinstance(part, dict) and isinstance(part.get("text"), str):
-                                        full_text_chunks.append(part["text"])
-
-                    stream_success = True
-                    break
-        except Exception as exc:
-            last_stream_err = str(exc)
-            logger.warning("DeepSeek Harness 流式请求端点 (%s) 异常: %s", endpoint, exc)
-            continue
-
-    if not stream_success:
-        logger.info("流式传输未完成，执行 DSH runtime 非流式保底调用...")
-        content, tool_calls, reasoning = await dsh_runtime.call_llm(
-            messages=chat_messages,
-            system_prompt=instructions,
-            tools=tool_defs,
-            db_config=cfg,
-        )
-        if not content.startswith("[API Error") and not content.startswith("[LLM Exception"):
-            return content, tool_calls, reasoning
-        raise HTTPException(502, f"DeepSeek Harness 调用失败：{content or last_stream_err}")
-
-    full_text = "".join(full_text_chunks).strip()
-    reasoning_content = "".join(reasoning_chunks).strip()
-
-    parsed_tool_calls: list[dict[str, Any]] = []
-    for tc in tool_calls_map.values():
-        name = tc.get("name", "")
-        raw_args = tc.get("arguments", "{}")
-        try:
-            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-        except Exception:
-            args = {}
-        parsed_tool_calls.append({"name": name, "arguments": args, "id": tc.get("id")})
-
-    think_matches = THINKING_REGEX.findall(full_text)
-    if think_matches:
-        for tm in think_matches:
-            reasoning_content += ("\n\n" if reasoning_content else "") + tm.strip()
-        full_text = THINKING_REGEX.sub("", full_text).strip()
-
-    if not parsed_tool_calls:
-        for match in TOOL_CALL_REGEX.finditer(full_text):
-            try:
-                parsed = json.loads(match.group(1).strip())
-                if isinstance(parsed, dict) and "name" in parsed:
-                    parsed_tool_calls.append(
-                        {
-                            "name": parsed.get("name"),
-                            "arguments": parsed.get("arguments") or parsed.get("parameters") or {},
-                        }
-                    )
-            except Exception:
-                pass
-
-    return full_text, parsed_tool_calls, reasoning_content
-
-
-_call_hermes_stream = _call_research_llm_stream
 
 
 async def _sync_strategy_code_if_present(
@@ -773,389 +588,76 @@ async def _sync_strategy_code_if_present(
     return None
 
 
-async def run_research_agent_cycle(
+def _start_dsh_turn(
     project: ResearchProject,
-    user_prompt: str,
-    db: AsyncSession,
-    max_turns: int = 6,
-    record_user_prompt: bool = True,
-) -> list[ResearchMessage]:
-    """Run an autonomous multi-turn cycle: User -> DSH Quant Lead -> Tools -> Result."""
-    new_messages: list[ResearchMessage] = []
+    content: str,
+    thought: str | None = None,
+    step: str = "DSH Quant Lead 正在拆解任务并调度研究闭环...",
+    phase: str | None = None,
+    task_profile: str = "",
+) -> asyncio.Task[None]:
+    """Kick off one DSH orchestrator turn in the background.
 
-    # 1. Record user message if not recorded yet
-    if record_user_prompt:
-        user_msg = ResearchMessage(
-            project_id=project.id,
-            role="user",
-            content=user_prompt,
-            message_type="message",
+    DSH is the single orchestrator driving research -> code -> backtest; QuantLab
+    stays the gatekeeper (HTTP bridge + interactive approval registry). The task is
+    tracked in ACTIVE_RESEARCH_TASKS so project status surfaces as busy.
+    """
+    from app.dsh import engine as dsh_engine
+
+    resolved_phase = phase or project.research_phase or "RESEARCH"
+
+    async def _worker() -> None:
+        _set_thinking_status(
+            project.id,
+            "THINKING",
+            step,
+            thought or "",
         )
-        db.add(user_msg)
-        project.updated_at = datetime.now(UTC)
-        await db.commit()
-        await db.refresh(user_msg)
-        new_messages.append(user_msg)
-
-    current_prompt = user_prompt
-    turn = 0
-
-    try:
-        while turn < max_turns:
-            turn += 1
-            _set_thinking_status(
-                project.id,
-                "THINKING",
-                f"DSH Quant Lead 正在统筹量化假设与指标计算规则（轮次 {turn}）...",
+        try:
+            res = await dsh_engine.run_turn(
+                project,
+                content,
+                system_instructions=_instructions_for_task(resolved_phase, task_profile),
+                phase=resolved_phase,
+                task_profile=task_profile,
             )
-            text, tool_calls, reasoning_content = await _call_research_llm_stream(project, current_prompt, db=db)
-
-            if reasoning_content:
-                _set_thinking_status(
-                    project.id,
-                    "THINKING",
-                    "DSH Quant Lead 思考完成，正在组织研讨方案与调度指令...",
-                    thought=reasoning_content,
-                )
-
-            # Record assistant text response if present
-            if text:
-                clean_text = TOOL_CALL_REGEX.sub("", text).strip()
-                if clean_text:
-                    # Check for backtest_params block in text
-                    bp_meta: dict[str, Any] = {}
-                    bp_match = BACKTEST_PARAMS_REGEX.search(clean_text)
-                    if bp_match:
-                        try:
-                            bp_meta = {"backtest_params": json.loads(bp_match.group(1).strip())}
-                        except Exception:
-                            pass
-
-                    # Check for code_approval block in text
-                    ca_meta: dict[str, Any] = {}
-                    ca_match = CODE_APPROVAL_REGEX.search(clean_text)
-                    if ca_match:
-                        try:
-                            ca_meta = {"code_approval": json.loads(ca_match.group(1).strip())}
-                        except Exception:
-                            pass
-
-                    # Auto-detect and sync strategy code from text or disk
-                    await _sync_strategy_code_if_present(clean_text, project, db)
-
-                    meta: dict[str, Any] = {}
-                    if reasoning_content:
-                        meta["reasoning_content"] = reasoning_content
-                    if bp_meta:
-                        meta.update(bp_meta)
-                    if ca_meta:
-                        meta.update(ca_meta)
-
-                    msg_type = (
-                        "code_approval"
-                        if ca_meta
-                        else "backtest_params"
-                        if bp_meta
-                        else "message"
-                    )
-
-                    asst_msg = ResearchMessage(
+        except Exception as exc:
+            logger.error("DSH 回合异常 (project=%s): %s", project.id, exc, exc_info=True)
+            _set_thinking_status(project.id, "IDLE", "DSH 回合异常", f"运行出错：{exc}")
+            return
+        final_text = res.get("final_response") if res.get("ok") else ""
+        if final_text and not res.get("final_response_persisted"):
+            async with SessionLocal() as s:
+                s.add(
+                    ResearchMessage(
                         project_id=project.id,
                         role="assistant",
-                        content=clean_text,
-                        message_type=msg_type,
-                        metadata_json=meta,
-                    )
-                    db.add(asst_msg)
-                    project.updated_at = datetime.now(UTC)
-                    await db.commit()
-                    await db.refresh(asst_msg)
-                    new_messages.append(asst_msg)
-
-            # Fallback safeguard: If LLM did not emit a tool call but user confirmed backtest parameters, intercept and execute
-            if not tool_calls and turn == 1:
-                if "execute_backtest" in current_prompt and ("【回测参数已确认" in current_prompt or "回测参数已确认" in current_prompt):
-                    tc_match = TOOL_CALL_REGEX.search(current_prompt)
-                    if tc_match:
-                        try:
-                            p_data = json.loads(tc_match.group(1).strip())
-                            if p_data.get("name") == "execute_backtest" and p_data.get("arguments"):
-                                tool_calls.append({
-                                    "name": "execute_backtest",
-                                    "arguments": p_data.get("arguments"),
-                                })
-                        except Exception:
-                            pass
-                    if not tool_calls:
-                        strat_m = re.search(r'["\']?strategy_name["\']?\s*:\s*["\']([a-zA-Z0-9_]+)["\']', current_prompt)
-                        syms_m = re.search(r'["\']?symbols["\']?\s*:\s*(\[[^\]]+\])', current_prompt)
-                        sd_m = re.search(r'["\']?start_date["\']?\s*:\s*["\']([0-9\-]+)["\']', current_prompt)
-                        ed_m = re.search(r'["\']?end_date["\']?\s*:\s*["\']([0-9\-]+)["\']', current_prompt)
-                        if strat_m and sd_m and ed_m:
-                            try:
-                                s_list = json.loads(syms_m.group(1)) if syms_m else ["BTCUSDT"]
-                            except Exception:
-                                s_list = ["BTCUSDT"]
-                            tool_calls.append({
-                                "name": "execute_backtest",
-                                "arguments": {
-                                    "strategy_name": strat_m.group(1),
-                                    "symbols": s_list,
-                                    "start_date": sd_m.group(1),
-                                    "end_date": ed_m.group(1),
-                                }
-                            })
-
-            # Guardrails for restricted modes
-            is_analysis_mode = bool(re.search(r"归因分析|回测分析|分析本次回测|只分析原因|只分析指标", user_prompt, re.IGNORECASE))
-            is_repair_mode = bool(re.search(r"修复策略代码|修复报错|单次代码修复|只修改代码|禁止回测|禁止自动回测", user_prompt, re.IGNORECASE))
-
-            filtered_tool_calls: list[dict[str, Any]] = []
-            for tc in tool_calls:
-                t_name = tc.get("name", "")
-                if is_analysis_mode and t_name in ("execute_backtest", "write_strategy_with_claude"):
-                    logger.warning("【安全防护】分析模式拦截工具调用：%s", t_name)
-                    continue
-                if is_repair_mode and t_name == "execute_backtest":
-                    logger.warning("【安全防护】修复模式拦截回测工具调用：%s", t_name)
-                    continue
-                filtered_tool_calls.append(tc)
-            tool_calls = filtered_tool_calls
-
-            # If no tool calls, the cycle is complete
-            if not tool_calls:
-                break
-
-            # Execute each tool call
-            tool_results_summary: list[str] = []
-            has_backtest = False
-            has_proposal = False
-            has_write_strategy = False
-            write_strategy_result: dict[str, Any] | None = None
-
-            for tc in tool_calls:
-                tool_name = tc.get("name", "")
-                tool_args = tc.get("arguments", {})
-
-                if tool_name == "execute_backtest":
-                    has_backtest = True
-                elif tool_name in ("propose_code_approval", "propose_backtest_params"):
-                    has_proposal = True
-                elif tool_name in ("write_strategy_with_claude", "write_strategy_code"):
-                    has_write_strategy = True
-
-                # Update thinking status for tool execution
-                if tool_name == "propose_code_approval":
-                    _set_thinking_status(
-                        project.id,
-                        "WAITING_APPROVAL",
-                        "策略设计方案已就绪，已向用户发起编码审批请求...",
-                    )
-                elif tool_name in ("write_strategy_with_claude", "write_strategy_code"):
-                    _set_thinking_status(
-                        project.id,
-                        "TOOL_RUNNING",
-                        f"正在编写策略「{tool_args.get('strategy_name', '策略')}」...",
-                    )
-                elif tool_name == "execute_backtest":
-                    _set_thinking_status(
-                        project.id,
-                        "TOOL_RUNNING",
-                        f"正在调用 NautilusTrader 执行回测 ({tool_args.get('strategy_name')})...",
-                    )
-                elif tool_name == "propose_backtest_params":
-                    _set_thinking_status(
-                        project.id,
-                        "TOOL_RUNNING",
-                        "正在生成交互式回测参数配置卡片...",
-                    )
-                else:
-                    _set_thinking_status(
-                        project.id,
-                        "TOOL_RUNNING",
-                        f"DeepSeek Harness 正在调用工具：{tool_name}...",
-                    )
-
-                # Record tool invocation message
-                call_msg = ResearchMessage(
-                    project_id=project.id,
-                    role="assistant",
-                    content=f"调用工具 `{tool_name}`: {json.dumps(tool_args, ensure_ascii=False)}",
-                    message_type="tool_call",
-                    metadata_json={"tool_name": tool_name, "arguments": tool_args},
-                )
-                db.add(call_msg)
-                project.updated_at = datetime.now(UTC)
-                await db.commit()
-                await db.refresh(call_msg)
-                new_messages.append(call_msg)
-
-                # Execute tool
-                try:
-                    result = await dispatch_tool_call(tool_name, tool_args, project_id=project.id, db=db)
-                except Exception as exc:
-                    logger.error("工具执行出错 %s: %s", tool_name, exc)
-                    result = {"ok": False, "error": f"工具执行异常：{exc}"}
-
-                if tool_name in ("write_strategy_with_claude", "write_strategy_code"):
-                    write_strategy_result = result
-                    if result and result.get("ok"):
-                        strat_slug = result.get("strategy_name")
-                        if strat_slug:
-                            strat_rec = await ensure_strategy_db_record(strat_slug, db, project_id=project.id)
-                            if strat_rec and strat_rec[0]:
-                                project.strategy_id = strat_rec[0].id
-                                project.updated_at = datetime.now(UTC)
-                                await db.commit()
-
-                # If backtest was triggered, record latest_backtest_id
-                if tool_name == "execute_backtest" and result.get("run_id"):
-                    project.latest_backtest_id = result["run_id"]
-                    project.updated_at = datetime.now(UTC)
-                    await db.commit()
-
-                # Record tool result message
-                res_content = json.dumps(result, ensure_ascii=False, indent=2)
-                msg_type = (
-                    "code_approval"
-                    if tool_name == "propose_code_approval"
-                    else "backtest_params"
-                    if tool_name == "propose_backtest_params"
-                    else "backtest_result"
-                    if tool_name == "execute_backtest"
-                    else "tool_output"
-                )
-                meta = {
-                    "tool_name": tool_name,
-                    "result": result,
-                }
-                if tool_name == "propose_code_approval":
-                    meta["code_approval"] = tool_args
-                    strat_name = tool_args.get("strategy_name", "custom_strategy")
-                    strat_summary = tool_args.get("strategy_summary", "")
-                    key_rules = tool_args.get("key_rules", [])
-                    param_specs = tool_args.get("parameter_specs", {})
-
-                    rules_md = "\n".join([f"- {r}" for r in key_rules]) if key_rules else "- 待细化"
-                    params_rows = ""
-                    if isinstance(param_specs, dict) and param_specs:
-                        params_rows = (
-                            "\n\n**预设参数清单**：\n| 参数名 | 默认值 |\n| :--- | :--- |\n"
-                            + "\n".join([f"| `{k}` | `{v}` |" for k, v in param_specs.items()])
-                        )
-
-                    res_content = (
-                        f"### 📋 量化策略设计方案：`{strat_name}`\n\n"
-                        f"**策略核心构想**：\n{strat_summary}\n\n"
-                        f"**核心交易规则**：\n{rules_md}"
-                        f"{params_rows}\n\n"
-                        f"*(策略设计方案已就绪，请核对下方方案卡片并确认是否批准编写代码)*"
-                    )
-                elif tool_name == "propose_backtest_params":
-                    meta["backtest_params"] = tool_args
-                elif tool_name == "execute_backtest":
-                    meta["backtest_result"] = result
-
-                out_msg = ResearchMessage(
-                    project_id=project.id,
-                    role="tool",
-                    content=res_content,
-                    message_type=msg_type,
-                    metadata_json=meta,
-                )
-                db.add(out_msg)
-                project.updated_at = datetime.now(UTC)
-                await db.commit()
-                await db.refresh(out_msg)
-                new_messages.append(out_msg)
-
-                tool_results_summary.append(
-                    f"【工具 {tool_name} 执行结果】：\n{json.dumps(result, ensure_ascii=False)}"
-                )
-
-            # 1. Backtest execution completed: Prohibit automatic error fixes and automatic backtest analysis.
-            # Terminate agent cycle immediately and let frontend display results/errors for manual user confirmation.
-            if has_backtest:
-                logger.info("回测工具执行完成，立即终止自动循环，等待用户确认后续操作。")
-                break
-
-            # 2. Proposals (code approval or backtest params) waiting for user manual interaction: Terminate cycle.
-            if has_proposal:
-                logger.info("审批/参数方案已生成，等待用户操作确认，终止自动循环。")
-                break
-
-            # 3. Strategy code write/repair completed: Allow 1 concise summary turn, with strict prohibition of backtesting.
-            if has_write_strategy:
-                if write_strategy_result and write_strategy_result.get("ok"):
-                    current_prompt = (
-                        "策略代码已成功编写并通过 4 级 Pre-Flight 运行期沙盒校验。\n"
-                        "请用 2-3 句话简短向用户汇报策略编写的核心逻辑与指标，并告知代码已通过 4 级沙盒校验就绪。\n"
-                        "【系统安全红线】：严禁调用 execute_backtest 工具，严禁擅自启动回测，严禁生成回测参数卡片。汇报完毕后等待用户下一步明确指令。"
-                    )
-                else:
-                    err_msg = write_strategy_result.get("error", "Pre-Flight 沙盒校验未通过") if write_strategy_result else "代码生成未完成"
-                    current_prompt = (
-                        f"策略代码编写/修改未通过 4 级 Pre-Flight 运行期沙盒校验。\n"
-                        f"错误详情：\n{err_msg}\n\n"
-                        f"请用 2-3 句话如实向用户汇报策略编写未能通过沙盒检测的具体报错层级与原因，并说明修复建议，提示用户可查看右侧日志，等待用户下一步修改指令。\n"
-                        f"【系统安全红线】：严禁谎称代码编写成功，严禁调用 execute_backtest 工具，严禁擅自启动回测。"
-                    )
-            else:
-                current_prompt = "\n\n".join(tool_results_summary)
-                current_prompt += "\n\n请根据上述工具执行结果简短汇报。注意：若未收到用户明确的回测或修复指令，严禁擅自调用回测或修改代码。"
-
-        project.updated_at = datetime.now(UTC)
-        await db.commit()
-    finally:
-        _set_thinking_status(project.id, "IDLE", "就绪", "")
-
-    return new_messages
-
-
-run_hermes_agent_cycle = run_research_agent_cycle
-
-
-async def _run_research_background(project_id: str, prompt: str) -> None:
-    """Run DSH agent cycle in a background task decoupled from HTTP request lifecycle."""
-    lock = _get_project_lock(project_id)
-    async with lock:
-        async with SessionLocal() as db:
-            project = await db.get(ResearchProject, project_id)
-            if not project:
-                return
-            try:
-                await run_research_agent_cycle(
-                    project, prompt, db=db, record_user_prompt=False
-                )
-            except Exception as exc:
-                logger.error("DSH Agent 运行异常 (project=%s): %s", project_id, exc, exc_info=True)
-                try:
-                    err_msg = ResearchMessage(
-                        project_id=project.id,
-                        role="assistant",
-                        content=f"⚠️ DeepSeek Harness 处理过程中遇到异常：{exc}",
+                        content=final_text,
                         message_type="message",
+                        metadata_json={"agent_role": "lead", "event_type": "message", "is_dsh_run": True},
                     )
-                    db.add(err_msg)
-                    project.updated_at = datetime.now(UTC)
-                    await db.commit()
-                except Exception:
-                    pass
+                )
+                await s.commit()
+        if not res.get("ok"):
+            error = res.get("error") or "DSH 未生成最终研究结论"
+            async with SessionLocal() as s:
+                s.add(ResearchMessage(
+                    project_id=project.id,
+                    role="system",
+                    content=error,
+                    message_type="error",
+                    metadata_json={"is_dsh_run": True, "error_code": res.get("error_code", "DSH_RUN_FAILED")},
+                ))
+                await s.commit()
+            _set_thinking_status(project.id, "FAILED", "DSH 回合未完成", error)
+        elif res.get("pending"):
+            _set_thinking_status(project.id, "WAITING_APPROVAL", "等待你的审批", res["pending"][0].get("summary", "DSH 提交了待确认操作"))
+        else:
+            _set_thinking_status(project.id, "IDLE", "就绪", "")
 
-
-_run_hermes_background = _run_research_background
-
-
-def _start_research_task(project_id: str, prompt: str) -> asyncio.Task[None]:
-    """Start a background research task and track it in ACTIVE_RESEARCH_TASKS."""
-    task = asyncio.create_task(_run_research_background(project_id, prompt))
-    ACTIVE_RESEARCH_TASKS[project_id] = task
-
-    def _cleanup(t: asyncio.Task[None]):
-        if ACTIVE_RESEARCH_TASKS.get(project_id) is t:
-            ACTIVE_RESEARCH_TASKS.pop(project_id, None)
-
-    task.add_done_callback(_cleanup)
+    task = asyncio.create_task(_worker())
+    ACTIVE_RESEARCH_TASKS[project.id] = task
+    task.add_done_callback(lambda t, pid=project.id: ACTIVE_RESEARCH_TASKS.pop(pid, None) if ACTIVE_RESEARCH_TASKS.get(pid) is t else None)
     return task
 
 
@@ -1173,29 +675,55 @@ async def list_projects(client_id: str | None = None, db: AsyncSession = Depends
 
 @router.post("")
 async def create_project(data: ResearchProjectCreate, db: AsyncSession = Depends(get_db)):
+    source: ResearchProject | None = None
+    if data.source_project_id:
+        source = await db.get(ResearchProject, data.source_project_id)
+        if source is None:
+            raise HTTPException(404, "用于续接的历史会话不存在")
+        if source.client_id != data.client_id:
+            raise HTTPException(403, "不能续接其他用户的研究会话")
+        if not source.strategy_id:
+            raise HTTPException(409, "该历史会话尚未关联策略，不能作为续接来源")
+
+    inherited_phase = source.research_phase if source else "RESEARCH"
+    if inherited_phase not in {"RESEARCH", "IMPLEMENTATION", "BACKTEST", "RESULT_REVIEW"}:
+        inherited_phase = "IMPLEMENTATION" if source else "RESEARCH"
     project = ResearchProject(
         client_id=data.client_id,
         title=data.title,
         original_idea=data.original_idea,
         conversation_id=f"quantlab-research-{uuid.uuid4()}",
+        strategy_id=source.strategy_id if source else None,
+        latest_backtest_id=source.latest_backtest_id if source else None,
+        research_phase=inherited_phase,
     )
     db.add(project)
+    await db.flush()
+    if source:
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="assistant",
+            content=await _build_session_handoff(source, db),
+            message_type="message",
+            metadata_json={
+                "event_type": "session_handoff",
+                "source_project_id": source.id,
+                "strategy_id": source.strategy_id,
+                "is_dsh_run": False,
+            },
+        ))
     await db.commit()
     await db.refresh(project)
 
-    # If original_idea is provided, immediately persist user message and trigger background task
+    # Every user-authored request, including the initial idea, goes through the
+    # same DSH intent manager before a business phase is selected.
     if data.original_idea and data.original_idea.strip():
         idea = data.original_idea.strip()
-        user_msg = ResearchMessage(
-            project_id=project.id,
-            role="user",
-            content=idea,
-            message_type="message",
+        await run_dsh_pipeline_endpoint(
+            project.id,
+            ResearchMessageCreate(content=idea),
+            db,
         )
-        db.add(user_msg)
-        project.updated_at = datetime.now(UTC)
-        await db.commit()
-        _start_research_task(project.id, idea)
 
     return _project_out(project)
 
@@ -1238,39 +766,36 @@ async def send_message(
     data: ResearchMessageCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    project = await _project(project_id, db)
-    if project.status == ResearchStatus.ARCHIVED:
-        raise HTTPException(409, "研究项目已归档，请先重新打开")
-
     content = data.content.strip()
     if not content:
         raise HTTPException(400, "消息内容不能为空")
-
-    # 1. Immediately persist user message to DB and commit
-    user_msg = ResearchMessage(
-        project_id=project.id,
-        role="user",
-        content=content,
-        message_type="message",
+    await run_dsh_pipeline_endpoint(
+        project_id,
+        ResearchMessageCreate(content=content),
+        db,
     )
-    db.add(user_msg)
-    project.updated_at = datetime.now(UTC)
-    await db.commit()
-    await db.refresh(user_msg)
-
-    # 2. Trigger research agent cycle in decoupled background task
-    _start_research_task(project.id, content)
-
+    user_msg = await db.scalar(
+        select(ResearchMessage)
+        .where(
+            ResearchMessage.project_id == project_id,
+            ResearchMessage.role == "user",
+        )
+        .order_by(ResearchMessage.created_at.desc())
+        .limit(1)
+    )
     return [_message_out(user_msg)]
 
 
 @router.get("/{project_id}/backtests")
 async def list_project_backtests(project_id: str, db: AsyncSession = Depends(get_db)):
-    await _project(project_id, db)
+    project = await _project(project_id, db)
+    scope = BacktestRun.research_project_id == project_id
+    if project.latest_backtest_id:
+        scope = or_(scope, BacktestRun.id == project.latest_backtest_id)
     rows = (
         await db.scalars(
             select(BacktestRun)
-            .where(BacktestRun.research_project_id == project_id)
+            .where(scope)
             .order_by(BacktestRun.created_at.desc())
         )
     ).all()
@@ -1299,12 +824,38 @@ async def get_project_writing_log(project_id: str, db: AsyncSession = Depends(ge
 
 @router.get("/{project_id}/thinking-status")
 async def get_project_thinking_status(project_id: str, db: AsyncSession = Depends(get_db)):
-    """Get real-time thinking status and reasoning content for Research Agent."""
+    """Get the current DSH execution stage without fabricating model reasoning."""
     await _project(project_id, db)
-    return RESEARCH_THINKING_STATUS.get(
+    fallback = RESEARCH_THINKING_STATUS.get(
         project_id,
         {"status": "IDLE", "step": "就绪", "thought": "", "updated_at": datetime.now(UTC).isoformat()},
     )
+    from app.dsh import engine as dsh_engine
+
+    live = dsh_engine.get_status(project_id)
+    if live.get("status") in {"THINKING", "TOOL_RUNNING", "GENERATING", "WAITING_APPROVAL", "FAILED"}:
+        return {
+            "status": live["status"],
+            "step": live.get("stage") or fallback.get("step", "DSH 正在执行"),
+            "thought": live.get("error", "") if live.get("status") == "FAILED" else "",
+            "updated_at": live.get("updated_at") or fallback.get("updated_at"),
+            "phase": live.get("metrics", {}).get("phase", "RESEARCH"),
+            "metrics": live.get("metrics", {}),
+            "error": live.get("error", ""),
+        }
+    return {**fallback, "phase": live.get("metrics", {}).get("phase", "RESEARCH"), "metrics": live.get("metrics", {}), "error": live.get("error", "")}
+
+
+@router.get("/{project_id}/dsh/events")
+async def get_project_dsh_events(project_id: str, db: AsyncSession = Depends(get_db)):
+    """Return the latest DSH turn's real SDK events for the polling live UI."""
+    await _project(project_id, db)
+    from app.dsh import engine as dsh_engine
+
+    return {
+        "events": dsh_engine.get_live_session_events(project_id),
+        "status": dsh_engine.get_status(project_id),
+    }
 
 
 @router.get("/{project_id}/strategy")
@@ -1497,8 +1048,8 @@ async def export_research_project(
     ).all()
 
     # 2. Fetch DSH events
-    from .dsh.runtime import dsh_runtime
-    dsh_events = [e.to_dict() for e in dsh_runtime.get_session_events(f"dsh_project_{project.id}")]
+    from app.dsh import engine as dsh_engine
+    dsh_events = dsh_engine.get_session_events(project.id)
 
     # 3. Fetch writing log
     writing_log = get_writing_log_tool(project.id)
@@ -1711,27 +1262,191 @@ async def delete_project(project_id: str, db: AsyncSession = Depends(get_db)):
     return {"ok": True, "message": "研究项目已删除"}
 
 
-@router.post("/tools/write-strategy")
-async def write_strategy_endpoint(
-    req: ResearchWriteStrategyRequest,
+async def _resolve_action_run(
+    project: ResearchProject,
+    db: AsyncSession,
+    *,
+    run_id: str | None = None,
+    status: RunStatus | None = None,
+) -> BacktestRun:
+    scope = BacktestRun.research_project_id == project.id
+    if project.latest_backtest_id:
+        scope = or_(scope, BacktestRun.id == project.latest_backtest_id)
+    query = select(BacktestRun).where(scope)
+    if run_id:
+        query = query.where(BacktestRun.id == run_id)
+    if status is not None:
+        query = query.where(BacktestRun.status == status)
+    run = await db.scalar(query.order_by(BacktestRun.created_at.desc()).limit(1))
+    if run is None:
+        label = "失败回测" if status == RunStatus.FAILED else "已完成回测"
+        raise HTTPException(409, f"当前项目没有可用的{label}记录")
+    return run
+
+
+def _complete_backtest_arguments(arguments: dict[str, Any]) -> bool:
+    return bool(
+        str(arguments.get("strategy_name") or "").strip()
+        and arguments.get("symbols")
+        and arguments.get("start_date")
+        and arguments.get("end_date")
+    )
+
+
+@router.post("/{project_id}/dsh/action")
+async def run_dsh_action_endpoint(
+    project_id: str,
+    data: DshActionRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """API endpoint for strategy code generation."""
-    res = await write_strategy_code(
-        strategy_name=req.strategy_name,
-        instructions=req.instructions,
-        is_fix=req.is_fix,
-        error_context=req.error_context,
-        specification=req.specification,
-        project_id=req.project_id,
-        db=db,
-    )
-    if not res.get("ok"):
-        raise HTTPException(
-            status_code=400,
-            detail=res.get("error", "Strategy generation failed"),
+    """Run a typed high-frequency action without an intent-classifier turn."""
+    project = await _project(project_id, db)
+    if project.status == ResearchStatus.ARCHIVED:
+        raise HTTPException(409, "研究项目已归档，请先重新打开")
+    if project.id in ACTIVE_RESEARCH_TASKS and not ACTIVE_RESEARCH_TASKS[project.id].done():
+        raise HTTPException(409, "当前 DSH 任务仍在执行，请等待完成或先停止任务")
+
+    from app.dsh.bridge import create_pending_proposal, pending_approvals
+
+    if pending_approvals(project.id):
+        raise HTTPException(409, "当前已有待审批卡片，请先批准或拒绝后再启动新任务")
+
+    action_run: BacktestRun | None = None
+    if data.action in {"RUN_BACKTEST", "FIX_ERROR"} and not project.strategy_id:
+        raise HTTPException(409, "当前项目还没有可执行策略，请先编写策略")
+    if data.action == "FIX_ERROR":
+        action_run = await _resolve_action_run(
+            project,
+            db,
+            run_id=data.run_id,
+            status=RunStatus.FAILED,
         )
-    return res
+    elif data.action == "ANALYZE_BACKTEST":
+        action_run = await _resolve_action_run(
+            project,
+            db,
+            run_id=data.run_id,
+            status=RunStatus.COMPLETED,
+        )
+
+    labels = {
+        "WRITE_STRATEGY": "编写策略",
+        "RUN_BACKTEST": "执行回测",
+        "FIX_ERROR": "修复报错",
+        "ANALYZE_BACKTEST": "回测分析",
+    }
+    user_content = data.content.strip() or labels[data.action]
+    user_msg = ResearchMessage(
+        project_id=project.id,
+        role="user",
+        content=user_content,
+        message_type="message",
+        metadata_json={
+            "is_dsh_run": True,
+            "event_type": "fixed_action",
+            "action": data.action,
+        },
+    )
+    db.add(user_msg)
+    project.updated_at = datetime.now(UTC)
+    await db.commit()
+
+    if data.action == "RUN_BACKTEST" and _complete_backtest_arguments(data.arguments):
+        arguments = dict(data.arguments)
+        if "parameters" not in arguments and "strategy_parameters" in arguments:
+            arguments["parameters"] = arguments.pop("strategy_parameters")
+        proposal = await create_pending_proposal(
+            project,
+            "execute_backtest_tool",
+            arguments,
+            db,
+            proposal_key=f"fixed-action:{user_msg.id}",
+        )
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="assistant",
+            content="已使用确认后的参数生成回测执行卡。请在下方核对并批准；批准后将直接提交 QuantLab 引擎，不再调用模型。",
+            message_type="message",
+            metadata_json={"event_type": "fixed_action_ready", "action": data.action},
+        ))
+        await db.commit()
+        _set_thinking_status(project.id, "WAITING_APPROVAL", "等待你确认回测执行卡", "")
+        return {
+            "ok": True,
+            "kicked_off": False,
+            "action": data.action,
+            "phase": project.research_phase,
+            "proposal": proposal,
+        }
+
+    recent_messages = await _recent_intent_context(project.id, db)
+    task_profile = data.action
+    if data.action == "WRITE_STRATEGY":
+        latest_plan = next(
+            (item["content"] for item in reversed(recent_messages) if item["role"] == "assistant"),
+            "",
+        )
+        phase = "IMPLEMENTATION"
+        prompt = _implementation_prompt(
+            project,
+            data.content.strip() or "按已确认方案直接生成策略代码",
+            latest_plan,
+        )
+        step = "DSH 正在直接编写策略并进行一次集中验证..."
+    elif data.action == "RUN_BACKTEST":
+        phase = "BACKTEST"
+        prompt = (
+            "这是用户点击的固定回测动作。读取当前策略 Manifest 与本地 Catalog，"
+            "只调用必要工具生成一张可编辑的回测参数卡，然后立即停止并等待用户确认。"
+            "不要重新讨论策略、不要修改代码、不要执行回测。"
+        )
+        step = "DSH 正在准备最小回测参数卡..."
+    elif data.action == "FIX_ERROR":
+        run = action_run
+        assert run is not None
+        config = run.config or {}
+        strategy_name = str(config.get("strategy_name") or run.name or "strategy")
+        phase = "IMPLEMENTATION"
+        prompt = (
+            f"这是用户点击的单次修复动作。失败回测 ID：{run.id}\n"
+            f"策略：{strategy_name}\n"
+            f"失败阶段：{run.stage}\n"
+            f"报错：{(run.error_message or '未知错误')[-6000:]}\n\n"
+            "直接读取当前策略，定位根因，只进行一次针对性修复和一次集中验证，"
+            "然后调用 write_strategy_code 提交审批卡并停止。禁止生成回测参数，禁止执行回测。"
+        )
+        step = "DSH 正在针对失败记录执行单次代码修复..."
+    else:
+        run = action_run
+        assert run is not None
+        phase = "RESULT_REVIEW"
+        prompt = (
+            f"这是用户点击的固定回测分析动作。回测 ID：{run.id}\n"
+            f"策略/任务：{run.name}\n"
+            f"配置：{json.dumps(run.config or {}, ensure_ascii=False, default=str)[:4000]}\n"
+            f"指标：{json.dumps(run.metrics or {}, ensure_ascii=False, default=str)[:4000]}\n\n"
+            "直接输出简洁、可执行的绩效归因：收益来源、亏损来源、市场适应性、风险与下一步建议。"
+            "禁止修改代码、生成参数或重新回测。"
+        )
+        step = "DSH 正在直接分析指定回测结果..."
+
+    project.research_phase = phase
+    project.updated_at = datetime.now(UTC)
+    await db.commit()
+    _start_dsh_turn(
+        project,
+        prompt,
+        step=step,
+        phase=phase,
+        task_profile=task_profile,
+    )
+    return {
+        "ok": True,
+        "kicked_off": True,
+        "action": data.action,
+        "phase": phase,
+        "message": "已跳过意图分析并启动固定任务。",
+    }
 
 
 @router.post("/{project_id}/dsh/run")
@@ -1740,15 +1455,17 @@ async def run_dsh_pipeline_endpoint(
     data: ResearchMessageCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Execute the full DeepSeek Harness (DSH) Star-Topology Multi-Agent workflow."""
+    """Kick off an agent turn in the project's official DSH session.
+
+    The DSH SDK runtime runs as a child process and drives the whole
+    research -> code -> backtest workflow as the orchestrator. QuantLab acts
+    as the gatekeeper: domain tools go through the HTTP bridge, and
+    write/backtest actions pause at the interactive approval registry.
+    """
     project = await _project(project_id, db)
-    from app.dsh.orchestrator import DSHOrchestrator
-    from app.models import LlmConfiguration
+    if project.status == ResearchStatus.ARCHIVED:
+        raise HTTPException(409, "研究项目已归档，请先重新打开")
 
-    cfg = await db.get(LlmConfiguration, 1)
-    orchestrator = DSHOrchestrator(session_id=project.id, db_config=cfg)
-
-    # Record User message
     user_msg = ResearchMessage(
         project_id=project.id,
         role="user",
@@ -1756,45 +1473,268 @@ async def run_dsh_pipeline_endpoint(
         message_type="message",
     )
     db.add(user_msg)
+    project.updated_at = datetime.now(UTC)
     await db.commit()
 
-    async def _handle_agent_event(event):
-        try:
-            async with SessionLocal() as s:
-                m_type = "thought" if event.event_type == "thought" else ("tool" if event.agent_role == "tool" else "message")
-                m = ResearchMessage(
-                    project_id=project.id,
-                    role="assistant" if event.agent_role in ("lead", "researcher", "developer", "reviewer") else event.agent_role,
-                    content=f"【{event.agent_role.upper()}】: {event.content}" if event.agent_role != "lead" else event.content,
-                    message_type=m_type,
-                    metadata_json={
-                        "agent_role": event.agent_role,
-                        "event_type": event.event_type,
-                        **event.metadata,
-                    },
-                )
-                s.add(m)
-                await s.commit()
-        except Exception:
-            pass
+    from app.dsh import engine as dsh_engine
+    from app.dsh.bridge import pending_approvals
 
-    res = await orchestrator.execute_task(
-        user_prompt=data.content,
-        project_id=project.id,
-        db=db,
-        on_event=None,
+    pending = pending_approvals(project.id)
+    recent_messages = await _recent_intent_context(project.id, db)
+    intent_result = _fast_intent_decision(data.content, pending)
+    _set_thinking_status(
+        project.id,
+        "THINKING",
+        "正在执行明确指令的快速路由" if intent_result else "DSH 正在结合对话判断用户意图",
+        "",
     )
-
-    if res.get("strategy_name"):
-        strat = await db.scalar(select(Strategy).where(Strategy.slug == res["strategy_name"]))
-        if strat:
-            project.strategy_id = strat.id
-            await db.commit()
-
-    if res.get("backtest", {}).get("run_id"):
-        project.latest_backtest_id = res["backtest"]["run_id"]
-        project.status = ResearchStatus.RESULT_REVIEW
+    try:
+        if intent_result is None:
+            intent_result = await dsh_engine.classify_intent(
+                project,
+                data.content,
+                recent_messages,
+                pending,
+            )
+    except Exception as exc:
+        logger.error("DSH 意图判断失败 (project=%s): %s", project.id, exc, exc_info=True)
+        reply = f"DSH 暂时无法可靠判断本次意图，未执行任何写码或回测操作：{exc}"
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="system",
+            content=reply,
+            message_type="error",
+            metadata_json={"event_type": "intent_error", "is_dsh_run": True},
+        ))
         await db.commit()
+        _set_thinking_status(project.id, "FAILED", "DSH 意图判断失败", str(exc))
+        return {"ok": False, "kicked_off": False, "error": str(exc), "message": reply}
 
-    return res
+    intent = intent_result["intent"]
+    confidence = float(intent_result.get("confidence", 0.0))
+    user_msg.metadata_json = {
+        "is_dsh_run": True,
+        "event_type": "intent_decision",
+        "intent": intent_result,
+    }
+    approval_intent = intent in {"APPROVE_PENDING_ACTION", "REJECT_PENDING_ACTION"}
+    needs_clarification = bool(intent_result.get("needs_clarification"))
+    if confidence < (0.9 if approval_intent else 0.6):
+        needs_clarification = True
 
+    if needs_clarification or intent == "UNKNOWN":
+        reply = intent_result.get("clarification_question") or "我还不能确定你希望继续研究、编写策略还是进行回测，请明确一下下一步。"
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="assistant",
+            content=reply,
+            message_type="message",
+            metadata_json={
+                "event_type": "intent_clarification",
+                "is_dsh_run": True,
+                "intent": intent_result,
+            },
+        ))
+        await db.commit()
+        _set_thinking_status(project.id, "IDLE", "等待你澄清下一步", "")
+        return {
+            "ok": True,
+            "kicked_off": False,
+            "intent": intent,
+            "needs_clarification": True,
+            "message": reply,
+        }
+
+    if approval_intent:
+        request_id = intent_result.get("pending_request_id")
+        pending_ids = {item.get("request_id") for item in pending}
+        if not request_id and len(pending) == 1:
+            request_id = pending[0].get("request_id")
+        if not request_id or request_id not in pending_ids:
+            reply = "当前没有与这次确认匹配的待审批请求，请先查看或重新生成操作卡片。"
+            db.add(ResearchMessage(
+                project_id=project.id,
+                role="assistant",
+                content=reply,
+                message_type="message",
+                metadata_json={"event_type": "intent_approval_mismatch", "intent": intent_result},
+            ))
+            await db.commit()
+            _set_thinking_status(project.id, "IDLE", "没有匹配的待审批请求", "")
+            return {"ok": True, "kicked_off": False, "intent": intent, "message": reply}
+        result = await dsh_approve_request(
+            project.id,
+            DshApproveRequest(
+                request_id=request_id,
+                approved=intent == "APPROVE_PENDING_ACTION",
+                feedback=(intent_result.get("normalized_request") or data.content)[-2000:],
+            ),
+            db,
+        )
+        return {**result, "intent": intent, "kicked_off": False}
+
+    phase = INTENT_PHASES.get(intent, "RESEARCH")
+    if phase == "BACKTEST" and not project.strategy_id:
+        reply = "DSH 判断你希望进行回测，但当前项目还没有可执行的策略代码。请先确认策略方案并进入编码。"
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="assistant",
+            content=reply,
+            message_type="message",
+            metadata_json={"event_type": "intent_state_guard", "intent": intent_result},
+        ))
+        await db.commit()
+        _set_thinking_status(project.id, "IDLE", "等待先完成策略编码", "")
+        return {"ok": True, "kicked_off": False, "intent": intent, "message": reply}
+    if phase == "RESULT_REVIEW" and intent == "ANALYZE_BACKTEST" and not project.latest_backtest_id:
+        reply = "DSH 判断你希望分析回测结果，但当前项目还没有已完成的回测记录。"
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="assistant",
+            content=reply,
+            message_type="message",
+            metadata_json={"event_type": "intent_state_guard", "intent": intent_result},
+        ))
+        await db.commit()
+        _set_thinking_status(project.id, "IDLE", "当前没有可分析的回测结果", "")
+        return {"ok": True, "kicked_off": False, "intent": intent, "message": reply}
+
+    project.research_phase = phase
+    project.updated_at = datetime.now(UTC)
+    await db.commit()
+    if phase == "IMPLEMENTATION":
+        latest_plan = next(
+            (item["content"] for item in reversed(recent_messages) if item["role"] == "assistant"),
+            "",
+        )
+        turn_prompt = _implementation_prompt(
+            project,
+            intent_result.get("normalized_request") or data.content,
+            latest_plan,
+        )
+        step = "DSH 正在生成完整策略代码并准备审批提案..."
+    else:
+        turn_prompt = _intent_routed_prompt(intent_result, data.content)
+        handoff_context = await _session_handoff_context(project.id, db)
+        if handoff_context:
+            turn_prompt += f"\n\n【上一会话交接摘要】\n{handoff_context}"
+        step = {
+            "RESEARCH": "DSH 正在研究并完善策略方案...",
+            "BACKTEST": "DSH 正在准备回测参数或提交回测任务...",
+            "RESULT_REVIEW": "DSH 正在读取并分析当前结果...",
+        }.get(phase, "DSH 正在执行当前任务...")
+
+    task_profile = {
+        "START_IMPLEMENTATION": "WRITE_STRATEGY",
+        "MODIFY_STRATEGY_CODE": "FIX_ERROR",
+        "REQUEST_BACKTEST": "RUN_BACKTEST",
+        "ANALYZE_BACKTEST": "ANALYZE_BACKTEST",
+    }.get(intent, "")
+    _start_dsh_turn(
+        project,
+        turn_prompt,
+        step=step,
+        phase=phase,
+        task_profile=task_profile,
+    )
+    return {
+        "ok": True,
+        "kicked_off": True,
+        "intent": intent,
+        "confidence": confidence,
+        "phase": phase,
+        "message": "DSH 已完成意图判断并启动对应任务。",
+    }
+
+
+@router.post("/{project_id}/dsh/cancel")
+async def dsh_cancel_run(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel the running DSH turn (if any) for a research project."""
+    proj = await _project(project_id, db)
+    from app.dsh import engine as dsh_engine
+
+    dsh_engine.cancel_turn(proj.id)
+    db.add(ResearchMessage(
+        project_id=proj.id,
+        role="system",
+        content="已按用户要求强制停止当前 DSH / LLM 任务。",
+        message_type="message",
+        metadata_json={"event_type": "user_cancel", "is_dsh_run": True},
+    ))
+    proj.updated_at = datetime.now(UTC)
+    await db.commit()
+    _set_thinking_status(proj.id, "IDLE", "已取消 DSH 回合", "")
+    return {"ok": True, "message": "已取消 DSH 回合"}
+
+
+@router.get("/{project_id}/dsh/pending")
+async def dsh_pending_approvals(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    await _project(project_id, db)
+    from app.dsh.bridge import pending_approvals
+
+    return pending_approvals(project_id)
+
+
+@router.post("/{project_id}/dsh/approve")
+async def dsh_approve_request(
+    project_id: str,
+    data: DshApproveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Record a user decision and execute the reviewed proposal directly."""
+    project = await _project(project_id, db)
+    from app.dsh.bridge import approve_proposal, execute_approved_proposal, pending_approvals
+    from app.dsh import engine as dsh_engine
+
+    pending_before = {item["request_id"]: item for item in pending_approvals(project.id)}
+    pending_entry = pending_before.get(data.request_id, {})
+    approved_tool = pending_entry.get("tool")
+    decision = approve_proposal(project.id, data.request_id, data.approved, data.feedback)
+    if data.approved:
+        # Stop the model turn which produced the proposal before executing it;
+        # otherwise it may finish later and append a stale "please approve"
+        # message after the approval has already been consumed.
+        dsh_engine.cancel_turn(project.id)
+        if approved_tool == "write_strategy_code":
+            project.research_phase = "IMPLEMENTATION"
+        elif approved_tool == "execute_backtest_tool":
+            project.research_phase = "BACKTEST"
+        await db.commit()
+        execution = await execute_approved_proposal(project, data.request_id, db)
+        result = execution.get("result") or {}
+        result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+        result_run_id = result.get("run_id") if isinstance(result, dict) else None
+        result_summary = json.dumps(result, ensure_ascii=False, default=str)[:12_000]
+        db.add(ResearchMessage(
+            project_id=project.id,
+            role="assistant",
+            content=(
+                f"已执行批准的 {approved_tool}。"
+                + ("执行成功。" if result_ok else "执行完成，但校验未通过。")
+                + f"\n\n```json\n{result_summary}\n```"
+            ),
+            message_type="message",
+            metadata_json={
+                "is_dsh_run": False,
+                "event_type": "approval_execution",
+                "request_id": data.request_id,
+                "tool": approved_tool,
+                "ok": result_ok,
+                "run_id": result_run_id,
+                "arguments": pending_entry.get("arguments") or {},
+            },
+        ))
+        await db.commit()
+        _set_thinking_status(project.id, "IDLE", "审批操作已执行", "")
+    else:
+        project.research_phase = "RESEARCH" if approved_tool == "write_strategy_code" else "IMPLEMENTATION"
+        await db.commit()
+        _set_thinking_status(project.id, "IDLE", "已拒绝该操作", data.feedback or "")
+
+    return {"ok": True, **decision}

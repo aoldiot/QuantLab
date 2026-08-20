@@ -262,3 +262,15 @@ STRATEGY_MANIFEST = StrategyManifest(
     assert len(res.steps) == 4
     for s in res.steps:
         assert s.ok is True, f"Step {s.level} failed: {s.message}"
+
+
+def test_beat_bollinger_4h_direction_runtime_verification():
+    """Verify beat_bollinger_4h_direction_runtime strategy passes all 4 Pre-Flight levels."""
+    strat_path = (Path(__file__).resolve().parent.parent / "app/strategies/beat_bollinger_4h_direction_runtime.py").resolve()
+    assert strat_path.exists(), f"Strategy file does not exist at {strat_path}"
+
+    res = verify_strategy_file(strat_path, strategy_name="beat_bollinger_4h_direction_runtime")
+    assert res.ok is True, f"Verification failed: {res.failed_level} - {res.error_message}"
+    assert len(res.steps) == 4
+    assert all(s.ok for s in res.steps)
+

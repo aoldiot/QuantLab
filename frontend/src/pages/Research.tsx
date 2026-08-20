@@ -17,9 +17,6 @@ import {
   Database,
   ExternalLink,
   FileCode,
-  FileDown,
-  FileJson,
-  FileText,
   FlaskConical,
   LineChart,
   Loader2,
@@ -29,8 +26,10 @@ import {
   RotateCcw,
   Send,
   Settings2,
+  ShieldCheck,
   Sliders,
   Sparkles,
+  Square,
   Terminal,
   Trash2,
   User,
@@ -41,20 +40,32 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {Link,useLocation,useNavigate} from 'react-router-dom'
 import CodeEditor from '../CodeEditor'
-import ExportModal from '../ExportModal'
 import {api} from '../api'
 import {Status} from '../components'
 import type {
-  CodeApprovalData,
+  DshAction,
+  DshApproval,
+  DshLiveEvent,
   ResearchMessage,
   ResearchProject,
   ResearchRun,
   ResearchThinkingStatus,
   ResearchWritingLog,
+  Strategy,
 } from '../types'
 import {getClientId,generateUUID} from '../utils'
 
 const clientId=getClientId
+
+const RESEARCH_PHASE_LABELS:Record<string,string>={
+  RESEARCH:'策略研究',
+  AWAITING_IMPLEMENTATION_APPROVAL:'待编码审批',
+  IMPLEMENTATION:'策略实现',
+  AWAITING_BACKTEST_APPROVAL:'待回测审批',
+  BACKTEST:'回测执行',
+  RESULT_REVIEW:'结果分析',
+  ANALYSIS:'结果分析',
+}
 
 function BacktestParamsModal({
   isOpen,
@@ -510,30 +521,72 @@ function BacktestParamsModal({
   )
 }
 
+type BacktestParamsProposal = {
+  params: Record<string, any>
+  cleanContent: string
+}
+
+function extractBacktestParamsProposal(msg: ResearchMessage): BacktestParamsProposal | null {
+  const metadataParams = msg.metadata?.backtest_params
+    || (msg.message_type === 'backtest_params' ? msg.metadata?.arguments : null)
+  if (metadataParams && typeof metadataParams === 'object' && !Array.isArray(metadataParams)) {
+    return {
+      params: metadataParams,
+      cleanContent: (msg.content || '')
+        .replace(/```(?:backtest_params|json:backtest_params)\s*[\s\S]*?```/gi, '')
+        .trim(),
+    }
+  }
+
+  const content = msg.content || ''
+  const fencedBlock = /```(?:backtest_params|json:backtest_params)\s*\r?\n?([\s\S]*?)```/i.exec(content)
+  if (!fencedBlock) return null
+
+  try {
+    const params = JSON.parse(fencedBlock[1].trim())
+    if (!params || typeof params !== 'object' || Array.isArray(params)) return null
+    return {
+      params,
+      cleanContent: content.replace(fencedBlock[0], '').trim(),
+    }
+  } catch {
+    // Keep malformed machine blocks visible so the user can diagnose the model output.
+    return null
+  }
+}
+
 function BacktestParamsCard({
   params,
-  project,
   onOpenModal,
 }: {
   params: Record<string, any>
-  project: ResearchProject
   onOpenModal: (params: Record<string, any>) => void
 }) {
   const strategyName = params.strategy_name || 'strategy'
-  const symbols = Array.isArray(params.symbols)
-    ? params.symbols
-    : [params.symbols || 'BTCUSDT']
+  const symbols = Array.isArray(params.symbols) ? params.symbols : [params.symbols || 'BTCUSDT']
+  const timeframes = Array.isArray(params.timeframes) ? params.timeframes : [params.timeframes || '15m']
   const startDate = params.start_date || '2024-01-01'
   const endDate = params.end_date || '2024-06-30'
   const capital = params.initial_balance ?? 10000
   const leverage = params.leverage ?? 1.0
-  const timeframes = Array.isArray(params.timeframes)
-    ? params.timeframes
-    : [params.timeframes || '15m']
   const customParams = params.parameters || {}
 
+  const openModal = () => onOpenModal(params)
+
   return (
-    <div className="backtest-params-card" onClick={() => onOpenModal(params)}>
+    <article
+      className="backtest-params-card"
+      role="button"
+      tabIndex={0}
+      aria-label={`配置策略 ${strategyName} 的回测参数`}
+      onClick={openModal}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          openModal()
+        }
+      }}
+    >
       <div className="params-card-header">
         <div className="params-title">
           <Sliders size={16} className="params-icon" />
@@ -563,10 +616,8 @@ function BacktestParamsCard({
           <div className="param-item wide">
             <span className="param-label">策略参数设置</span>
             <div className="param-tags">
-              {Object.entries(customParams).map(([k, v]) => (
-                <span key={k} className="param-tag">
-                  {k}: <b>{String(v)}</b>
-                </span>
+              {Object.entries(customParams).map(([key, value]) => (
+                <span key={key} className="param-tag">{key}: <b>{String(value)}</b></span>
               ))}
             </div>
           </div>
@@ -574,159 +625,12 @@ function BacktestParamsCard({
       </div>
 
       <div className="params-card-footer">
-        <span className="params-hint">💡 点击卡片可弹窗修改所有参数并确认回测</span>
-        <button
-          type="button"
-          className="button mini primary config-modal-btn"
-          onClick={e => {
-            e.stopPropagation()
-            onOpenModal(params)
-          }}
-        >
-          <Sliders size={12} />
-          查看与修改参数
-        </button>
+        <span className="params-hint">确认前可修改全部参数，不会直接启动回测</span>
+        <span className="button mini primary config-modal-btn">
+          <Sliders size={12} /> 查看与修改参数
+        </span>
       </div>
-    </div>
-  )
-}
-
-function BacktestResultCard({
-  msg,
-  project,
-  strategyName,
-  busy,
-  handleConfirmAnalysis,
-  handleConfirmRepair,
-  handleOpenParamsModal,
-}: {
-  msg: ResearchMessage
-  project: ResearchProject
-  strategyName: string
-  busy: boolean
-  handleConfirmAnalysis: (metrics?: Record<string, any>, stratName?: string) => void
-  handleConfirmRepair: (errMsg?: string, stratName?: string) => void
-  handleOpenParamsModal: (params: Record<string, any>) => void
-}) {
-  const res = msg.metadata?.result || msg.metadata?.backtest_result || {}
-  const isSuccess = res.ok !== false && res.status !== 'FAILED'
-  const metrics = res.metrics || {}
-  const strat = res.strategy_name || strategyName || 'strategy'
-
-  if (!isSuccess) {
-    return (
-      <div className="backtest-result-card-wrap">
-        <div className="backtest-error-box in-dialog">
-          <div className="error-box-header">
-            <AlertCircle size={16} className="err-icon" />
-            <b>策略「{strat}」回测执行失败</b>
-          </div>
-          <p className="err-msg-text">{res.error_message || '回测执行异常，请查看详细日志或进行代码修复'}</p>
-          <div className="error-prompt-tip">
-            ⚠️ 策略回测运行报错。是否确认让 DeepSeek Harness 进行代码修复？（【系统安全限制】：修复后不会自动重新回测）
-          </div>
-          <div className="err-action-row">
-            <button
-              type="button"
-              className="button mini primary fix-btn"
-              disabled={busy}
-              onClick={() => handleConfirmRepair(res.error_message, strat)}
-            >
-              <Wrench size={12} /> 确认修复策略代码
-            </button>
-            <button
-              type="button"
-              className="button mini secondary"
-              onClick={() => handleOpenParamsModal(res.arguments || res.backtest_params || { strategy_name: strat })}
-            >
-              <Sliders size={12} /> 重新调整回测参数
-            </button>
-            {res.run_id && (
-              <Link className="button mini secondary" to={`/backtests/${res.run_id}`} target="_blank">
-                查看详细日志 <ExternalLink size={11} />
-              </Link>
-            )}
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  const totalReturn = metrics.total_return != null ? `${Number(metrics.total_return).toFixed(2)}%` : '—'
-  const sharpe =
-    (metrics.sharpe_ratio ?? metrics.sharpe) != null
-      ? Number(metrics.sharpe_ratio ?? metrics.sharpe).toFixed(2)
-      : '—'
-  const maxDd = metrics.max_drawdown != null ? `${Number(metrics.max_drawdown).toFixed(2)}%` : '—'
-  const winRate = metrics.win_rate != null ? `${Number(metrics.win_rate).toFixed(1)}%` : '—'
-  const totalTrades = metrics.total_trades ?? metrics.trades ?? '—'
-
-  return (
-    <div className="backtest-result-card-wrap">
-      <div className="backtest-main-result-card">
-        <div className="result-card-header">
-          <div className="result-card-title">
-            <CheckCircle2 size={18} className="text-green" />
-            <span><b>策略回测完成</b> ({strat})</span>
-          </div>
-          <span className="badge ok">回测报告已就绪</span>
-        </div>
-
-        <div className="backtest-metrics-grid">
-          <div className="metric-box">
-            <span className="label">总收益率</span>
-            <b className={`value ${(metrics.total_return ?? 0) >= 0 ? 'pos' : 'neg'}`}>{totalReturn}</b>
-          </div>
-          <div className="metric-box">
-            <span className="label">夏普比率</span>
-            <b className="value">{sharpe}</b>
-          </div>
-          <div className="metric-box">
-            <span className="label">最大回撤</span>
-            <b className="value neg">{maxDd}</b>
-          </div>
-          <div className="metric-box">
-            <span className="label">胜率</span>
-            <b className="value">{winRate}</b>
-          </div>
-          <div className="metric-box">
-            <span className="label">总交易数</span>
-            <b className="value">{totalTrades}</b>
-          </div>
-          {res.run_id && (
-            <div className="metric-box action">
-              <Link className="button mini primary detail-link-btn" to={`/backtests/${res.run_id}`} target="_blank">
-                完整详情 <ExternalLink size={11} />
-              </Link>
-            </div>
-          )}
-        </div>
-
-        <div className="backtest-analysis-prompt-card">
-          <div className="analysis-prompt-info">
-            <Sparkles size={14} className="text-cyan" />
-            <span>回测已成功生成报告。是否需要对本次回测绩效及交易进行深度归因分析？</span>
-          </div>
-          <div className="analysis-prompt-actions">
-            <button
-              type="button"
-              className="button mini primary analysis-btn"
-              disabled={busy}
-              onClick={() => handleConfirmAnalysis(metrics, strat)}
-            >
-              <Sparkles size={12} /> 确认进行回测深度分析
-            </button>
-            <button
-              type="button"
-              className="button mini secondary"
-              onClick={() => handleOpenParamsModal(res.arguments || res.backtest_params || { strategy_name: strat })}
-            >
-              <Sliders size={12} /> 调整参数重新回测
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </article>
   )
 }
 
@@ -790,6 +694,7 @@ interface ProcessItem {
   isCallRunning?: boolean
   isWritingActive?: boolean
   runForCall?: ResearchRun | null
+  isActionResult?: boolean
   rawCallMsg?: ResearchMessage
   rawOutputMsg?: ResearchMessage
 }
@@ -804,9 +709,7 @@ interface MessageTurn {
 function groupMessagesIntoTurns(
   messages: ResearchMessage[],
   runs: ResearchRun[],
-  activeRun: ResearchRun | undefined,
-  writingLog: ResearchWritingLog | null,
-  project: ResearchProject | null
+  writingLog: ResearchWritingLog | null
 ): MessageTurn[] {
   const turns: MessageTurn[] = []
   let currentTurn: MessageTurn = {
@@ -815,22 +718,45 @@ function groupMessagesIntoTurns(
     responseMessages: [],
   }
 
+  function dshToolMeta(msg: ResearchMessage): { toolName: string; args: Record<string, any>; result?: any; think?: string } {
+    const ev = msg.metadata?.event
+    const tool = ev?.tool || {}
+    const dsh = ev as { kind?: string; result?: any; call_id?: string } | null
+    return {
+      toolName: tool?.name || msg.metadata?.tool_name || '',
+      args: tool?.arguments || msg.metadata?.arguments || {},
+      result: dsh?.kind === 'tool_result' ? dsh.result ?? msg.metadata?.result : msg.metadata?.result,
+      think: msg.metadata?.reasoning_content || ev?.data?.reasoning_content,
+    }
+  }
+
   function addToolCall(msg: ResearchMessage) {
-    const toolName = msg.metadata?.tool_name || '工具调用'
-    const args = msg.metadata?.arguments || {}
-    const reasoning = msg.metadata?.reasoning_content
-    if (reasoning && reasoning.trim()) {
+    const { toolName, args, think } = dshToolMeta(msg)
+    if (think && think.trim()) {
       currentTurn.processItems.push({
         id: `${msg.id}-thought`,
         type: 'thinking',
-        thought: reasoning,
+        thought: think,
       })
     }
 
-    const isBacktestCall = toolName === 'execute_backtest'
-    const isWritingCall = toolName === 'write_strategy_code' || toolName === 'write_strategy_with_claude'
+    const isBacktestCall = toolName === 'execute_backtest' || toolName === 'execute_backtest_tool' || toolName === 'quant_execute_backtest'
+    const isWritingCall = toolName === 'write_strategy_code' || toolName === 'write_strategy_with_claude' || toolName === 'quant_save_strategy_code'
     const runForCall = isBacktestCall
-      ? (runs.find(r => r.name.includes(args.strategy_name || '') || r.id === project?.latest_backtest_id) || activeRun)
+      ? runs.find(run => {
+          const config = run.config || {}
+          if (args.strategy_name && config.strategy_name === args.strategy_name) return true
+          const sameDates = Boolean(
+            args.start_date && args.end_date
+            && config.start_date === args.start_date
+            && config.end_date === args.end_date
+          )
+          const requestedSymbols = Array.isArray(args.symbols) ? args.symbols.map(String).sort() : []
+          const runSymbols = Array.isArray(config.symbols) ? config.symbols.map(String).sort() : []
+          return sameDates
+            && requestedSymbols.length > 0
+            && requestedSymbols.join('|') === runSymbols.join('|')
+        })
       : null
     const isCallRunning = !!(runForCall && ['QUEUED', 'RUNNING', 'ANALYZING'].includes(runForCall.status))
     const isWritingActive = isWritingCall && (writingLog?.status === 'RUNNING')
@@ -838,7 +764,7 @@ function groupMessagesIntoTurns(
     currentTurn.processItems.push({
       id: msg.id,
       type: 'tool',
-      toolName,
+      toolName: toolName || '未命名工具',
       args,
       isCallRunning,
       isWritingActive,
@@ -848,12 +774,20 @@ function groupMessagesIntoTurns(
   }
 
   function addToolOutput(msg: ResearchMessage) {
-    const toolName = msg.metadata?.tool_name || ''
-    const res = msg.metadata?.result || {}
+    const { toolName, args, result: dshResult } = dshToolMeta(msg)
+    const resultCallId = msg.metadata?.event?.call_id
+    const res = dshResult && typeof dshResult === 'object' && Object.keys(dshResult).length > 0
+      ? dshResult
+      : (msg.metadata?.result || {})
     const isSuccess = res.ok !== false && res.status !== 'FAILED' && (res.exit_code == null || res.exit_code === 0)
 
     const lastMatchingTool = [...currentTurn.processItems].reverse().find(
-      item => item.type === 'tool' && (!item.result || Object.keys(item.result).length === 0) && (!item.toolName || item.toolName === toolName || !toolName)
+      item => item.type === 'tool' &&
+        (!item.result || Object.keys(item.result).length === 0) &&
+        (
+          (resultCallId && item.rawCallMsg?.metadata?.event?.call_id === resultCallId) ||
+          (!resultCallId && (!item.toolName || item.toolName === toolName || !toolName))
+        )
     )
 
     if (lastMatchingTool) {
@@ -864,8 +798,8 @@ function groupMessagesIntoTurns(
       currentTurn.processItems.push({
         id: msg.id,
         type: 'tool',
-        toolName,
-        args: msg.metadata?.arguments || {},
+        toolName: toolName || '工具结果',
+        args: args || msg.metadata?.arguments || {},
         result: res,
         isSuccess,
         rawOutputMsg: msg,
@@ -892,74 +826,8 @@ function groupMessagesIntoTurns(
       continue
     }
 
-    // 1. Proposals (code_approval and backtest_params) must be extracted to responseMessages
-    // regardless of whether their role is 'assistant' or 'tool'
-    if (msg.message_type === 'code_approval' || msg.metadata?.code_approval) {
-      if (msg.role === 'tool' || msg.message_type === 'tool_output') {
-        addToolOutput(msg)
-      }
-      if (msg.metadata?.reasoning_content?.trim()) {
-        currentTurn.processItems.push({
-          id: `${msg.id}-thought`,
-          type: 'thinking',
-          thought: msg.metadata.reasoning_content,
-        })
-      }
-      const alreadyHasApproval = currentTurn.responseMessages.some(
-        m => m.message_type === 'code_approval' || m.metadata?.code_approval
-      )
-      if (!alreadyHasApproval) {
-        currentTurn.responseMessages.push(msg)
-      }
-      continue
-    }
-
-    if (msg.message_type === 'backtest_params' || msg.metadata?.backtest_params) {
-      if (msg.role === 'tool' || msg.message_type === 'tool_output') {
-        addToolOutput(msg)
-      }
-      if (msg.metadata?.reasoning_content?.trim()) {
-        currentTurn.processItems.push({
-          id: `${msg.id}-thought`,
-          type: 'thinking',
-          thought: msg.metadata.reasoning_content,
-        })
-      }
-      const alreadyHasParams = currentTurn.responseMessages.some(
-        m => m.message_type === 'backtest_params' || m.metadata?.backtest_params
-      )
-      if (!alreadyHasParams) {
-        currentTurn.responseMessages.push(msg)
-      }
-      continue
-    }
-
-    if (
-      msg.message_type === 'backtest_result' ||
-      msg.metadata?.tool_name === 'execute_backtest' ||
-      msg.metadata?.backtest_result
-    ) {
-      if (msg.role === 'tool' || msg.message_type === 'tool_output') {
-        addToolOutput(msg)
-      }
-      if (msg.metadata?.reasoning_content?.trim()) {
-        currentTurn.processItems.push({
-          id: `${msg.id}-thought`,
-          type: 'thinking',
-          thought: msg.metadata.reasoning_content,
-        })
-      }
-      const alreadyHasResult = currentTurn.responseMessages.some(
-        m =>
-          m.message_type === 'backtest_result' ||
-          m.metadata?.tool_name === 'execute_backtest' ||
-          m.metadata?.backtest_result
-      )
-      if (!alreadyHasResult) {
-        currentTurn.responseMessages.push(msg)
-      }
-      continue
-    }
+    // Legacy proposal message types (code_approval / backtest_params / backtest_result)
+    // are no longer produced by the DSH runtime and render as plain messages below.
 
     // 2. Generic tool execution outputs belong to processItems
     if (msg.message_type === 'tool_output') {
@@ -973,6 +841,27 @@ function groupMessagesIntoTurns(
     }
 
     if (msg.role === 'assistant') {
+      if (msg.metadata?.event_type === 'approval_execution' && msg.metadata?.tool === 'execute_backtest_tool') {
+        const runIdFromContent = msg.content.match(/"run_id"\s*:\s*"([^"]+)"/)?.[1]
+        const approvedRunId = msg.metadata?.run_id || msg.metadata?.result?.run_id || runIdFromContent
+        const approvedRun = approvedRunId ? runs.find(run => run.id === approvedRunId) : null
+        if (approvedRun && !currentTurn.processItems.some(item => item.runForCall?.id === approvedRun.id)) {
+          currentTurn.processItems.push({
+            id: `${msg.id}-approved-backtest`,
+            type: 'tool',
+            toolName: 'execute_backtest_tool',
+            args: msg.metadata?.arguments || approvedRun.config || {},
+            result: {
+              ok: msg.metadata?.ok !== false,
+              run_id: approvedRun.id,
+              metrics: approvedRun.metrics,
+            },
+            isSuccess: msg.metadata?.ok !== false && approvedRun.status !== 'FAILED',
+            runForCall: approvedRun,
+            isActionResult: true,
+          })
+        }
+      }
       if (msg.metadata?.reasoning_content?.trim()) {
         currentTurn.processItems.push({
           id: `${msg.id}-thought`,
@@ -1028,6 +917,198 @@ function ProcessThinkingStep({ thought }: { thought: string }) {
   )
 }
 
+function BacktestRunResultCard({
+  run,
+  args,
+  strategyName,
+  busy,
+  handleConfirmAnalysis,
+  handleOpenParamsModal,
+}: {
+  run: ResearchRun
+  args: Record<string, any>
+  strategyName: string
+  busy: boolean
+  handleConfirmAnalysis: (metrics?: Record<string, any>, stratName?: string) => void
+  handleOpenParamsModal: (params: Record<string, any>) => void
+}) {
+  const metrics = run.metrics || {}
+  const totalReturn = metrics.total_return
+  const sharpe = metrics.sharpe_ratio ?? metrics.sharpe
+  const maxDrawdown = metrics.max_drawdown
+  const winRate = metrics.win_rate
+  const totalTrades = metrics.total_trades ?? metrics.trades
+  const resolvedStrategyName = args.strategy_name || run.config?.strategy_name || strategyName || 'strategy'
+  const rerunParams = {
+    ...args,
+    strategy_name: resolvedStrategyName,
+    symbols: args.symbols || run.config?.symbols,
+    timeframes: args.timeframes || run.config?.timeframes,
+    start_date: args.start_date || run.config?.start_date,
+    end_date: args.end_date || run.config?.end_date,
+    initial_balance: args.initial_balance ?? run.config?.initial_balance,
+    leverage: args.leverage ?? run.config?.leverage,
+    parameters: args.parameters || run.config?.strategy_parameters || {},
+  }
+
+  return (
+    <div className="backtest-result-card-wrap" role="status" aria-live="polite">
+      <div className="backtest-main-result-card">
+        <div className="result-card-header">
+          <div className="result-card-title">
+            <CheckCircle2 size={18} className="text-green" />
+            <span><b>策略回测完成</b> ({resolvedStrategyName})</span>
+          </div>
+          <span className="badge ok">报告已就绪</span>
+        </div>
+
+        <div className="backtest-metrics-grid">
+          <div className="metric-box">
+            <span className="label">总收益率</span>
+            <b className={`value ${(totalReturn ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+              {totalReturn != null ? `${Number(totalReturn).toFixed(2)}%` : '—'}
+            </b>
+          </div>
+          <div className="metric-box">
+            <span className="label">夏普比率</span>
+            <b className="value">{sharpe != null ? Number(sharpe).toFixed(2) : '—'}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">最大回撤</span>
+            <b className="value neg">{maxDrawdown != null ? `${Number(maxDrawdown).toFixed(2)}%` : '—'}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">胜率</span>
+            <b className="value">{winRate != null ? `${Number(winRate).toFixed(1)}%` : '—'}</b>
+          </div>
+          <div className="metric-box">
+            <span className="label">总交易数</span>
+            <b className="value">{totalTrades ?? '—'}</b>
+          </div>
+          <div className="metric-box action">
+            <Link className="button mini primary detail-link-btn" to={`/backtests/${run.id}`} target="_blank">
+              完整详情 <ExternalLink size={11} />
+            </Link>
+          </div>
+        </div>
+
+        <div className="backtest-analysis-prompt-card">
+          <div className="analysis-prompt-info">
+            <Sparkles size={14} className="text-cyan" />
+            <span>回测报告已生成，可继续进行绩效归因或调整参数。</span>
+          </div>
+          <div className="analysis-prompt-actions">
+            <button
+              type="button"
+              className="button mini primary analysis-btn"
+              disabled={busy}
+              onClick={() => handleConfirmAnalysis(metrics, resolvedStrategyName)}
+            >
+              <Sparkles size={12} /> 深度归因分析
+            </button>
+            <button
+              type="button"
+              className="button mini secondary"
+              onClick={() => handleOpenParamsModal(rerunParams)}
+            >
+              <Sliders size={12} /> 调整参数重新回测
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BacktestFailureCard({
+  run,
+  busy,
+  onRepair,
+  onAdjust,
+}: {
+  run: ResearchRun
+  busy: boolean
+  onRepair: (run: ResearchRun) => void
+  onAdjust: (params: Record<string, any>) => void
+}) {
+  return (
+    <article className="backtest-failure-card" role="alert" aria-live="polite">
+      <div className="failure-card-icon"><AlertCircle size={18} /></div>
+      <div className="failure-card-content">
+        <div className="failure-card-head">
+          <div>
+            <b>回测执行失败</b>
+            <span>{run.name}</span>
+          </div>
+          <span className="badge err">{run.stage || '执行异常'}</span>
+        </div>
+        <p>{run.error_message || '回测引擎未返回具体错误，请打开日志进一步检查。'}</p>
+        <div className="failure-card-actions">
+          <button type="button" className="button mini primary" disabled={busy} onClick={() => onRepair(run)}>
+            {busy ? <Loader2 size={12} className="spin" /> : <Wrench size={12} />} 修复策略代码
+          </button>
+          <button type="button" className="button mini secondary" onClick={() => onAdjust(run.config || {})}>
+            <Sliders size={12} /> 调整回测参数
+          </button>
+          <Link className="button mini secondary" to={`/backtests/${run.id}`} target="_blank">
+            查看日志 <ExternalLink size={11} />
+          </Link>
+        </div>
+      </div>
+    </article>
+  )
+}
+
+function TurnActionCards({
+  processItems,
+  hasResponseProposal,
+  strategyName,
+  busy,
+  handleConfirmAnalysis,
+  handleOpenParamsModal,
+}: {
+  processItems: ProcessItem[]
+  hasResponseProposal: boolean
+  strategyName: string
+  busy: boolean
+  handleConfirmAnalysis: (metrics?: Record<string, any>, stratName?: string) => void
+  handleOpenParamsModal: (params: Record<string, any>) => void
+}) {
+  const toolItems = processItems.filter(item => item.type === 'tool')
+  const proposalItems = hasResponseProposal
+    ? []
+    : toolItems.filter(item => item.toolName === 'propose_backtest_params')
+  const completedItems = Array.from(
+    toolItems
+      .filter(item => item.runForCall?.status === 'COMPLETED')
+      .reduce((items, item) => items.set(item.runForCall!.id, item), new Map<string, ProcessItem>())
+      .values()
+  )
+  if (proposalItems.length === 0 && completedItems.length === 0) return null
+  return (
+    <div className="turn-action-cards" aria-label="本轮任务结果">
+      {proposalItems.map(item => (
+        <BacktestParamsCard
+          key={`${item.id}-proposal`}
+          params={item.args || {}}
+          onOpenModal={handleOpenParamsModal}
+        />
+      ))}
+      {completedItems.map(item => (
+        <BacktestRunResultCard
+          key={`${item.runForCall!.id}-result`}
+          run={item.runForCall!}
+          args={item.args || {}}
+          strategyName={strategyName}
+          busy={busy}
+          handleConfirmAnalysis={handleConfirmAnalysis}
+          handleOpenParamsModal={handleOpenParamsModal}
+        />
+      ))}
+    </div>
+  )
+}
+
 function ProcessToolStep({
   item,
   project,
@@ -1059,8 +1140,8 @@ function ProcessToolStep({
   const toolName = item.toolName || '工具调用'
   const args = item.args || {}
   const res = item.result || {}
-  const isBacktest = toolName === 'execute_backtest'
-  const isWriting = toolName === 'write_strategy_code' || toolName === 'write_strategy_with_claude'
+  const isBacktest = toolName === 'execute_backtest' || toolName === 'execute_backtest_tool' || toolName === 'quant_execute_backtest'
+  const isWriting = toolName === 'write_strategy_code' || toolName === 'write_strategy_with_claude' || toolName === 'quant_save_strategy_code'
   const isTerminal = toolName === 'terminal'
   const isSkill = toolName === 'skill_view'
   const isProcess = toolName === 'process'
@@ -1245,7 +1326,7 @@ function ProcessToolStep({
             </div>
           )}
 
-          {isBacktest && isSuccess && res.metrics && (
+          {isBacktest && !item.runForCall && isSuccess && res.metrics && (
             <>
               <div className="backtest-metrics-card">
                 <div className="metric-box">
@@ -1315,7 +1396,7 @@ function ProcessToolStep({
             </>
           )}
 
-          {isBacktest && !isSuccess && hasResult && (
+          {isBacktest && !item.runForCall && !isSuccess && hasResult && (
             <div className="backtest-error-box">
               <div className="error-box-header">
                 <AlertCircle size={15} className="err-icon" />
@@ -1440,10 +1521,11 @@ function HermesProcessBox({
   setDrawerOpen: (open: boolean) => void
 }) {
   const [expanded, setExpanded] = useState(false)
-  if (!processItems || processItems.length === 0) return null
+  const visibleProcessItems = processItems.filter(item => !item.isActionResult)
+  if (visibleProcessItems.length === 0) return null
 
-  const toolItems = processItems.filter(p => p.type === 'tool')
-  const thinkingItems = processItems.filter(p => p.type === 'thinking')
+  const toolItems = visibleProcessItems.filter(p => p.type === 'tool')
+  const thinkingItems = visibleProcessItems.filter(p => p.type === 'thinking')
   const toolCount = toolItems.length
   const hasThinking = thinkingItems.length > 0
   const hasRunning = toolItems.some(p => p.isCallRunning || p.isWritingActive)
@@ -1494,7 +1576,7 @@ function HermesProcessBox({
       {expanded && (
         <div className="hermes-process-body">
           <div className="process-timeline">
-            {processItems.map((item, idx) => {
+            {visibleProcessItems.map((item, idx) => {
               if (item.type === 'thinking' && item.thought) {
                 return (
                   <ProcessThinkingStep
@@ -1560,99 +1642,96 @@ function ThinkingAccordion({thought}: {thought: string}) {
   )
 }
 
-function CodeApprovalCard({
-  data,
-  onApprove,
-  onModify,
-  disabled,
-}: {
-  data: CodeApprovalData
-  onApprove: (data: CodeApprovalData) => void
-  onModify: (data: CodeApprovalData) => void
-  disabled?: boolean
-}) {
-  const [approved, setApproved] = useState(false)
+function DshLiveExecution({events}: {events: DshLiveEvent[]}) {
+  const toolCalls = Array.from(
+    events
+      .filter(event => event.kind === 'tool_call')
+      .reduce((calls, event) => calls.set(event.call_id || `${event.turn_id}-${event.seq}`, event), new Map<string, DshLiveEvent>())
+      .values()
+  ).slice(-8)
+  const textDeltas = events.filter(event => event.kind === 'chunk' && event.chunk_type === 'text-delta' && event.text)
+  const fallbackText = [...events].reverse().find(
+    event => (event.kind === 'assistant_message' || (event.kind === 'chunk' && event.chunk_type === 'block-end')) && event.text
+  )?.text || ''
+  const streamedText = textDeltas.length > 0 ? textDeltas.map(event => event.text).join('') : fallbackText
+  const reasoningDeltas = events.filter(event => event.kind === 'reasoning_chunk' && event.text)
+  const fallbackReasoning = [...events].reverse().find(event => event.kind === 'assistant_message' && event.reasoning)?.reasoning || ''
+  const reasoningText = reasoningDeltas.length > 0 ? reasoningDeltas.map(event => event.text).join('') : fallbackReasoning
 
   return (
-    <div className="code-approval-card">
-      <div className="code-approval-header">
-        <div className="code-approval-title-wrap">
-          <div className="code-approval-badge">
-            <Sparkles size={14} />
-            <span>待用户审批</span>
-          </div>
-          <h4>策略编码方案已就绪 · 请确认是否开始写码</h4>
-        </div>
-        {data.strategy_name && (
-          <div className="code-approval-slug">
-            <code>{data.strategy_name}</code>
-          </div>
-        )}
+    <div className="dsh-live-execution" aria-live="polite" aria-label="DeepSeek Harness 实时执行事件">
+      <div className="dsh-live-execution-head">
+        <Terminal size={12} />
+        <span>DSH SDK 实时执行流</span>
+        <span className="dsh-live-event-count">
+          {toolCalls.length > 0 ? `${toolCalls.length} 次工具调用 · ` : ''}{events.length} 个聚合事件
+        </span>
       </div>
 
-      <div className="code-approval-body">
-        {data.strategy_summary && (
-          <div className="code-approval-summary">
-            <p>{data.strategy_summary}</p>
+      {reasoningText && (
+        <details className="dsh-live-reasoning">
+          <summary>
+            <BrainCircuit size={12} />
+            <span>模型推理流</span>
+            <span>展开查看</span>
+          </summary>
+          <div className="dsh-live-reasoning-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoningText}</ReactMarkdown>
           </div>
-        )}
+        </details>
+      )}
 
-        {data.key_rules && data.key_rules.length > 0 && (
-          <div className="code-approval-rules">
-            <div className="code-approval-rules-title">核心逻辑与规则清单：</div>
-            <ul className="code-approval-rules-list">
-              {data.key_rules.map((rule, idx) => (
-                <li key={idx} className="code-approval-rule-item">
-                  <CheckCircle2 size={14} className="rule-check-icon" />
-                  <span>{rule}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {data.parameter_specs && Object.keys(data.parameter_specs).length > 0 && (
-          <div className="code-approval-params">
-            <div className="code-approval-params-title">预设参数列表：</div>
-            <div className="code-approval-param-tags">
-              {Object.entries(data.parameter_specs).map(([k, v]) => (
-                <span key={k} className="code-approval-param-tag">
-                  <b>{k}</b>: {String(v)}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="code-approval-footer">
-        <div className="code-approval-tip">
-          <AlertCircle size={13} />
-          <span>请核对上述策略设计逻辑。批准后 DeepSeek Harness 将开始编写策略代码。</span>
+      {toolCalls.length > 0 && (
+        <div className="dsh-live-tool-list">
+          {toolCalls.map(event => {
+            const toolName = event.tool?.name || '未命名工具'
+            const toolArgs = event.tool?.arguments || event.tool?.input || event.tool?.args || {}
+            const resultEvent = event.call_id
+              ? events.find(candidate => candidate.kind === 'tool_result' && candidate.call_id === event.call_id)
+              : events.find(candidate => candidate.kind === 'tool_result' && candidate.seq > event.seq && candidate.tool?.name === event.tool?.name)
+            const resultFailed = Boolean(resultEvent?.result?.is_error || resultEvent?.result?.error)
+            return (
+              <details className="dsh-live-tool-row" key={`${event.turn_id}-${event.seq}`}>
+                <summary>
+                  <Wrench size={12} />
+                  <code>{toolName}</code>
+                  <span className={`dsh-live-tool-status ${resultFailed ? 'failed' : resultEvent ? 'done' : 'running'}`}>
+                    {resultFailed
+                      ? <><AlertCircle size={10} /> 执行失败</>
+                      : resultEvent
+                        ? <><Check size={10} /> 已返回</>
+                        : <><Loader2 size={10} className="spin" /> 执行中</>}
+                  </span>
+                </summary>
+                <div className="dsh-live-tool-detail">
+                  <span>调用参数</span>
+                  <pre>{JSON.stringify(toolArgs, null, 2)}</pre>
+                  {resultEvent && (
+                    <>
+                      <span>执行结果</span>
+                      <pre>{JSON.stringify(resultEvent.result ?? {}, null, 2)}</pre>
+                    </>
+                  )}
+                </div>
+              </details>
+            )
+          })}
         </div>
-        <div className="code-approval-actions">
-          <button
-            type="button"
-            className="button mini secondary code-approval-btn modify"
-            disabled={disabled || approved}
-            onClick={() => onModify(data)}
-          >
-            修改策略设计
-          </button>
-          <button
-            type="button"
-            className="button mini primary code-approval-btn approve"
-            disabled={disabled || approved}
-            onClick={() => {
-              setApproved(true)
-              onApprove(data)
-            }}
-          >
-            <Play size={14} />
-            <span>批准并开始编写代码</span>
-          </button>
+      )}
+
+      {streamedText ? (
+        <div className="dsh-live-output">
+          <span className="dsh-live-output-label">模型输出（实时）</span>
+          <div className="dsh-live-output-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamedText}</ReactMarkdown>
+          </div>
         </div>
-      </div>
+      ) : toolCalls.length === 0 ? (
+        <div className="dsh-live-waiting">
+          <Loader2 size={11} className="spin" />
+          <span>已连接 Harness，等待首个 SDK 执行事件…</span>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1677,6 +1756,7 @@ export default function Research(){
   const navState=location.state as {projectId?:string;autoPrompt?:string}|null
 
   const[projects,setProjects]=useState<ResearchProject[]>([])
+  const[strategies,setStrategies]=useState<Strategy[]>([])
   const[project,setProject]=useState<ResearchProject|null>(null)
   const[messages,setMessages]=useState<ResearchMessage[]>([])
   const[runs,setRuns]=useState<ResearchRun[]>([])
@@ -1685,10 +1765,16 @@ export default function Research(){
 
   const[input,setInput]=useState('')
   const[busy,setBusy]=useState(false)
+  const[actionBusy,setActionBusy]=useState<DshAction|null>(null)
+  const[cancelBusy,setCancelBusy]=useState(false)
   const[error,setError]=useState('')
   const[creating,setCreating]=useState(false)
+  const[creatingBusy,setCreatingBusy]=useState(false)
+  const[newSessionMode,setNewSessionMode]=useState<'blank'|'continue'>('blank')
+  const[sourceProjectId,setSourceProjectId]=useState('')
   const[newTitle,setNewTitle]=useState('')
   const[newIdea,setNewIdea]=useState('')
+  const[expandedSessionGroups,setExpandedSessionGroups]=useState<Record<string,boolean>>({})
 
   // Backtest Parameter Modal state
   const[paramsModalOpen,setParamsModalOpen]=useState(false)
@@ -1697,31 +1783,19 @@ export default function Research(){
   // Strategy writing log state
   const[writingLog,setWritingLog]=useState<ResearchWritingLog|null>(null)
 
-  // Real-time Hermes thinking status
+  // Real-time DSH execution stage and SDK event stream
   const[thinkingStatus,setThinkingStatus]=useState<ResearchThinkingStatus|null>(null)
+  const[liveDshEvents,setLiveDshEvents]=useState<DshLiveEvent[]>([])
+
+  // DSH interactive approvals (pending write/backtest proposals awaiting user decision)
+  const[dshPending,setDshPending]=useState<DshApproval[]>([])
+  const[approveBusyId,setApproveBusyId]=useState<string|null>(null)
+  const[approveFeedback,setApproveFeedback]=useState<Record<string,string>>({})
 
   // Right drawer state
   const[drawerOpen,setDrawerOpen]=useState(false)
   const[drawerTab,setDrawerTab]=useState<'code'|'backtests'|'writer_log'>('code')
   const[expandedTools,setExpandedTools]=useState<Record<string,boolean>>({})
-
-  // Export log state
-  const[exportModalOpen,setExportModalOpen]=useState(false)
-  const[exportMenuOpen,setExportMenuOpen]=useState(false)
-  const[exportingLog,setExportingLog]=useState(false)
-
-  const handleExportLog = async (fmt: 'markdown' | 'json') => {
-    if (!project) return
-    setExportingLog(true)
-    setExportMenuOpen(false)
-    try {
-      await api.downloadResearchExport(project.id, fmt)
-    } catch (err: any) {
-      alert(err?.message || '导出日志失败')
-    } finally {
-      setExportingLog(false)
-    }
-  }
 
   const timeline=useRef<HTMLDivElement|null>(null)
   const textareaRef=useRef<HTMLTextAreaElement|null>(null)
@@ -1751,13 +1825,58 @@ export default function Research(){
 
   async function reloadList(){
     try{
-      const value=await api.researchProjects()
+      const[value,strategyRows]=await Promise.all([
+        api.researchProjects(),
+        api.strategies().catch(()=>[]),
+      ])
       setProjects(value)
+      setStrategies(strategyRows)
       return value
     }catch(e){
       setError((e as Error).message)
       return []
     }
+  }
+
+  const strategyById=useMemo(
+    ()=>new Map(strategies.map(item=>[item.id,item])),
+    [strategies],
+  )
+
+  const sessionGroups=useMemo(()=>{
+    const groups=new Map<string,{key:string;label:string;slug?:string;sessions:ResearchProject[]}>()
+    for(const item of projects){
+      const key=item.strategy_id?`strategy:${item.strategy_id}`:'unlinked'
+      if(!groups.has(key)){
+        const linked=item.strategy_id?strategyById.get(item.strategy_id):null
+        groups.set(key,{
+          key,
+          label:item.strategy_id?(linked?.name||item.title):'尚未关联策略',
+          slug:linked?.slug,
+          sessions:[],
+        })
+      }
+      groups.get(key)!.sessions.push(item)
+    }
+    return Array.from(groups.values())
+  },[projects,strategyById])
+
+  const continuationSources=useMemo(()=>{
+    const seen=new Set<string>()
+    return projects.filter(item=>{
+      if(!item.strategy_id||seen.has(item.strategy_id))return false
+      seen.add(item.strategy_id)
+      return true
+    })
+  },[projects])
+
+  function openCreateModal(){
+    const currentSource=project?.strategy_id
+      ? continuationSources.find(item=>item.strategy_id===project.strategy_id)
+      : continuationSources[0]
+    setNewSessionMode(currentSource?'continue':'blank')
+    setSourceProjectId(currentSource?.id||'')
+    setCreating(true)
   }
 
   async function open(item:ResearchProject){
@@ -1766,19 +1885,22 @@ export default function Research(){
     setStrategyName('')
     setWritingLog(null)
     setThinkingStatus(null)
+    setLiveDshEvents([])
     try{
-      const[m,r,fresh,wLog,tStatus]=await Promise.all([
+      const[m,r,fresh,wLog,tStatus,liveEvents]=await Promise.all([
         api.researchMessages(item.id),
         api.researchRuns(item.id),
         api.researchProject(item.id),
         api.researchWritingLog(item.id).catch(()=>null),
         api.researchThinkingStatus(item.id).catch(()=>null),
+        api.dshLiveEvents(item.id).catch(()=>null),
       ])
       setMessages(m)
       setRuns(r)
       setProject(fresh)
       if(wLog)setWritingLog(wLog)
       if(tStatus)setThinkingStatus(tStatus)
+      if(liveEvents)setLiveDshEvents(liveEvents.events)
       if(fresh.is_busy){
         setBusy(true)
       }else{
@@ -1804,178 +1926,70 @@ export default function Research(){
     }
   }
 
-  function handleApproveCode(data:CodeApprovalData){
+  async function runFixedAction(
+    action:DshAction,
+    options:{content?:string;run_id?:string;arguments?:Record<string,any>}={},
+  ){
     if(!project||busy)return
-    const stratName =
-      (data.strategy_name && data.strategy_name !== 'strategy' && data.strategy_name !== 'custom_strategy')
-        ? data.strategy_name
-        : (strategyName || 'custom_strategy')
-    const rulesSummary = data.key_rules && data.key_rules.length > 0 ? `\n核心规则要点：\n${data.key_rules.map(r => `- ${r}`).join('\n')}` : ''
-    const paramsSummary = data.parameter_specs && Object.keys(data.parameter_specs).length > 0 ? `\n预设参数配置：${JSON.stringify(data.parameter_specs, null, 2)}` : ''
-    const approvePrompt =
-      `【已批准策略「${stratName}」的设计方案，请立即调用 write_strategy_code 工具编写策略代码】：\n` +
-      `- strategy_name: "${stratName}"\n` +
-      `- instructions: "请编写策略 ${stratName} 的完整代码文件 backend/app/strategies/${stratName}.py，严格遵循 NautilusTrader 开发规范并通过 4 级 Pre-Flight 验证。${rulesSummary}${paramsSummary}"`
-
+    const labels:Record<DshAction,string>={
+      WRITE_STRATEGY:'编写策略',
+      RUN_BACKTEST:'执行回测',
+      FIX_ERROR:'修复报错',
+      ANALYZE_BACKTEST:'回测分析',
+    }
     const tempId=generateUUID()
     const optimisticMsg:ResearchMessage={
       id:tempId,
       role:'user',
-      content:approvePrompt,
+      content:options.content||labels[action],
       message_type:'message',
-      metadata:{},
+      metadata:{is_dsh_run:true,event_type:'fixed_action',action},
       created_at:new Date().toISOString(),
     }
     setMessages(prev=>[...prev,optimisticMsg])
+    setLiveDshEvents([])
     setBusy(true)
+    setActionBusy(action)
     setError('')
-    autoScrollRef.current = true
-    setShowScrollBottom(false)
-    setTimeout(() => scrollToBottom(true), 30)
-    api
-      .sendResearchMessage(project.id,approvePrompt)
-      .then(async()=>{
-        const[m,r,fresh,wLog,tStatus]=await Promise.all([
-          api.researchMessages(project.id),
-          api.researchRuns(project.id),
-          api.researchProject(project.id),
-          api.researchWritingLog(project.id).catch(()=>null),
-          api.researchThinkingStatus(project.id).catch(()=>null),
-        ])
-        setMessages(m)
-        setRuns(r)
-        setProject(fresh)
-        if(wLog)setWritingLog(wLog)
-        if(tStatus)setThinkingStatus(tStatus)
-      })
-      .catch(e=>{
-        setError((e as Error).message)
-        setBusy(false)
-      })
-  }
-
-  function handleModifyCode(data:CodeApprovalData){
-    const stratName =
-      (data.strategy_name && data.strategy_name !== 'strategy' && data.strategy_name !== 'custom_strategy')
-        ? data.strategy_name
-        : (strategyName || 'custom_strategy')
-    setInput(`关于策略「${stratName}」的设计方案，我想调整以下逻辑：\n- `)
-    textareaRef.current?.focus()
-  }
-
-  function handleConfirmRepair(errorMessage?: string, stratName?: string){
-    if(!project||busy)return
-    const sName =
-      (stratName && stratName !== 'strategy' && stratName !== 'custom_strategy')
-        ? stratName
-        : (strategyName || 'custom_strategy')
-    const errText = errorMessage || '回测执行异常'
-    const repairPrompt =
-      `针对策略「${sName}」回测运行报错：\n${errText}\n\n`+
-      `请深入分析报错原因，对策略「${sName}」进行1次代码修复并保存策略文件。\n\n`+
-      `【系统安全限制（强制）】：\n`+
-      `1. 本次操作只修改并保存策略代码；\n`+
-      `2. 严禁在修复后自动调用 execute_backtest 重新回测，严禁擅自生成回测参数卡片；\n`+
-      `3. 修复完成后请简要总结修改点，并等待用户进一步确认。`
-
-    const tempId=generateUUID()
-    const optimisticMsg:ResearchMessage={
-      id:tempId,
-      role:'user',
-      content:repairPrompt,
-      message_type:'message',
-      metadata:{},
-      created_at:new Date().toISOString(),
+    autoScrollRef.current=true
+    setTimeout(()=>scrollToBottom(true),30)
+    try{
+      await api.runDshAction(project.id,{action,...options})
+      const[m,r,fresh,wLog,tStatus,dshP,liveEvents]=await Promise.all([
+        api.researchMessages(project.id),
+        api.researchRuns(project.id),
+        api.researchProject(project.id),
+        api.researchWritingLog(project.id).catch(()=>null),
+        api.researchThinkingStatus(project.id).catch(()=>null),
+        api.dshPending(project.id).catch(()=>[]),
+        api.dshLiveEvents(project.id).catch(()=>null),
+      ])
+      setMessages(m)
+      setRuns(r)
+      setProject(fresh)
+      if(wLog)setWritingLog(wLog)
+      if(tStatus)setThinkingStatus(tStatus)
+      if(liveEvents)setLiveDshEvents(liveEvents.events)
+      setDshPending(dshP)
+      setBusy(Boolean(fresh.is_busy||dshP.length>0))
+      setTimeout(()=>scrollToBottom(false),50)
+    }catch(e){
+      setMessages(prev=>prev.filter(msg=>msg.id!==tempId))
+      setError((e as Error).message)
+      setBusy(false)
+    }finally{
+      setActionBusy(null)
     }
-    setMessages(prev=>[...prev,optimisticMsg])
-    setInput('')
-    setBusy(true)
-    setError('')
-    autoScrollRef.current = true
-    setShowScrollBottom(false)
-    setTimeout(() => scrollToBottom(true), 30)
-    api
-      .sendResearchMessage(project.id,repairPrompt)
-      .then(async()=>{
-        const[m,r,fresh,wLog,tStatus]=await Promise.all([
-          api.researchMessages(project.id),
-          api.researchRuns(project.id),
-          api.researchProject(project.id),
-          api.researchWritingLog(project.id).catch(()=>null),
-          api.researchThinkingStatus(project.id).catch(()=>null),
-        ])
-        setMessages(m)
-        setRuns(r)
-        setProject(fresh)
-        if(wLog)setWritingLog(wLog)
-        if(tStatus)setThinkingStatus(tStatus)
-      })
-      .catch(e=>{
-        setError((e as Error).message)
-        setBusy(false)
-      })
   }
 
-  function handleConfirmAnalysis(metrics?: Record<string, any>, stratName?: string){
-    if(!project||busy)return
-    const sName =
-      (stratName && stratName !== 'strategy' && stratName !== 'custom_strategy')
-        ? stratName
-        : (strategyName || 'custom_strategy')
-    const ret = metrics?.total_return != null ? `${Number(metrics.total_return).toFixed(2)}%` : '—'
-    const sharpe =
-      (metrics?.sharpe_ratio ?? metrics?.sharpe) != null
-        ? Number(metrics?.sharpe_ratio ?? metrics?.sharpe).toFixed(2)
-        : '—'
-    const dd = metrics?.max_drawdown != null ? `${Number(metrics.max_drawdown).toFixed(2)}%` : '—'
-    const winRate = metrics?.win_rate != null ? `${Number(metrics.win_rate).toFixed(1)}%` : '—'
-    const totalTrades = metrics?.total_trades ?? metrics?.trades ?? '—'
+  function handleConfirmRepair(_errorMessage?: string, _stratName?: string, runId?:string){
+    const failedRun=runId?runs.find(run=>run.id===runId):runs.find(run=>run.status==='FAILED')
+    void runFixedAction('FIX_ERROR',{run_id:failedRun?.id})
+  }
 
-    const analysisPrompt =
-      `针对策略「${sName}」本次回测结果（总收益率: ${ret}, 夏普比率: ${sharpe}, 最大回撤: ${dd}, 胜率: ${winRate}, 总交易数: ${totalTrades}），请进行1次深度回测归因分析。\n\n`+
-      `请剖析：\n`+
-      `1. 收益与亏损的核心来源及行情特征适应性；\n`+
-      `2. 胜率、盈亏比与极端亏损原因分析；\n`+
-      `3. 策略逻辑的潜在改进方向。\n\n`+
-      `【系统安全限制（强制）】：\n`+
-      `本次仅进行原因与指标归因分析，严禁修改策略代码，严禁调用 execute_backtest 重新回测。`
-
-    const tempId=generateUUID()
-    const optimisticMsg:ResearchMessage={
-      id:tempId,
-      role:'user',
-      content:analysisPrompt,
-      message_type:'message',
-      metadata:{},
-      created_at:new Date().toISOString(),
-    }
-    setMessages(prev=>[...prev,optimisticMsg])
-    setInput('')
-    setBusy(true)
-    setError('')
-    autoScrollRef.current = true
-    setShowScrollBottom(false)
-    setTimeout(() => scrollToBottom(true), 30)
-    api
-      .sendResearchMessage(project.id,analysisPrompt)
-      .then(async()=>{
-        const[m,r,fresh,wLog,tStatus]=await Promise.all([
-          api.researchMessages(project.id),
-          api.researchRuns(project.id),
-          api.researchProject(project.id),
-          api.researchWritingLog(project.id).catch(()=>null),
-          api.researchThinkingStatus(project.id).catch(()=>null),
-        ])
-        setMessages(m)
-        setRuns(r)
-        setProject(fresh)
-        if(wLog)setWritingLog(wLog)
-        if(tStatus)setThinkingStatus(tStatus)
-      })
-      .catch(e=>{
-        setError((e as Error).message)
-        setBusy(false)
-      })
+  function handleConfirmAnalysis(_metrics?: Record<string, any>, _stratName?: string, runId?:string){
+    const completedRun=runId?runs.find(run=>run.id===runId):runs.find(run=>run.status==='COMPLETED')
+    void runFixedAction('ANALYZE_BACKTEST',{run_id:completedRun?.id})
   }
 
   function handleOpenParamsModal(params:Record<string,any>){
@@ -1996,63 +2010,11 @@ export default function Research(){
 
   function handleConfirmBacktestParams(params:Record<string,any>){
     if(!project||busy)return
-    const symbolsArr = Array.isArray(params.symbols) ? params.symbols : [params.symbols || 'BTCUSDT']
-    const confirmPrompt=
-      `【回测参数已确认，请立即启动 QuantLab 官方回测引擎】：\n`+
-      `【系统强制指令】：严禁使用 terminal/bash 终端运行命令！你必须通过 QuantLab 官方回测系统执行回测。请立即在回复中输出以下标准的 tool_call 机器块启动回测：\n\n`+
-      `\`\`\`tool_call\n`+
-      `{\n`+
-      `  "name": "execute_backtest",\n`+
-      `  "arguments": {\n`+
-      `    "strategy_name": "${params.strategy_name||'strategy'}",\n`+
-      `    "symbols": ${JSON.stringify(symbolsArr)},\n`+
-      `    "start_date": "${params.start_date||'2024-01-01'}",\n`+
-      `    "end_date": "${params.end_date||'2024-06-30'}",\n`+
-      `    "initial_balance": ${params.initial_balance??10000.0},\n`+
-      `    "leverage": ${params.leverage??1.0},\n`+
-      `    "parameters": ${JSON.stringify(params.parameters||{})}\n`+
-      `  }\n`+
-      `}\n`+
-      `\`\`\`\n\n`+
-      `请立即输出上述 tool_call 块启动 QuantLab 回测。`
-
-    const tempId=generateUUID()
-    const optimisticMsg:ResearchMessage={
-      id:tempId,
-      role:'user',
-      content:confirmPrompt,
-      message_type:'message',
-      metadata:{},
-      created_at:new Date().toISOString(),
-    }
-    setMessages(prev=>[...prev,optimisticMsg])
-    setInput('')
-    setBusy(true)
-    setError('')
-    autoScrollRef.current = true
-    setShowScrollBottom(false)
-    setTimeout(() => scrollToBottom(true), 30)
-    api
-      .sendResearchMessage(project.id,confirmPrompt)
-      .then(async()=>{
-        const[m,r,fresh,wLog,tStatus]=await Promise.all([
-          api.researchMessages(project.id),
-          api.researchRuns(project.id),
-          api.researchProject(project.id),
-          api.researchWritingLog(project.id).catch(()=>null),
-          api.researchThinkingStatus(project.id).catch(()=>null),
-        ])
-        setMessages(m)
-        setRuns(r)
-        setProject(fresh)
-        if(wLog)setWritingLog(wLog)
-        if(tStatus)setThinkingStatus(tStatus)
-        setBusy(true)
-      })
-      .catch(e=>{
-        setError((e as Error).message)
-        setBusy(false)
-      })
+    setActiveModalParams(params)
+    void runFixedAction('RUN_BACKTEST',{
+      content:'使用已确认参数执行回测',
+      arguments:params,
+    })
   }
 
   async function loadStrategy(projId:string){
@@ -2085,7 +2047,7 @@ export default function Research(){
     if(autoScrollRef.current && timeline.current){
       timeline.current.scrollTo({top:timeline.current.scrollHeight,behavior:'smooth'})
     }
-  },[messages,busy])
+  },[messages,busy,dshPending.length,runs[0]?.id,runs[0]?.status])
 
   // Continuous periodic polling for research messages, writing logs, thinking status, and backtest runs
   useEffect(()=>{
@@ -2099,12 +2061,14 @@ export default function Research(){
 
     const timer=window.setInterval(async ()=>{
       try{
-        const[m,r,fresh,wLog,tStatus]=await Promise.all([
+        const[m,r,fresh,wLog,tStatus,dshP,liveEvents]=await Promise.all([
           api.researchMessages(project.id),
           api.researchRuns(project.id),
           api.researchProject(project.id),
           api.researchWritingLog(project.id).catch(()=>null),
           api.researchThinkingStatus(project.id).catch(()=>null),
+          api.dshPending(project.id).catch(()=>[]),
+          api.dshLiveEvents(project.id).catch(()=>null),
         ])
         setMessages(prev => {
           if(
@@ -2122,14 +2086,17 @@ export default function Research(){
         setProject(fresh)
         if(wLog)setWritingLog(wLog)
         if(tStatus)setThinkingStatus(tStatus)
+        if(liveEvents)setLiveDshEvents(liveEvents.events)
+        setDshPending(dshP)
         const runsActive=r.some(run=>['QUEUED','RUNNING','ANALYZING'].includes(run.status))
         const writerActive=wLog?.status==='RUNNING'
         const thinkingActive=tStatus?.status==='THINKING'||tStatus?.status==='TOOL_RUNNING'||tStatus?.status==='GENERATING'
+        const hasPending=dshP.length>0
         if(fresh.is_busy||runsActive||writerActive||thinkingActive){
           setBusy(true)
         }else{
-          setBusy(false)
-          loadStrategy(project.id)
+          setBusy(hasPending)
+          if(!hasPending)loadStrategy(project.id)
         }
       }catch(err: any){
         const msg = String(err?.message || '')
@@ -2139,87 +2106,59 @@ export default function Research(){
           setRuns([])
           setWritingLog(null)
           setThinkingStatus(null)
+          setLiveDshEvents([])
           setStrategyCode('')
           reloadList()
         }
       }
     }, pollInterval)
     return()=>window.clearInterval(timer)
-  },[project?.id,project?.is_busy,busy,runs.map(r=>r.status).join(','),writingLog?.status,thinkingStatus?.status])
+  },[project?.id,project?.is_busy,busy,runs.map(r=>r.status).join(','),writingLog?.status,thinkingStatus?.status,dshPending.map(p=>p.request_id).join(',')])
 
   async function handleCreate(e:React.FormEvent){
     e.preventDefault()
-    if(!newTitle.trim()||busy)return
-    setBusy(true)
+    if(!newTitle.trim()||creatingBusy)return
+    if(newSessionMode==='continue'&&!sourceProjectId){
+      setError('请选择要续接的已有策略')
+      return
+    }
+    setCreatingBusy(true)
     setError('')
     try{
-      const created=await api.createResearch(newTitle.trim(),newIdea.trim(),clientId())
+      const created=await api.createResearch(
+        newTitle.trim(),
+        newIdea.trim(),
+        clientId(),
+        newSessionMode==='continue'?sourceProjectId:undefined,
+      )
       setCreating(false)
+      setCreatingBusy(false)
+      setNewSessionMode('blank')
+      setSourceProjectId('')
       setNewTitle('')
       setNewIdea('')
       await reloadList()
       await open(created)
     }catch(e){
       setError((e as Error).message)
-      setBusy(false)
+      setCreatingBusy(false)
     }
   }
 
-  async function handleSend(e?:React.FormEvent){
-    if(e)e.preventDefault()
-    const text=input.trim()
-    if(!project||!text||busy)return
-    const tempId=generateUUID()
-    const optimisticMsg:ResearchMessage={
-      id:tempId,
-      role:'user',
-      content:text,
-      message_type:'message',
-      metadata:{},
-      created_at:new Date().toISOString(),
-    }
-    setMessages(prev=>[...prev,optimisticMsg])
-    setInput('')
-    setBusy(true)
-    setError('')
-    autoScrollRef.current = true
-    setShowScrollBottom(false)
-    setTimeout(() => scrollToBottom(true), 30)
-    try{
-      await api.sendResearchMessage(project.id,text)
-      const[m,r,fresh,wLog,tStatus]=await Promise.all([
-        api.researchMessages(project.id),
-        api.researchRuns(project.id),
-        api.researchProject(project.id),
-        api.researchWritingLog(project.id).catch(()=>null),
-        api.researchThinkingStatus(project.id).catch(()=>null),
-      ])
-      setMessages(m)
-      setRuns(r)
-      setProject(fresh)
-      if(wLog)setWritingLog(wLog)
-      if(tStatus)setThinkingStatus(tStatus)
-      setBusy(true)
-    }catch(e){
-      setError((e as Error).message)
-      setBusy(false)
-    }
-  }
-
-  async function handleDshRun(e?: React.FormEvent) {
-    if (e) e.preventDefault()
-    const text = input.trim()
-    if (!project || !text || busy) return
+  async function runDshTurn(prompt: string) {
+    if (!project || !prompt.trim() || busy) return
+    const text = prompt.trim()
     const tempId = generateUUID()
     const optimisticMsg: ResearchMessage = {
       id: tempId,
       role: 'user',
-      content: `⚡ [DSH 多 Agent 星型闭环] ${text}`,
+      content: text,
       message_type: 'message',
       metadata: { is_dsh_run: true },
       created_at: new Date().toISOString(),
     }
     setMessages(prev => [...prev, optimisticMsg])
+    setLiveDshEvents([])
     setInput('')
     setBusy(true)
     setError('')
@@ -2228,22 +2167,87 @@ export default function Research(){
     setTimeout(() => scrollToBottom(true), 30)
     try {
       await api.runDshPipeline(project.id, text)
-      const [m, r, fresh, wLog, tStatus] = await Promise.all([
+      const [m, r, fresh, wLog, tStatus, dshP, liveEvents] = await Promise.all([
         api.researchMessages(project.id),
         api.researchRuns(project.id),
         api.researchProject(project.id),
         api.researchWritingLog(project.id).catch(() => null),
         api.researchThinkingStatus(project.id).catch(() => null),
+        api.dshPending(project.id).catch(() => []),
+        api.dshLiveEvents(project.id).catch(() => null),
       ])
       setMessages(m)
       setRuns(r)
       setProject(fresh)
       if (wLog) setWritingLog(wLog)
       if (tStatus) setThinkingStatus(tStatus)
+      if (liveEvents) setLiveDshEvents(liveEvents.events)
+      setDshPending(dshP)
+      setBusy(Boolean(fresh.is_busy || dshP.length > 0))
+    } catch (err) {
+      setError((err as Error).message)
+      setBusy(false)
+    }
+  }
+
+  async function handleDshRun(e?: React.FormEvent) {
+    if (e) e.preventDefault()
+    await runDshTurn(input)
+  }
+
+  async function handleDshCancel() {
+    if (!project || cancelBusy) return
+    setCancelBusy(true)
+    setError('')
+    try {
+      await api.cancelDshPipeline(project.id)
+      const [m, fresh, tStatus, liveEvents] = await Promise.all([
+        api.researchMessages(project.id),
+        api.researchProject(project.id),
+        api.researchThinkingStatus(project.id).catch(() => null),
+        api.dshLiveEvents(project.id).catch(() => null),
+      ])
+      setMessages(m)
+      setProject(fresh)
+      if (tStatus) setThinkingStatus(tStatus)
+      if (liveEvents) setLiveDshEvents(liveEvents.events)
+      setBusy(false)
     } catch (err) {
       setError((err as Error).message)
     } finally {
-      setBusy(false)
+      setCancelBusy(false)
+    }
+  }
+
+  async function handleDshApprove(approval: DshApproval, approved: boolean) {
+    if (!project || approveBusyId) return
+    setApproveBusyId(approval.request_id)
+    setError('')
+    if (approved) setLiveDshEvents([])
+    try {
+      await api.dshApprove(project.id, approval.request_id, approved, approveFeedback[approval.request_id] || '')
+      setApproveFeedback(prev => { const n = { ...prev }; delete n[approval.request_id]; return n })
+      const [m, r, fresh, wLog, tStatus, dshP, liveEvents] = await Promise.all([
+        api.researchMessages(project.id),
+        api.researchRuns(project.id),
+        api.researchProject(project.id),
+        api.researchWritingLog(project.id).catch(() => null),
+        api.researchThinkingStatus(project.id).catch(() => null),
+        api.dshPending(project.id).catch(() => []),
+        api.dshLiveEvents(project.id).catch(() => null),
+      ])
+      setMessages(m)
+      setRuns(r)
+      setProject(fresh)
+      if (wLog) setWritingLog(wLog)
+      if (tStatus) setThinkingStatus(tStatus)
+      if (liveEvents) setLiveDshEvents(liveEvents.events)
+      setDshPending(dshP)
+      setBusy(Boolean(fresh.is_busy || dshP.length > 0))
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setApproveBusyId(null)
     }
   }
 
@@ -2265,7 +2269,7 @@ export default function Research(){
         return
       }
       e.preventDefault()
-      handleSend()
+      handleDshRun()
     }
   }
 
@@ -2313,11 +2317,41 @@ export default function Research(){
   // Active run & latest failed run detection for monitoring & alerting
   const activeRun = runs.find(r => ['QUEUED', 'RUNNING', 'ANALYZING'].includes(r.status))
   const latestFailedRun = runs.length > 0 && runs[0].status === 'FAILED' ? runs[0] : null
+  const latestCompletedRun = runs.find(r => r.status === 'COMPLETED') || null
+  const strategyReady = Boolean(project?.strategy_id && strategyCode)
+  const canStopDsh = busy && dshPending.length === 0 && !activeRun
+
+  function handleQuickAction(action:DshAction){
+    if(action==='WRITE_STRATEGY'){
+      void runFixedAction(action)
+      return
+    }
+    if(action==='RUN_BACKTEST'){
+      const reusableParams=Object.keys(activeModalParams).length>0
+        ? activeModalParams
+        : (runs[0]?.config||{})
+      if(Object.keys(reusableParams).length>0){
+        handleOpenParamsModal({
+          ...reusableParams,
+          strategy_name:reusableParams.strategy_name||strategyName,
+          parameters:reusableParams.parameters||reusableParams.strategy_parameters||{},
+        })
+      }else{
+        void runFixedAction(action)
+      }
+      return
+    }
+    if(action==='FIX_ERROR'){
+      void runFixedAction(action,{run_id:latestFailedRun?.id})
+      return
+    }
+    void runFixedAction(action,{run_id:latestCompletedRun?.id})
+  }
 
   // Compute grouped turns for Hermes thinking & tool execution bundling
   const turns = useMemo(
-    () => groupMessagesIntoTurns(messages, runs, activeRun, writingLog, project),
-    [messages, runs, activeRun, writingLog, project]
+    () => groupMessagesIntoTurns(messages, runs, writingLog),
+    [messages, runs, writingLog]
   )
 
   return(
@@ -2333,48 +2367,59 @@ export default function Research(){
               <span>量化研究会话</span>
               {projects.length>0&&<span className="count-pill">{projects.length}</span>}
             </div>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button
-                type="button"
-                className="button tool-btn"
-                style={{ height: '30px', padding: '0 8px', fontSize: '11px', borderColor: 'rgba(33,201,237,0.3)', background: 'rgba(33,201,237,0.08)', color: '#70e1f5' }}
-                onClick={() => setExportModalOpen(true)}
-                title="导出策略研究记录与 DSH 调试日志"
-              >
-                <FileDown size={13} className="text-cyan" />
-                <span>导出</span>
-              </button>
-              <button className="button primary new-session-btn" onClick={()=>setCreating(true)}>
+            <div>
+              <button className="button primary new-session-btn" onClick={openCreateModal}>
                 <Plus size={14}/>新建
               </button>
             </div>
           </div>
 
           <div className="session-list">
-            {projects.map(item=>(
-              <div
-                key={item.id}
-                className={`session-item ${item.id===project?.id?'active':''}`}
-                onClick={()=>open(item)}
-              >
-                <div className="session-item-body">
-                  <span className="session-item-title">{item.title}</span>
-                  <div className="session-item-meta">
-                    <time>{new Date(item.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</time>
-                    <span className={`status-tag ${item.status.toLowerCase()}`}>
-                      {item.status==='ARCHIVED'?'已归档':'进行中'}
-                    </span>
-                  </div>
-                </div>
-                <button
-                  className="session-delete-btn"
-                  title="删除研究"
-                  onClick={e=>handleDelete(item.id,e)}
-                >
-                  <Trash2 size={13}/>
-                </button>
-              </div>
-            ))}
+            {sessionGroups.map(group=>{
+              const expanded=expandedSessionGroups[group.key]!==false
+              return(
+                <section className="session-group" key={group.key}>
+                  <button
+                    type="button"
+                    className="session-group-header"
+                    onClick={()=>setExpandedSessionGroups(prev=>({...prev,[group.key]:!expanded}))}
+                    aria-expanded={expanded}
+                  >
+                    {expanded?<ChevronDown size={13}/>:<ChevronRight size={13}/>}
+                    <span className="session-group-label">{group.label}</span>
+                    {group.slug&&<code>{group.slug}</code>}
+                    <span className="session-group-count">{group.sessions.length}</span>
+                  </button>
+                  {expanded&&(
+                    <div className="session-group-items">
+                      {group.sessions.map(item=>(
+                        <div
+                          key={item.id}
+                          className={`session-item ${item.id===project?.id?'active':''}`}
+                          onClick={()=>open(item)}
+                        >
+                          <div className="session-item-body">
+                            <span className="session-item-title">{item.title}</span>
+                            <div className="session-item-meta">
+                              <time>{new Date(item.updated_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</time>
+                              <span className="session-phase-tag">{RESEARCH_PHASE_LABELS[item.research_phase||'RESEARCH']||'策略研究'}</span>
+                              {item.status==='ARCHIVED'&&<span className="status-tag archived">已归档</span>}
+                            </div>
+                          </div>
+                          <button
+                            className="session-delete-btn"
+                            title="删除研究"
+                            onClick={e=>handleDelete(item.id,e)}
+                          >
+                            <Trash2 size={13}/>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )
+            })}
             {!projects.length&&<div className="sidebar-empty">点击上方按钮创建第一个研究主题</div>}
           </div>
         </div>
@@ -2419,16 +2464,6 @@ export default function Research(){
                   >
                     <FlaskConical size={14}/>回测列表 ({runs.length})
                   </button>
-                  <button
-                    type="button"
-                    className="button tool-btn header-export-btn active"
-                    style={{ borderColor: 'rgba(33,201,237,0.4)', background: 'rgba(33,201,237,0.12)', color: '#70e1f5', fontWeight: 600 }}
-                    title="导出当前策略完整研究记录与 DSH 调试日志"
-                    onClick={() => setExportModalOpen(true)}
-                  >
-                    <FileDown size={14} className="text-cyan" />
-                    <span>导出日志</span>
-                  </button>
                   <button className="button icon-btn" title={project.status==='ARCHIVED'?'重新打开':'归档研究'} onClick={handleArchive}>
                     {project.status==='ARCHIVED'?<RotateCcw size={14}/>:<Archive size={14}/>}
                   </button>
@@ -2453,41 +2488,6 @@ export default function Research(){
                       }}
                     >
                       查看实时进度与日志
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Recent Backtest Error Alert Banner */}
-              {latestFailedRun && (
-                <div className="failed-backtest-alert-banner">
-                  <div className="alert-left">
-                    <AlertCircle size={16} className="alert-icon" />
-                    <div className="alert-text">
-                      <b>回测执行报错 ({latestFailedRun.name})</b>
-                      <span>{latestFailedRun.error_message || '未知错误，请检查日志与数据'}</span>
-                    </div>
-                  </div>
-                  <div className="alert-actions">
-                    <button
-                      className="button mini danger"
-                      disabled={busy}
-                      onClick={() => handleConfirmRepair(latestFailedRun.error_message || '', latestFailedRun.name || '')}
-                    >
-                      <Wrench size={12} /> 确认修复策略代码
-                    </button>
-                    <button
-                      className="button mini secondary"
-                      onClick={() => {
-                        if (activeModalParams && Object.keys(activeModalParams).length > 0) {
-                          setParamsModalOpen(true)
-                        } else if (latestFailedRun.config) {
-                          setActiveModalParams(latestFailedRun.config)
-                          setParamsModalOpen(true)
-                        }
-                      }}
-                    >
-                      <Sliders size={12} /> 重新配置参数
                     </button>
                   </div>
                 </div>
@@ -2547,103 +2547,28 @@ export default function Research(){
 
                       {/* Assistant Responses & Proposal Cards for this turn */}
                       {turn.responseMessages.map(msg => {
-                        if (msg.message_type === 'code_approval' || msg.metadata?.code_approval) {
-                          const approvalData: CodeApprovalData =
-                            msg.metadata?.code_approval || msg.metadata?.result?.approval_data || msg.metadata?.arguments || {}
-                          let cleanContent = msg.content
-                            ? msg.content.replace(/```(?:code_approval|json:code_approval)[\s\S]*?```/gi, '').trim()
-                            : ''
-                          if (cleanContent.startsWith('{') && cleanContent.endsWith('}')) {
-                            cleanContent = ''
-                          }
+                        const backtestProposal = extractBacktestParamsProposal(msg)
+                        if (backtestProposal && project) {
                           return (
                             <div key={msg.id} className="chat-msg-wrap">
-                              {cleanContent && (
-                                <article className={`chat-message ${msg.role === 'tool' ? 'assistant' : msg.role}`}>
-                                  <div className="message-avatar">
-                                    <Bot size={16} />
-                                  </div>
+                              {backtestProposal.cleanContent && (
+                                <article className={`chat-message ${msg.role}`}>
+                                  <div className="message-avatar"><Bot size={16} /></div>
                                   <div className="message-content">
                                     <div className="message-author">
                                       <b>{getAgentDisplayName(msg)}</b>
                                       <time>{new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
                                     </div>
                                     <div className="message-markdown">
-                                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                        {cleanContent}
-                                      </ReactMarkdown>
+                                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{backtestProposal.cleanContent}</ReactMarkdown>
                                     </div>
                                   </div>
                                 </article>
                               )}
-                              <CodeApprovalCard
-                                data={approvalData}
-                                onApprove={handleApproveCode}
-                                onModify={handleModifyCode}
-                                disabled={busy}
+                              <BacktestParamsCard
+                                params={backtestProposal.params}
+                                onOpenModal={handleOpenParamsModal}
                               />
-                            </div>
-                          )
-                        }
-
-                        if (msg.message_type === 'backtest_params' || msg.metadata?.backtest_params) {
-                          const bp =
-                            msg.metadata?.backtest_params || msg.metadata?.result?.backtest_params || msg.metadata?.arguments || {}
-                          let cleanContent = msg.content
-                            ? msg.content.replace(/```(?:backtest_params|json:backtest_params)[\s\S]*?```/gi, '').trim()
-                            : ''
-                          if (cleanContent.startsWith('{') && cleanContent.endsWith('}')) {
-                            cleanContent = ''
-                          }
-                          return (
-                            <div key={msg.id} className="chat-msg-wrap">
-                              {cleanContent && (
-                                <article className={`chat-message ${msg.role === 'tool' ? 'assistant' : msg.role}`}>
-                                  <div className="message-avatar">
-                                    <Bot size={16} />
-                                  </div>
-                                  <div className="message-content">
-                                    <div className="message-author">
-                                      <b>{getAgentDisplayName(msg)}</b>
-                                      <time>{new Date(msg.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
-                                    </div>
-                                    <div className="message-markdown">
-                                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                        {cleanContent}
-                                      </ReactMarkdown>
-                                    </div>
-                                  </div>
-                                </article>
-                              )}
-                              {project && (
-                                <BacktestParamsCard
-                                  params={bp}
-                                  project={project}
-                                  onOpenModal={handleOpenParamsModal}
-                                />
-                              )}
-                            </div>
-                          )
-                        }
-
-                        if (
-                          msg.message_type === 'backtest_result' ||
-                          msg.metadata?.tool_name === 'execute_backtest' ||
-                          msg.metadata?.backtest_result
-                        ) {
-                          return (
-                            <div key={msg.id} className="chat-msg-wrap">
-                              {project && (
-                                <BacktestResultCard
-                                  msg={msg}
-                                  project={project}
-                                  strategyName={strategyName}
-                                  busy={busy}
-                                  handleConfirmAnalysis={handleConfirmAnalysis}
-                                  handleConfirmRepair={handleConfirmRepair}
-                                  handleOpenParamsModal={handleOpenParamsModal}
-                                />
-                              )}
                             </div>
                           )
                         }
@@ -2664,16 +2589,114 @@ export default function Research(){
                                   {msg.content}
                                 </ReactMarkdown>
                               </div>
+                              {strategyReady && dshPending.length === 0 && msg.role === 'assistant' && msg.content.includes('请点击「批准并开始编写代码」') && (
+                                <div className="approval-resolved-note" role="status">
+                                  <Check size={13} />
+                                  <span>此审批已完成；策略代码已写入并通过 L1–L4 校验，无需再次批准。</span>
+                                </div>
+                              )}
                             </div>
                           </article>
                         )
                       })}
+
+                      <TurnActionCards
+                        processItems={turn.processItems}
+                        hasResponseProposal={turn.responseMessages.some(msg => Boolean(extractBacktestParamsProposal(msg)))}
+                        strategyName={strategyName}
+                        busy={busy}
+                        handleConfirmAnalysis={handleConfirmAnalysis}
+                        handleOpenParamsModal={handleOpenParamsModal}
+                      />
                     </div>
                   )
                 })}
 
+                {/* DSH Interactive Approval Card — user gatekeeper step */}
+                {dshPending.length > 0 && (
+                  <div className="dsh-approval-stack">
+                    {dshPending.map(appr => {
+                      const isWrite = appr.tool === 'write_strategy_code'
+                      const isBacktest = appr.tool === 'execute_backtest_tool'
+                      const args = appr.arguments || {}
+                      const fb = approveFeedback[appr.request_id] || ''
+                      const pendingKey = `${appr.request_id}-${appr.status}-${appr.created_at}`
+                      return (
+                        <div key={pendingKey} className="chat-msg-wrap">
+                          <article className="chat-message tool dsh-approval-wrap">
+                            <div className="message-avatar">
+                              <ShieldCheck size={16} />
+                            </div>
+                            <div className="message-content">
+                              <div className="message-author">
+                                <b>DSH 执行门禁 · 待你审批</b>
+                                <time>{new Date(appr.created_at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+                              </div>
+                              <div className="dsh-approval-card">
+                                <div className="dsh-approval-head">
+                                  <div className="dsh-approval-badge">
+                                    <Sparkles size={14} />
+                                    <span>{isBacktest ? '回测执行' : isWrite ? '策略写码' : appr.tool}</span>
+                                  </div>
+                                  <code className="dsh-approval-rid">{appr.request_id.slice(0, 12)}…</code>
+                                </div>
+                                <div className="dsh-approval-tip">
+                                  <AlertCircle size={13} />
+                                  <span>
+                                    {isBacktest
+                                      ? `DSH 请求创建回测：${args.strategy_name || ''}`
+                                      : isWrite
+                                        ? `DSH 请求写入/修改策略：${args.strategy_name || ''}`
+                                        : `DSH 请求调用工具：${appr.tool}`}
+                                  </span>
+                                </div>
+                                {Object.keys(args).length > 0 && (
+                                  <details className="dsh-approval-details">
+                                    <summary>查看请求参数</summary>
+                                    <pre>{JSON.stringify(args, null, 2)}</pre>
+                                  </details>
+                                )}
+                                <textarea
+                                  className="dsh-approval-feedback"
+                                  placeholder="审批意见（可选）：例如「改个参数默认值即可」"
+                                  rows={2}
+                                  value={fb}
+                                  disabled={approveBusyId === appr.request_id}
+                                  onChange={e => setApproveFeedback(prev => ({ ...prev, [appr.request_id]: e.target.value }))}
+                                />
+                                <div className="dsh-approval-actions">
+                                  <button
+                                    type="button"
+                                    className="button mini danger"
+                                    disabled={approveBusyId === appr.request_id}
+                                    onClick={() => handleDshApprove(appr, false)}
+                                  >
+                                    拒绝
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="button mini primary"
+                                    disabled={approveBusyId === appr.request_id}
+                                    onClick={() => handleDshApprove(appr, true)}
+                                  >
+                                    {approveBusyId === appr.request_id ? (
+                                      <><Loader2 size={12} className="spin" /> 处理中…</>
+                                    ) : (
+                                      <><Check size={12} /> 批准并继续</>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </article>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
                 {/* Live Backtest Progress or Strategy Writing Live Progress or Live Thinking card */}
-                {busy && (
+                {busy && dshPending.length === 0 && (
                   writingLog?.status === 'RUNNING' ? (
                     <div className="chat-writer-live-card">
                       <div className="live-card-avatar writer">
@@ -2767,35 +2790,42 @@ export default function Research(){
                       <div className="live-card-body">
                         <div className="live-card-head">
                           <div className="live-title-group">
-                            <b>DeepSeek Harness 量化主控正在深度思考与推理</b>
+                            <b>DeepSeek Harness 量化主控正在执行研究任务</b>
                             <span className="live-thinking-state-badge">
                               <Loader2 size={11} className="spin" />
-                              {thinkingStatus?.status === 'TOOL_RUNNING' ? '工具调度中' : '量化推理中'}
+                              {thinkingStatus?.status === 'TOOL_RUNNING'
+                                ? '工具调度中'
+                                : thinkingStatus?.status === 'GENERATING'
+                                  ? '生成回复中'
+                                  : '任务分析中'}
                             </span>
                           </div>
                         </div>
 
-                        <div className="live-stage-desc thinking">
-                          <Sparkles size={13} className="text-cyan sparkle-spin" />
-                          <span>{thinkingStatus?.step || '正在深度研讨量化假设、指标计算与策略规则…'}</span>
+                        <div className="dsh-run-budget" aria-label="DSH 当前阶段与执行预算">
+                          <span>{thinkingStatus?.phase === 'IMPLEMENTATION' ? '策略开发' : thinkingStatus?.phase === 'BACKTEST' ? '正式回测' : '策略研究'}</span>
+                          <span>{liveDshEvents.filter(event => event.kind === 'tool_call').length} / {thinkingStatus?.phase === 'RESEARCH' || !thinkingStatus?.phase ? 5 : '—'} 次工具</span>
+                          {thinkingStatus?.metrics?.elapsed_ms != null && <span>{Math.round(thinkingStatus.metrics.elapsed_ms / 1000)} 秒</span>}
                         </div>
 
-                        {thinkingStatus?.thought && (
-                          <div className="live-thinking-stream-box">
-                            <div className="thinking-stream-label">
-                              <BrainCircuit size={12} />
-                              <span>实时思维链流：</span>
-                            </div>
-                            <div className="thinking-stream-content">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {thinkingStatus.thought}
-                              </ReactMarkdown>
-                            </div>
-                          </div>
-                        )}
+                        <div className="live-stage-desc thinking">
+                          <Sparkles size={13} className="text-cyan sparkle-spin" />
+                          <span>{thinkingStatus?.step || '正在等待 Harness 返回执行阶段…'}</span>
+                        </div>
+
+                        <DshLiveExecution events={liveDshEvents} />
                       </div>
                     </div>
                   )
+                )}
+
+                {latestFailedRun && !busy && dshPending.length === 0 && (
+                  <BacktestFailureCard
+                    run={latestFailedRun}
+                    busy={busy}
+                    onRepair={run => handleConfirmRepair(run.error_message || '', run.name, run.id)}
+                    onAdjust={handleOpenParamsModal}
+                  />
                 )}
               </div>
 
@@ -2814,39 +2844,51 @@ export default function Research(){
 
               {/* Chat Composer */}
               <div className="chat-composer-wrap">
-                {/* Prompt Suggestions */}
-                <div className="quick-prompt-bar">
+                {/* Fixed high-frequency actions */}
+                <div className="quick-prompt-bar" role="toolbar" aria-label="策略工作流快捷操作">
                   <button
+                    type="button"
                     className="quick-chip"
-                    onClick={()=>setInput('方案很清晰，请开始编写策略代码。')}
+                    disabled={busy||project.status==='ARCHIVED'}
+                    onClick={()=>handleQuickAction('WRITE_STRATEGY')}
+                    title="跳过意图判断，直接进入策略编写"
                   >
-                    🚀 编写策略代码
+                    {actionBusy==='WRITE_STRATEGY'?<Loader2 size={13} className="spin"/>:<Code2 size={13}/>} 编写策略
                   </button>
                   <button
+                    type="button"
                     className="quick-chip"
-                    onClick={()=>setInput('请为该策略生成回测参数。')}
+                    disabled={busy||!project.strategy_id||project.status==='ARCHIVED'}
+                    onClick={()=>handleQuickAction('RUN_BACKTEST')}
+                    title={project.strategy_id?'配置确认后直接生成回测审批卡':'请先完成策略编写'}
                   >
-                    📈 生成回测参数
+                    {actionBusy==='RUN_BACKTEST'?<Loader2 size={13} className="spin"/>:<Play size={13}/>} 执行回测
                   </button>
                   <button
+                    type="button"
                     className="quick-chip"
-                    onClick={()=>setInput('针对策略回测报错，请进行1次策略代码修复（只修改代码，禁止自动回测）。')}
+                    disabled={busy||!latestFailedRun||project.status==='ARCHIVED'}
+                    onClick={()=>handleQuickAction('FIX_ERROR')}
+                    title={latestFailedRun?'直接修复最近一次失败回测':'当前没有失败回测可修复'}
                   >
-                    🛠️ 修复策略代码
+                    {actionBusy==='FIX_ERROR'?<Loader2 size={13} className="spin"/>:<Wrench size={13}/>} 修复报错
                   </button>
                   <button
+                    type="button"
                     className="quick-chip"
-                    onClick={()=>setInput('请对本次回测结果进行1次深度归因分析，详细剖析盈利/亏损原因（只分析原因，禁止修改代码和回测）。')}
+                    disabled={busy||!latestCompletedRun||project.status==='ARCHIVED'}
+                    onClick={()=>handleQuickAction('ANALYZE_BACKTEST')}
+                    title={latestCompletedRun?'直接分析最近一次成功回测':'当前没有已完成回测可分析'}
                   >
-                    📊 回测结果分析
+                    {actionBusy==='ANALYZE_BACKTEST'?<Loader2 size={13} className="spin"/>:<LineChart size={13}/>} 回测分析
                   </button>
                 </div>
 
-                <form className="chat-composer" onSubmit={handleSend}>
+                <form className="chat-composer" onSubmit={handleDshRun}>
                   <textarea
                     ref={textareaRef}
                     rows={2}
-                    placeholder="输入你的策略设想、改进建议或回测要求（Enter 发送，Shift+Enter 换行）…"
+                    placeholder="输入你的策略设想、改进建议或回测要求，DSH 量化主控将调度研究闭环（Enter 发送，Shift+Enter 换行）…"
                     value={input}
                     onChange={e=>setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
@@ -2854,13 +2896,29 @@ export default function Research(){
                     onCompositionEnd={()=>{isComposingRef.current=false}}
                     disabled={busy||project.status==='ARCHIVED'}
                   />
-                  <button
-                    type="submit"
-                    className="send-btn"
-                    disabled={busy||!input.trim()||project.status==='ARCHIVED'}
-                  >
-                    {busy?<Loader2 size={16} className="spin"/>:<Send size={16}/>}
-                  </button>
+                  {canStopDsh ? (
+                    <button
+                      type="button"
+                      className="send-btn stop"
+                      disabled={cancelBusy}
+                      onClick={handleDshCancel}
+                      aria-label="强制停止当前 LLM 任务"
+                      title="强制停止当前 LLM 任务"
+                    >
+                      {cancelBusy ? <Loader2 size={15} className="spin" /> : <Square size={14} fill="currentColor" />}
+                      <span>{cancelBusy ? '停止中' : '停止'}</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="submit"
+                      className="send-btn"
+                      disabled={busy||!input.trim()||project.status==='ARCHIVED'}
+                      aria-label="发送消息"
+                    >
+                      <Send size={15}/>
+                      <span>发送</span>
+                    </button>
+                  )}
                 </form>
               </div>
             </>
@@ -3021,14 +3079,53 @@ export default function Research(){
         <div className="modal-backdrop">
           <section className="modal create-research-modal">
             <button className="modal-close" onClick={()=>setCreating(false)}><X size={16}/></button>
-            <h2>新建策略研究</h2>
-            <p className="muted">开启一个全新的对话会话，由 DeepSeek Harness 协同完成策略构想、写码与回测。</p>
+            <h2>新建量化研究会话</h2>
+            <p className="muted">选择从零研究，或在不复制冗长历史的情况下续接已有策略。</p>
             <form onSubmit={handleCreate} className="stack-form">
+              <div className="new-session-mode" role="radiogroup" aria-label="会话创建方式">
+                <label className={newSessionMode==='blank'?'active':''}>
+                  <input
+                    type="radio"
+                    name="new-session-mode"
+                    value="blank"
+                    checked={newSessionMode==='blank'}
+                    onChange={()=>setNewSessionMode('blank')}
+                  />
+                  <span><b>新建策略会话</b><small>从零开始研究一个新策略</small></span>
+                </label>
+                <label className={newSessionMode==='continue'?'active':''}>
+                  <input
+                    type="radio"
+                    name="new-session-mode"
+                    value="continue"
+                    checked={newSessionMode==='continue'}
+                    disabled={continuationSources.length===0}
+                    onChange={()=>{
+                      setNewSessionMode('continue')
+                      if(!sourceProjectId)setSourceProjectId(continuationSources[0]?.id||'')
+                    }}
+                  />
+                  <span><b>续接已有策略</b><small>共享策略与最近结果，使用新上下文</small></span>
+                </label>
+              </div>
+              {newSessionMode==='continue'&&(
+                <label>
+                  选择已有策略
+                  <select value={sourceProjectId} onChange={e=>setSourceProjectId(e.target.value)} required>
+                    <option value="">请选择策略</option>
+                    {continuationSources.map(item=>{
+                      const linked=item.strategy_id?strategyById.get(item.strategy_id):null
+                      return <option key={item.id} value={item.id}>{linked?.name||item.title} · 最近会话：{item.title}</option>
+                    })}
+                  </select>
+                  <small className="field-help">系统只生成结构化交接摘要，不会复制旧会话消息。</small>
+                </label>
+              )}
               <label>
-                研究主题名称
+                本轮会话名称
                 <input
                   type="text"
-                  placeholder="例如：BTC 15m 均线动量突破与 ATR 止损"
+                  placeholder={newSessionMode==='continue'?'例如：第二轮 · 调整过滤条件与回测':'例如：BTC 15m 均线动量突破'}
                   value={newTitle}
                   onChange={e=>setNewTitle(e.target.value)}
                   required
@@ -3036,29 +3133,24 @@ export default function Research(){
                 />
               </label>
               <label>
-                初始策略想法（可选）
+                {newSessionMode==='continue'?'本轮目标（可选）':'初始策略想法（可选）'}
                 <textarea
                   rows={3}
-                  placeholder="可在此描述你的交易逻辑、指标构想、预期适用市场等…"
+                  placeholder={newSessionMode==='continue'?'例如：重点优化震荡行情下的假突破问题':'可描述交易逻辑、指标构想和适用市场…'}
                   value={newIdea}
                   onChange={e=>setNewIdea(e.target.value)}
                 />
               </label>
               <div className="modal-actions">
                 <button type="button" className="button" onClick={()=>setCreating(false)}>取消</button>
-                <button type="submit" className="button primary" disabled={busy||!newTitle.trim()}>
-                  {busy?<Loader2 size={14} className="spin"/>:'创建并开启研讨'}
+                <button type="submit" className="button primary" disabled={creatingBusy||!newTitle.trim()||(newSessionMode==='continue'&&!sourceProjectId)}>
+                  {creatingBusy?<Loader2 size={14} className="spin"/>:(newSessionMode==='continue'?'创建续接会话':'创建并开启研讨')}
                 </button>
               </div>
             </form>
           </section>
         </div>
       )}
-      <ExportModal
-        isOpen={exportModalOpen}
-        onClose={() => setExportModalOpen(false)}
-        defaultProjectId={project?.id}
-      />
     </div>
   )
 }

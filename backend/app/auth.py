@@ -136,8 +136,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         "/api/openapi.json",
     }
     PUBLIC_PREFIX_PATHS = (
-        "/api/research/tools/",
         "/api/health",
+        "/api/dsh-tools/",
     )
 
     async def dispatch(self, request: Request, call_next):
