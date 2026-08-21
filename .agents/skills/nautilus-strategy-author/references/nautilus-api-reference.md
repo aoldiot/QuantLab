@@ -61,7 +61,7 @@ class BtcEmaAtrTrendStrategy(Strategy):
         if len(self.bars) < warmup:
             return
 
-        closes = pd.Series([b.close.as_double() for b in self.bars])
+        closes = pd.Series([b.close.as_double() for b in self.bars[-100:]])
         fast_ma = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-1]
         slow_ma = closes.ewm(span=self.slow_period, adjust=False).mean().iloc[-1]
         prev_fast = closes.ewm(span=self.fast_period, adjust=False).mean().iloc[-2]

@@ -227,17 +227,19 @@ def test_research_cordis_has_no_terminal_or_filesystem() -> None:
     assert "quantlab-tools" in text
 
 
-def test_implementation_cordis_has_no_raw_terminal() -> None:
-    text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-implementation.yml").read_text(encoding="utf-8")
+def test_coding_cordis_has_no_raw_terminal() -> None:
+    text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-coding.yml").read_text(encoding="utf-8")
     assert "dsh-bash-local" not in text
     assert "dsh-fs-local" not in text
+    assert "coding-tools" in text
     assert "quantlab-tools" in text
 
 
-def test_repair_cordis_has_no_raw_terminal() -> None:
-    text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-repair.yml").read_text(encoding="utf-8")
+def test_default_cordis_has_no_raw_terminal() -> None:
+    text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis.yml").read_text(encoding="utf-8")
     assert "dsh-bash-local" not in text
     assert "dsh-fs-local" not in text
+    assert "coding-tools" in text
     assert "quantlab-tools" in text
 
 

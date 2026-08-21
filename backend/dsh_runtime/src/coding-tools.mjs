@@ -12,6 +12,11 @@ const render = (_args, value) => [{ type: 'text', text: typeof value === 'string
 export const name = 'quantlab-coding-tools'
 export const inject = ['tools']
 
+const isProtectedStrategyPath = filePath => {
+  const normalized = filePath.replace(/\\/g, '/')
+  return normalized.includes('/app/strategies/') || normalized.includes('backend/app/strategies/')
+}
+
 export function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'read_file',
@@ -84,6 +89,12 @@ export function apply(ctx) {
     output: { schema: { type: 'string' }, render },
     async execute(args) {
       const target = resolvePath(args.path)
+      if (isProtectedStrategyPath(target)) {
+        return JSON.stringify({
+          ok: false,
+          error: '禁止通过通用文件工具直接修改已发布的正式策略目录 (backend/app/strategies/)。请使用 stage_strategy_candidate / patch_strategy_candidate 走候选区隔离和 4 级 Pre-Flight 校验流程。',
+        })
+      }
       await mkdir(path.dirname(target), { recursive: true })
       await writeFile(target, args.content, 'utf8')
       return JSON.stringify({ ok: true, path: target, chars: args.content.length })
@@ -101,6 +112,12 @@ export function apply(ctx) {
     output: { schema: { type: 'string' }, render },
     async execute(args) {
       const target = resolvePath(args.path)
+      if (isProtectedStrategyPath(target)) {
+        return JSON.stringify({
+          ok: false,
+          error: '禁止通过通用文件工具直接修改已发布的正式策略目录 (backend/app/strategies/)。请使用 patch_strategy_candidate 进行候选区定点修补并重新触发 4 级 Pre-Flight 校验。',
+        })
+      }
       const original = await readFile(target, 'utf8')
       const count = args.old ? original.split(args.old).length - 1 : 0
       if (count !== 1) return JSON.stringify({ ok: false, error: `old text matched ${count} times; file unchanged` })

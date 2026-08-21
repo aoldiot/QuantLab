@@ -24,15 +24,8 @@
 - id: subprocess
   name: '@deepseek-ai/dsh-subprocess-local'
 
-- id: bash
-  name: '@deepseek-ai/dsh-bash-local'
-  config:
-    cwd: !!js process.env.DSH_CWD ?? process.cwd()
-
-- id: fs-local
-  name: '@deepseek-ai/dsh-fs-local'
-  config:
-    cwd: !!js process.env.DSH_CWD ?? process.cwd()
+- id: coding-tools
+  name: './src/coding-tools.mjs'
 
 # QuantLab domain tools exposed over the HTTP bridge. The plugin must be a
 # plain ESM .mjs module: the bundled loader does not transpile TypeScript.
