@@ -71,6 +71,7 @@ async def run_nautilus_backtest(
     approval_hash: str | None = None,
     parameters: dict[str, Any] | None = None,
     check_data_integrity: bool = True,
+    ignore_missing_data: bool = True,
     project_id: str | None = None,
     db: AsyncSession | None = None,
     timeout_seconds: int = 180,
@@ -175,9 +176,7 @@ async def run_nautilus_backtest(
             "leverage": leverage,
             "execution_model": execution_model,
             "check_data_integrity": check_data_integrity,
-            # Automated research runs cannot ask for interactive confirmation,
-            # so fail closed instead of silently skipping catalog gaps.
-            "ignore_missing_data": False,
+            "ignore_missing_data": ignore_missing_data,
             "strategy_version": {
                 "version": version_obj.version,
                 "code_hash": version_obj.code_hash,

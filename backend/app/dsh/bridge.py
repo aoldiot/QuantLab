@@ -643,6 +643,7 @@ async def _exec_execute_backtest(
         approval_hash=_arguments_hash("execute_backtest_tool", arguments),
         parameters=arguments.get("parameters"),
         check_data_integrity=bool(arguments.get("check_data_integrity", True)),
+        ignore_missing_data=bool(arguments.get("ignore_missing_data", True)),
         project_id=project.id,
         db=db,
     )

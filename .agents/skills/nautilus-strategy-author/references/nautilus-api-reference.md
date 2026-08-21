@@ -139,7 +139,6 @@ STRATEGY_MANIFEST = StrategyManifest(
         }
     },
     supports_short=True,
-    requires_funding=True,
 )
 ```
 
