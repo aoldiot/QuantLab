@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import signal
 import shutil
+import signal
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +12,7 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal
 from .models import BacktestRun, ResearchProject, ResearchStatus, RunStatus
+from .research_workflow import apply_research_phase
 
 
 _ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
@@ -93,6 +94,12 @@ async def _update(run_id: str, **values) -> None:
             project = await db.get(ResearchProject, run.research_project_id)
             if project and project.status != ResearchStatus.ARCHIVED:
                 project.status = research_status_for_run(values["status"])
+                if values["status"] in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.ANALYZING}:
+                    apply_research_phase(project, "BACKTEST")
+                elif values["status"] == RunStatus.COMPLETED:
+                    apply_research_phase(project, "RESULT_REVIEW")
+                else:
+                    apply_research_phase(project, "BACKTEST_RETRY")
         await db.commit()
 
 

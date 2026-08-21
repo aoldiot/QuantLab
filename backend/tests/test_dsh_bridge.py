@@ -15,6 +15,7 @@ import pytest
 
 from app.dsh.bridge import (
     _EXECUTORS,
+    _compact_approval_result,
     _find_registry_entry,
     _registry,
     approve_proposal,
@@ -162,31 +163,36 @@ def test_harness_phase_transition_closes_previous_runtime(monkeypatch):
 
     made = []
 
-    def fake_build(project, system_instructions="", phase="RESEARCH", task_profile=""):
+    def fake_build(project, runtime_config=None, system_instructions="", phase="RESEARCH", task_profile=""):
         harness = FakeHarness(phase)
         made.append(harness)
         return harness
 
+    async def fake_runtime_config():
+        return {"base_url": "http://mock", "model": "mock-model", "api_key": "mock-key"}
+
+    monkeypatch.setattr("app.dsh.engine._runtime_llm_config", fake_runtime_config)
     monkeypatch.setattr("app.dsh.engine._build_harness", fake_build)
     project = SimpleNamespace(id="phase-project")
-    research = _harness_for(project, phase="RESEARCH")
-    implementation = _harness_for(project, phase="IMPLEMENTATION")
+    research = asyncio.run(_harness_for(project, phase="RESEARCH"))
+    implementation = asyncio.run(_harness_for(project, phase="IMPLEMENTATION"))
 
     assert research.closed is True
     assert implementation.closed is False
-    assert list(_harnesses) == ["phase-project:IMPLEMENTATION:GENERAL"]
+    assert len(_harnesses) == 1
+    assert any(k.startswith("phase-project:CODING:GENERAL:") for k in _harnesses)
 
 
-def test_sdk_session_is_separate_across_research_and_implementation():
+def test_sdk_session_is_persistent_per_specialist_worker():
     project = SimpleNamespace(id="phase-project")
     research = _sdk_session_id(project, "RESEARCH")
     implementation = _sdk_session_id(project, "IMPLEMENTATION", "turn-one")
     next_implementation = _sdk_session_id(project, "IMPLEMENTATION", "turn-two")
 
-    assert research == "dsh_project_phase-project"
-    assert implementation.endswith("_implementation_turn-one")
+    assert research == "dsh_project_phase-project_research"
+    assert implementation == "dsh_project_phase-project_coding"
     assert research != implementation
-    assert implementation != next_implementation
+    assert implementation == next_implementation
 
 
 def test_find_registry_entry_prefers_request_id(seed_pending):
@@ -455,3 +461,179 @@ def test_map_unknown_falls_back_raw():
     n = FakeNotification("agent/resumed", {"sessionId": "s1"})
     m = _map_notification(n)
     assert m["type"] == "raw"
+
+
+def test_resolve_strategy_name_for_project_never_falls_back_to_global_file():
+    import asyncio
+    from app.dsh.bridge import _resolve_strategy_name_for_project
+    from app.models import ResearchProject
+    from unittest.mock import AsyncMock
+
+    async def _test():
+        project = ResearchProject(id="proj-test", title="Test Project")
+        mock_db = AsyncMock()
+        mock_db.get.return_value = None
+
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc:
+            await _resolve_strategy_name_for_project(project, "btc_ema_atr", mock_db)
+        assert exc.value.status_code == 409
+
+    asyncio.run(_test())
+
+
+def test_approved_arguments_are_rejected_if_mutated(seed_pending):
+    from fastapi import HTTPException
+
+    seed_pending["arguments_hash"] = "not-the-current-hash"
+    approve_proposal(PROJECT, seed_pending["request_id"], True, "")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(execute_approved_proposal(
+            SimpleNamespace(id=PROJECT), seed_pending["request_id"], SimpleNamespace()
+        ))
+    assert exc.value.status_code == 409
+
+
+def test_execute_approved_proposal_catches_executor_exception():
+    import asyncio
+    from app.dsh.bridge import execute_approved_proposal, _registry, _EXECUTORS
+    from app.models import ResearchProject
+    from unittest.mock import AsyncMock
+
+    async def _test():
+        project = ResearchProject(id="proj-exc-test", title="Exc Project")
+        _registry["proj-exc-test"] = {
+            "req-1": {
+                "request_id": "req-1",
+                "tool": "execute_backtest_tool",
+                "arguments": {"parameters": {"fast_period": 12, "slow_period": 26, "trade_size": 0.1}},
+                "status": "approved",
+            }
+        }
+
+        original_executor = _EXECUTORS.get("execute_backtest_tool")
+        try:
+            _EXECUTORS["execute_backtest_tool"] = AsyncMock(side_effect=ValueError("未知策略参数: fast_period"))
+            mock_db = AsyncMock()
+            res = await execute_approved_proposal(project, "req-1", mock_db)
+            assert res["status"] == "ok"
+            assert res["result"]["ok"] is False
+            assert "未知策略参数" in res["result"]["error"]
+        finally:
+            if original_executor:
+                _EXECUTORS["execute_backtest_tool"] = original_executor
+
+    asyncio.run(_test())
+
+
+def test_failed_preflight_never_publishes_strategy(monkeypatch, tmp_path):
+    published = []
+    workspace_file = tmp_path / "candidate.py"
+
+    monkeypatch.setattr("app.dsh.bridge._workspace_strategy_file", lambda project, name: workspace_file)
+    monkeypatch.setattr(
+        "app.dsh.bridge._verify_custom_path",
+        lambda target, name: {"ok": False, "failed_level": "L4", "error_message": "bad runtime"},
+    )
+    monkeypatch.setattr("app.dsh.bridge._diff_vs_baseline", lambda target, name: {"diff": "candidate"})
+    monkeypatch.setattr("app.strategy_files.save_strategy_code", lambda name, code: published.append((name, code)))
+
+    from app.dsh.bridge import _exec_write_strategy_code
+
+    result = asyncio.run(_exec_write_strategy_code(
+        SimpleNamespace(id="isolated-project"),
+        {"strategy_name": "safe_candidate", "code": "from __future__ import annotations\n"},
+        SimpleNamespace(),
+    ))
+    assert result["ok"] is False
+    assert result["status"] == "verification_failed"
+    assert published == []
+
+
+def test_write_approval_result_keeps_error_but_drops_large_diff_body():
+    result = _compact_approval_result("write_strategy_code", {
+        "ok": False,
+        "status": "verification_failed",
+        "verification": {"failed_level": "L2", "error_message": "bad manifest"},
+        "diff": {"files": [{"path": "x.py"}], "additions": 700, "deletions": 0, "diff": "x" * 50_000},
+    })
+    assert result["verification"]["failed_level"] == "L2"
+    assert result["diff"] == {"files": [{"path": "x.py"}], "additions": 700, "deletions": 0}
+    assert "truncated" not in result
+
+
+def test_stage_candidate_persists_failed_preflight_without_publishing(monkeypatch, tmp_path):
+    from app.dsh.bridge import _exec_stage_strategy_candidate
+
+    candidate = tmp_path / "staged.py"
+    monkeypatch.setattr("app.dsh.bridge._workspace_strategy_file", lambda project, name: candidate)
+    monkeypatch.setattr(
+        "app.dsh.bridge._verify_custom_path",
+        lambda target, name: {"ok": False, "failed_level": "L2", "error_message": "bad manifest"},
+    )
+    result = asyncio.run(_exec_stage_strategy_candidate(
+        SimpleNamespace(id="project"),
+        {"strategy_name": "staged_strategy", "code": "from __future__ import annotations\nVALUE = 1\n"},
+        SimpleNamespace(),
+    ))
+    assert result["status"] == "candidate_staged"
+    assert result["verification"]["failed_level"] == "L2"
+    assert candidate.read_text(encoding="utf-8").endswith("VALUE = 1\n")
+
+
+def test_patch_candidate_changes_only_unique_fragment_and_reverifies(monkeypatch, tmp_path):
+    from app.dsh.bridge import _exec_patch_strategy_candidate
+
+    candidate = tmp_path / "patched.py"
+    candidate.write_text("from __future__ import annotations\nVALUE = 1\nUNCHANGED = 9\n", encoding="utf-8")
+    monkeypatch.setattr("app.dsh.bridge._workspace_strategy_file", lambda project, name: candidate)
+    monkeypatch.setattr("app.dsh.bridge._verify_custom_path", lambda target, name: {"ok": True})
+    result = asyncio.run(_exec_patch_strategy_candidate(
+        SimpleNamespace(id="project"),
+        {"strategy_name": "patched_strategy", "edits": [{"old": "VALUE = 1", "new": "VALUE = 2"}]},
+        SimpleNamespace(),
+    ))
+    assert result["ok"] is True
+    assert result["applied_edits"] == 1
+    assert candidate.read_text(encoding="utf-8") == "from __future__ import annotations\nVALUE = 2\nUNCHANGED = 9\n"
+
+
+def test_ambiguous_candidate_patch_is_atomic(monkeypatch, tmp_path):
+    from app.dsh.bridge import _exec_patch_strategy_candidate
+
+    candidate = tmp_path / "ambiguous.py"
+    original = "from __future__ import annotations\nVALUE = 1\nVALUE = 1\n"
+    candidate.write_text(original, encoding="utf-8")
+    monkeypatch.setattr("app.dsh.bridge._workspace_strategy_file", lambda project, name: candidate)
+    result = asyncio.run(_exec_patch_strategy_candidate(
+        SimpleNamespace(id="project"),
+        {"strategy_name": "ambiguous_strategy", "edits": [{"old": "VALUE = 1", "new": "VALUE = 2"}]},
+        SimpleNamespace(),
+    ))
+    assert result["ok"] is False
+    assert "匹配 2 次" in result["error"]
+    assert candidate.read_text(encoding="utf-8") == original
+
+
+def test_normalize_backtest_arguments_accepts_check_data_integrity():
+    from app.dsh.bridge import _normalize_backtest_arguments
+
+    args = {
+        "strategy_name": "btc_ema_cross",
+        "symbols": ["BTCUSDT"],
+        "timeframes": ["15m"],
+        "start_date": "2024-01-01",
+        "end_date": "2024-06-30",
+        "initial_balance": 10000.0,
+        "leverage": 1.0,
+        "execution_model": "CONSERVATIVE",
+        "check_data_integrity": True,
+        "parameters": {"fast_period": 10},
+    }
+    normalized = _normalize_backtest_arguments(args)
+    assert normalized["strategy_name"] == "btc_ema_cross"
+    assert normalized["check_data_integrity"] is True
+    assert normalized["symbols"] == ["BTCUSDT"]
+    assert normalized["timeframes"] == ["15m"]
+

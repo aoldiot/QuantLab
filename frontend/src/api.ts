@@ -92,6 +92,7 @@ export const api={
   researchThinkingStatus:(id:string)=>request<import('./types').ResearchThinkingStatus>(`/research/${id}/thinking-status`),
   dshLiveEvents:(id:string)=>request<import('./types').DshLiveEventsResponse>(`/research/${id}/dsh/events`),
   researchRuns:(id:string)=>request<ResearchRun[]>(`/research/${id}/backtests`),
+  researchTasks:(id:string)=>request<Array<{id:string;worker_type:'RESEARCH'|'CODING'|'BACKTEST'|'ANALYSIS';task_type:string;status:string;attempt:number;max_attempts:number;session_id?:string;error_code?:string;error_message?:string}>>(`/research/${id}/tasks`),
   archiveResearch:(id:string)=>request<ResearchProject>(`/research/${id}/archive`,{method:'POST'}),
   reopenResearch:(id:string)=>request<ResearchProject>(`/research/${id}/reopen`,{method:'POST'}),
   deleteResearch:(id:string)=>request<{ok:boolean}>(`/research/${id}`,{method:'DELETE'}),

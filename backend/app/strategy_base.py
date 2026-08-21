@@ -194,11 +194,16 @@ class QuantLabStrategy(Strategy):
         self.submit_order(order)
         return order
 
-    def close_position(self, instrument_id: InstrumentId | str | None = None) -> None:
-        """Close all open positions for the instrument."""
-        iid = self._resolve_instrument_id(instrument_id)
+    def close_position(self, target: Any = None, *args: Any, **kwargs: Any) -> None:
+        """Close a specific Position (NautilusTrader) or all open positions for an instrument."""
+        from nautilus_trader.model.position import Position
+
+        if isinstance(target, Position):
+            super().close_position(target, *args, **kwargs)
+            return
+        iid = self._resolve_instrument_id(target)
         if iid and not self.is_flat(iid):
-            self.close_all_positions(iid)
+            self.close_all_positions(iid, **kwargs)
 
     # =========================================================================
     # Pandas Series Extractors (For effortless vectorized indicators in on_bar)

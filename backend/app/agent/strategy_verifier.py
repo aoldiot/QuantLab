@@ -139,8 +139,8 @@ def _clean_code_lines(code: str) -> str:
             lines = lines[1:]
             continue
 
-        # Repeated code fence or docstring fence on line 1
-        if line.startswith("```") or line.startswith("'''") or line.startswith('"""') and not (line.endswith('"""') and len(line) > 6):
+        # Repeated markdown code fence on line 1
+        if line.startswith("```"):
             lines = lines[1:]
             continue
 

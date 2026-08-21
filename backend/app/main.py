@@ -1,9 +1,9 @@
 import re
 import shutil
-from dataclasses import replace
-from datetime import UTC, datetime
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -62,6 +62,34 @@ from .data_downloads import scan_catalog_summary
 from .strategy_files import router as strategy_files_router
 
 
+class _ResearchPollingAccessFilter(logging.Filter):
+    """Keep high-frequency successful UI polling out of the Uvicorn access log."""
+
+    _paths = (
+        "/dsh/events",
+        "/dsh/pending",
+        "/writing-log",
+        "/thinking-status",
+        "/messages",
+        "/backtests",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not settings.dsh_quiet_poll_access_logs:
+            return True
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        method, path, status = str(args[1]), str(args[2]), str(args[4])
+        clean_path = path.split("?", 1)[0]
+        is_project_snapshot = bool(re.fullmatch(r"/api/research/[0-9a-f-]{36}", clean_path))
+        is_poll = any(clean_path.endswith(item) for item in self._paths) or is_project_snapshot
+        return not (method == "GET" and status.startswith("2") and is_poll)
+
+
+logging.getLogger("uvicorn.access").addFilter(_ResearchPollingAccessFilter())
+
+
 async def seed():
     async with SessionLocal() as db:
         for module_path in ("app.strategies.atr_trend", "app.strategies.momentum_rotation"):
@@ -82,15 +110,7 @@ async def seed():
             version.entrypoint = module_path
             version.parameter_schema = manifest.parameter_schema()
             version.data_requirements = manifest.data_requirements()
-            if not version.git_commit:
-                try:
-                    revision = resolve_revision(manifest, require_clean=False)
-                    version.git_commit = revision.commit
-                    version.git_ref = revision.ref
-                    version.git_repo = str(revision.repo)
-                    version.manifest_hash = revision.manifest_hash
-                except GitVersionError:
-                    pass
+            version.manifest_hash = manifest_hash(manifest)
         await db.commit()
 
 
@@ -117,6 +137,9 @@ async def lifespan(app: FastAPI):
     from .strategy_files import ensure_strategy_storage
     ensure_strategy_storage()
     await fail_interrupted_backtests()
+    from .workflow.task_service import recover_interrupted_tasks
+    async with SessionLocal() as db:
+        await recover_interrupted_tasks(db)
     await seed()
     yield
     from .dsh import shutdown_all
@@ -127,7 +150,6 @@ app = FastAPI(title="QuantLab API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_origin_regex=r"^https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

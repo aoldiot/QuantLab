@@ -67,6 +67,22 @@ class DecisionStatus(str, enum.Enum):
     DISMISSED = "DISMISSED"
 
 
+class AgentTaskStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    WAITING_USER = "WAITING_USER"
+    CANCELLED = "CANCELLED"
+
+
+class WorkerType(str, enum.Enum):
+    RESEARCH = "RESEARCH"
+    CODING = "CODING"
+    BACKTEST = "BACKTEST"
+    ANALYSIS = "ANALYSIS"
+
+
 class Strategy(Base):
     __tablename__ = "strategies"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -95,6 +111,9 @@ class StrategyVersion(Base):
     git_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     git_repo: Mapped[str | None] = mapped_column(String(500), nullable=True)
     manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    specification_id: Mapped[str | None] = mapped_column(
+        ForeignKey("strategy_specifications.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     strategy: Mapped[Strategy] = relationship(back_populates="versions")
 
@@ -241,3 +260,55 @@ class ResearchDecision(Base):
     source_message_id: Mapped[str | None] = mapped_column(ForeignKey("research_messages.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentTask(Base):
+    """Durable, restart-safe unit of work dispatched to one specialist worker."""
+
+    __tablename__ = "agent_tasks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id: Mapped[str] = mapped_column(ForeignKey("research_projects.id", ondelete="CASCADE"), index=True)
+    worker_type: Mapped[WorkerType] = mapped_column(Enum(WorkerType), index=True)
+    task_type: Mapped[str] = mapped_column(String(60), index=True)
+    status: Mapped[AgentTaskStatus] = mapped_column(Enum(AgentTaskStatus), default=AgentTaskStatus.PENDING, index=True)
+    input_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    output_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    session_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    parent_task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class CandidateRevision(Base):
+    __tablename__ = "candidate_revisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id: Mapped[str] = mapped_column(ForeignKey("research_projects.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    strategy_name: Mapped[str] = mapped_column(String(64), index=True)
+    parent_revision_id: Mapped[str | None] = mapped_column(ForeignKey("candidate_revisions.id", ondelete="SET NULL"), nullable=True)
+    code_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    code: Mapped[str] = mapped_column(Text)
+    patch: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(30), default="AGENT")
+    verification_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class VerificationRun(Base):
+    __tablename__ = "verification_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id: Mapped[str] = mapped_column(ForeignKey("research_projects.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    candidate_revision_id: Mapped[str | None] = mapped_column(ForeignKey("candidate_revisions.id", ondelete="SET NULL"), nullable=True)
+    code_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    contract_version: Mapped[str] = mapped_column(String(30), default="1")
+    ok: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    diagnostics: Mapped[list] = mapped_column(JSON, default=list)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

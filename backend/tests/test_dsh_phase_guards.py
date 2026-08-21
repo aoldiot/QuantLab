@@ -27,6 +27,19 @@ def test_dsh_intent_response_parser_accepts_structured_json_only() -> None:
     assert parsed["normalized_request"] == "按已确认方案实现"
 
 
+def test_dsh_intent_response_parser_handles_truncated_tokens() -> None:
+    truncated = (
+        '{"intent":"START_IMPLEMENTATION","confidence":0.84,'
+        '"normalized_request":"确认方案并实现","needs_clarification":false,'
+        '"clarification_question":"","pending_request_id":"","reason":"用户逐条确认了'
+    )
+    parsed = engine._parse_intent_response(truncated)
+    assert parsed["intent"] == "START_IMPLEMENTATION"
+    assert parsed["confidence"] == 0.84
+    assert parsed["normalized_request"] == "确认方案并实现"
+    assert parsed["needs_clarification"] is False
+
+
 def test_dsh_intent_response_parser_rejects_unknown_intent() -> None:
     try:
         engine._parse_intent_response('{"intent":"GUESS_FROM_KEYWORDS"}')
@@ -34,6 +47,15 @@ def test_dsh_intent_response_parser_rejects_unknown_intent() -> None:
         assert "未知意图" in str(exc)
     else:
         raise AssertionError("unknown DSH intent must be rejected")
+
+
+def test_dsh_intent_response_parser_rejects_non_json() -> None:
+    try:
+        engine._parse_intent_response("这是没有意图的纯文本回复")
+    except ValueError as exc:
+        assert "未返回 JSON 对象" in str(exc)
+    else:
+        raise AssertionError("non-json output must be rejected")
 
 
 def test_exact_common_commands_use_fast_route_but_nuanced_text_does_not() -> None:
@@ -51,6 +73,8 @@ def test_implementation_phase_uses_focused_instructions_and_complete_prompt() ->
     assert _instructions_for_phase("IMPLEMENTATION") == IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "不要重新输出研究方案" in IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "write_strategy_code" in IMPLEMENTATION_PHASE_INSTRUCTIONS
+    assert "完整 QuantLab 项目文件系统和终端" in IMPLEMENTATION_PHASE_INSTRUCTIONS
+    assert "最多三轮" in IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "完整策略规格" in prompt
     assert "已确认研究方案" in prompt
     assert "同意，开始编码" in prompt
@@ -93,6 +117,12 @@ def test_dsh_endpoint_routes_only_from_dsh_intent_result(monkeypatch) -> None:
             "reason": "用户希望落地方案",
         }
 
+    async def fake_approve_specification(project_arg, approved_plan, db):
+        return SimpleNamespace(id="specification-1")
+
+    async def fake_create_task(*args, **kwargs):
+        return SimpleNamespace(id="task-1")
+
     def fake_start(project_arg, content, **kwargs):
         started.update(project=project_arg, content=content, **kwargs)
         return SimpleNamespace()
@@ -100,6 +130,8 @@ def test_dsh_endpoint_routes_only_from_dsh_intent_result(monkeypatch) -> None:
     monkeypatch.setattr(research, "_project", fake_project)
     monkeypatch.setattr(research, "_recent_intent_context", fake_context)
     monkeypatch.setattr(research, "_start_dsh_turn", fake_start)
+    monkeypatch.setattr(research, "_approve_research_specification", fake_approve_specification)
+    monkeypatch.setattr("app.workflow.task_service.create_task", fake_create_task)
     monkeypatch.setattr(bridge, "pending_approvals", lambda project_id: [])
     monkeypatch.setattr(engine, "classify_intent", fake_classify)
 
@@ -116,7 +148,7 @@ def test_dsh_endpoint_routes_only_from_dsh_intent_result(monkeypatch) -> None:
     assert "write_strategy_code" in str(started["content"])
 
 
-def test_fixed_backtest_action_creates_approval_without_intent_turn(monkeypatch) -> None:
+def test_fixed_backtest_action_executes_directly_without_intent_turn(monkeypatch) -> None:
     project = SimpleNamespace(
         id="fixed-backtest",
         status=ResearchStatus.READY_FOR_BACKTEST,
@@ -125,7 +157,7 @@ def test_fixed_backtest_action_creates_approval_without_intent_turn(monkeypatch)
         strategy_id="strategy-id",
     )
     added = []
-    proposed = {}
+    executed = {}
 
     class FakeDb:
         def add(self, value) -> None:
@@ -137,14 +169,24 @@ def test_fixed_backtest_action_creates_approval_without_intent_turn(monkeypatch)
     async def fake_project(project_id, db):
         return project
 
-    async def fake_create(project_arg, tool, arguments, db, proposal_key=""):
-        proposed.update(tool=tool, arguments=arguments, proposal_key=proposal_key)
-        project_arg.research_phase = "AWAITING_BACKTEST_APPROVAL"
-        return {"status": "awaiting_approval", "request_id": "request-1", "tool": tool}
+    async def fake_create_task(*args, **kwargs):
+        return SimpleNamespace(id="task-1", attempt=0, max_attempts=2)
+
+    async def fake_start_task(db, task, session_id):
+        return task
+
+    async def fake_complete_task(db, task, output):
+        return task
+
+    async def fake_execute(project_arg, arguments, db):
+        executed.update(arguments)
+        return {"ok": True, "run_id": "run-1"}
 
     monkeypatch.setattr(research, "_project", fake_project)
-    monkeypatch.setattr(bridge, "pending_approvals", lambda project_id: [])
-    monkeypatch.setattr(bridge, "create_pending_proposal", fake_create)
+    monkeypatch.setattr("app.workflow.task_service.create_task", fake_create_task)
+    monkeypatch.setattr("app.workflow.task_service.start_task", fake_start_task)
+    monkeypatch.setattr("app.workflow.task_service.complete_task", fake_complete_task)
+    monkeypatch.setattr(bridge, "_exec_execute_backtest", fake_execute)
     monkeypatch.setattr(engine, "classify_intent", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("intent classifier must not run")))
 
     result = asyncio.run(research.run_dsh_action_endpoint(
@@ -166,9 +208,8 @@ def test_fixed_backtest_action_creates_approval_without_intent_turn(monkeypatch)
     ))
 
     assert result["kicked_off"] is False
-    assert result["proposal"]["request_id"] == "request-1"
-    assert proposed["tool"] == "execute_backtest_tool"
-    assert proposed["arguments"]["strategy_name"] == "test_strategy"
+    assert result["result"]["run_id"] == "run-1"
+    assert executed["strategy_name"] == "test_strategy"
     assert any(getattr(item, "role", None) == "assistant" for item in added)
 
 
@@ -184,6 +225,65 @@ def test_research_cordis_has_no_terminal_or_filesystem() -> None:
     assert "dsh-bash-local" not in text
     assert "dsh-fs-local" not in text
     assert "quantlab-tools" in text
+
+
+def test_implementation_cordis_has_no_raw_terminal() -> None:
+    text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-implementation.yml").read_text(encoding="utf-8")
+    assert "dsh-bash-local" not in text
+    assert "dsh-fs-local" not in text
+    assert "quantlab-tools" in text
+
+
+def test_repair_cordis_has_no_raw_terminal() -> None:
+    text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-repair.yml").read_text(encoding="utf-8")
+    assert "dsh-bash-local" not in text
+    assert "dsh-fs-local" not in text
+    assert "quantlab-tools" in text
+
+
+def test_repair_phase_instructions_cover_manifest_and_contracts() -> None:
+    instructions = _instructions_for_phase("REPAIR")
+    assert "STRATEGY_MANIFEST" in instructions
+    assert "StrategyManifest" in instructions
+    assert "calculate_indicators" in instructions
+    assert "完整项目文件系统" in instructions
+    assert "不生成审批卡" in instructions
+
+
+def test_auto_repair_prompt_contains_candidate_and_structured_error() -> None:
+    prompt = research._build_auto_repair_prompt(
+        "broken_strategy",
+        "from app.strategy_contract import StrategyManifest\n",
+        {"failed_level": "L2", "error_message": "ParameterSpec required"},
+        1,
+        2,
+    )
+    assert "第 1/2 次" in prompt
+    assert "ParameterSpec required" in prompt
+    assert "from app.strategy_contract import StrategyManifest" in prompt
+    assert "不改变交易假设" in prompt
+    assert "write_strategy_code" in prompt
+    assert "read_strategy_candidate" in prompt
+    assert "patch_strategy_candidate" in prompt
+
+
+def test_cordis_path_routes_to_phase_specific_configs() -> None:
+    assert engine._cordis_path("INTENT").name == "cordis-intent.yml"
+    assert engine._cordis_path("RESEARCH").name == "cordis-research.yml"
+    assert engine._cordis_path("REPAIR").name == "cordis-coding.yml"
+    assert engine._cordis_path("FIX_ERROR").name == "cordis-coding.yml"
+    assert engine._cordis_path("IMPLEMENTATION").name == "cordis-coding.yml"
+    assert engine._cordis_path("BACKTEST").name == "cordis-backtest.yml"
+    assert engine._cordis_path("RESULT_REVIEW").name == "cordis-analysis.yml"
+
+
+def test_coding_worker_has_full_project_tools() -> None:
+    runtime = Path(__file__).parents[1] / "dsh_runtime"
+    config = (runtime / "cordis-coding.yml").read_text(encoding="utf-8")
+    tools = (runtime / "src" / "coding-tools.mjs").read_text(encoding="utf-8")
+    assert "coding-tools.mjs" in config
+    for name in ("read_file", "search_code", "replace_in_file", "run_command"):
+        assert f"name: '{name}'" in tools
 
 
 def test_capabilities_tool_is_self_contained() -> None:

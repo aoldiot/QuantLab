@@ -84,5 +84,8 @@ async def test_research_export_json_and_markdown():
             data = res_json.json()
             assert data["project"]["title"] == "测试动量突破策略研究"
             assert len(data["messages"]) >= 4
-            assert data["messages"][1]["metadata"]["reasoning"] == "分析 BTC 波动特征，决定采用双均线 + ATR 通道过滤"
+            reasoning_messages = [
+                item for item in data["messages"] if item["metadata"].get("reasoning")
+            ]
+            assert reasoning_messages[0]["metadata"]["reasoning"] == "分析 BTC 波动特征，决定采用双均线 + ATR 通道过滤"
             assert "system_prompt" in data

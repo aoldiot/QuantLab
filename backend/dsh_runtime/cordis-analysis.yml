@@ -1,0 +1,27 @@
+# Result Review / Analysis DSH runtime. Strictly read-only analysis of backtest results,
+# performance attribution, trade logs, and robustness stress testing.
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+
+- id: agent-core
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    workspaceContext:
+      maxBytes: 32768
+
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'
+
+- id: session-checkpoints
+  name: '@deepseek-ai/dsh-session-checkpoint-policy'
+
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+
+- id: quantlab-tools
+  name: './src/quantlab-tools.mjs'
