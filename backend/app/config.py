@@ -34,7 +34,10 @@ class Settings(BaseSettings):
     dsh_research_max_tool_calls: int = 5
     dsh_tool_result_max_chars: int = 8000
     dsh_web_search_timeout_seconds: int = 12
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Keep local execution and Docker Compose on the repository-root .env.
+    # Resolving this path avoids changing configuration merely because uvicorn
+    # was started from backend/ rather than the repository root.
+    model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("data_root", "artifact_root", "catalog_path", "strategy_git_repo_path", mode="after")
     @classmethod

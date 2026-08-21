@@ -4,6 +4,16 @@ QuantLab 是一个基于 NautilusTrader 的策略研究与回测管理平台。�
 
 ## 启动方式
 
+### 统一配置
+
+项目只使用仓库根目录的 `.env`。首次部署或本地启动前执行：
+
+```bash
+cp .env.example .env
+```
+
+再为数据库密码、认证密钥和（如需环境变量覆盖设置页配置时）DSH API Key 填入真实值。Docker Compose 与本地后端、前端开发服务器均读取这同一份文件；不要再创建 `backend/.env` 或 `backend/.env.dsh`。
+
 ### 方式一：Docker Compose 全栈一键启动（推荐）
 
 ```bash
@@ -26,7 +36,6 @@ docker compose up -d postgres redis
 
 ```bash
 cd backend
-cp .env.example .env
 uv sync
 ./start.sh
 ```

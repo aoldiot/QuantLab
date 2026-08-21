@@ -11,6 +11,8 @@ flat SDK events onto the platform event vocabulary, and persists them into resea
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
 import json
 import logging
 import os
@@ -22,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
-from ..models import ResearchMessage, ResearchProject
+from ..models import LlmConfiguration, ResearchMessage, ResearchProject
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +78,36 @@ def _plugin_path() -> Path:
     return _dsh_runtime_dir() / "src" / "quantlab-tools.mjs"
 
 
+async def _runtime_llm_config() -> dict[str, str]:
+    """Resolve DSH credentials from deployment overrides or the saved UI config.
+
+    The settings page persists its values in the database.  Reading only
+    ``DSH_*`` variables made a Docker deployment appear configured in the UI
+    while every agent turn still started without a model credential.
+    """
+    from ..db import SessionLocal
+    from ..llm_config import decrypt_api_key
+
+    async with SessionLocal() as db:
+        saved = await db.get(LlmConfiguration, 1)
+
+    saved_base_url = (saved.base_url or "").strip() if saved else ""
+    saved_model = (saved.model or "").strip() if saved else ""
+    saved_api_key = decrypt_api_key(saved.api_key_encrypted) if saved else ""
+    base_url = (os.environ.get("DSH_BASE_URL") or saved_base_url or "https://api.deepseek.com/v1").strip()
+    api_key = (os.environ.get("DSH_API_KEY") or saved_api_key).strip()
+    model = (os.environ.get("DSH_MODEL") or saved_model or "deepseek-chat").strip()
+    if not api_key:
+        raise RuntimeError("缺少 DSH API Key：请前往「系统设置 - LLM & DSH 配置」保存 API Key，或设置 DSH_API_KEY 环境变量")
+    return {"base_url": base_url, "api_key": api_key, "model": model}
+
+
 def _load_dsh_env() -> None:
-    """Source DSH credentials from backend/.env.dsh so uvicorn inherits them."""
-    env_file = Path(__file__).resolve().parents[2] / ".env.dsh"
+    """Load DSH overrides from the unified repository-root .env file."""
+    env_file = Path(__file__).resolve().parents[3] / ".env"
+    # Keep legacy installations functional during the .env.dsh -> .env migration.
+    if not env_file.exists():
+        env_file = Path(__file__).resolve().parents[2] / ".env.dsh"
     if not env_file.exists():
         return
     raw: dict[str, str] = {}
@@ -128,15 +157,16 @@ def _sdk_session_id(
 
 def _build_harness(
     project: ResearchProject,
+    runtime_config: dict[str, str],
     system_instructions: str = "",
     phase: str = "RESEARCH",
     task_profile: str = "",
 ) -> Any:
     from deepseek_harness import DeepSeekHarness  # imported lazily (heavy import)
 
-    base_url = os.environ.get("DSH_BASE_URL") or "https://api.deepseek.com/v1"
-    api_key = os.environ.get("DSH_API_KEY") or ""
-    model = os.environ.get("DSH_MODEL") or "deepseek-chat"
+    base_url = runtime_config["base_url"]
+    api_key = runtime_config["api_key"]
+    model = runtime_config["model"]
     default_max_tokens = TASK_MAX_TOKENS.get(task_profile, DEFAULT_MAX_TOKENS)
     max_tokens = int(os.environ.get("DSH_MAX_TOKENS", "") or default_max_tokens)
 
@@ -214,11 +244,10 @@ async def classify_intent(
     """Use a dedicated, tool-free DSH turn to manage the user's intent."""
     from deepseek_harness import DeepSeekHarness  # imported lazily (heavy import)
 
-    base_url = os.environ.get("DSH_BASE_URL") or "https://api.deepseek.com/v1"
-    api_key = os.environ.get("DSH_API_KEY") or ""
-    model = os.environ.get("DSH_MODEL") or "deepseek-chat"
-    if not api_key:
-        raise RuntimeError("缺少 DSH API Key（DSH_API_KEY），无法判断用户意图")
+    runtime_config = await _runtime_llm_config()
+    base_url = runtime_config["base_url"]
+    api_key = runtime_config["api_key"]
+    model = runtime_config["model"]
 
     core_path = _cordis_path("INTENT")
     if not core_path.exists():
@@ -314,13 +343,17 @@ async def classify_intent(
             logger.warning("关闭 DSH 意图路由 Harness 失败", exc_info=True)
 
 
-def _harness_for(
+async def _harness_for(
     project: ResearchProject,
     system_instructions: str = "",
     phase: str = "RESEARCH",
     task_profile: str = "",
 ) -> Any:
-    key = f"{project.id}:{phase}:{task_profile or 'GENERAL'}"
+    runtime_config = await _runtime_llm_config()
+    config_fingerprint = hashlib.sha256(
+        f"{runtime_config['base_url']}\0{runtime_config['model']}\0{runtime_config['api_key']}".encode()
+    ).hexdigest()[:16]
+    key = f"{project.id}:{phase}:{task_profile or 'GENERAL'}:{config_fingerprint}"
     h = _harnesses.get(key)
     if h is None:
         # Different phases use different Cordis configurations but resume the
@@ -336,12 +369,20 @@ def _harness_for(
                 logger.warning("关闭旧阶段 DSH Harness 失败: %s", stale_key, exc_info=True)
         h = _build_harness(
             project,
+            runtime_config,
             system_instructions=system_instructions,
             phase=phase,
             task_profile=task_profile,
         )
         _harnesses[key] = h
     return h
+
+
+def _discard_harness(project_id: str, harness: Any) -> None:
+    """Remove a closed harness without relying on its credential fingerprint."""
+    for key, item in list(_harnesses.items()):
+        if key.startswith(f"{project_id}:") and item is harness:
+            _harnesses.pop(key, None)
 
 
 def get_status(project_id: str) -> dict[str, Any]:
@@ -657,12 +698,14 @@ async def _execute_turn(
     task_profile: str = "",
 ) -> dict[str, Any]:
     """Run one agent turn in the project's DSH session and persist its events."""
-    harness = _harness_for(
+    harness_or_awaitable = _harness_for(
         project,
         system_instructions=system_instructions,
         phase=phase,
         task_profile=task_profile,
     )
+    # Supporting a direct Harness return keeps this seam easy to fake in tests.
+    harness = await harness_or_awaitable if inspect.isawaitable(harness_or_awaitable) else harness_or_awaitable
     mapped_events: list[dict[str, Any]] = []
     tool_names: dict[str, str] = {}
     lock = threading.Lock()
@@ -722,7 +765,7 @@ async def _execute_turn(
     if not done:
         set_status(project.id, "FAILED", stage="DSH 回合超时，正在终止", error=f"超过 {timeout_seconds} 秒执行预算")
         await asyncio.to_thread(harness.close)
-        _harnesses.pop(f"{project.id}:{phase}:{task_profile or 'GENERAL'}", None)
+        _discard_harness(project.id, harness)
         try:
             await asyncio.wait_for(asyncio.shield(run_task), timeout=10)
         except Exception:  # noqa: BLE001
@@ -779,7 +822,7 @@ async def _execute_turn(
             recovered = bool(final_response.strip())
         else:
             await asyncio.to_thread(harness.close)
-            _harnesses.pop(f"{project.id}:{phase}:{task_profile or 'GENERAL'}", None)
+            _discard_harness(project.id, harness)
 
     # Recovery notifications are collected by the same callback; wait for
     # their persistence and return the complete event list.
