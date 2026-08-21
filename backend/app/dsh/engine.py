@@ -79,26 +79,18 @@ def _plugin_path() -> Path:
 
 
 async def _runtime_llm_config() -> dict[str, str]:
-    """Resolve DSH credentials from deployment overrides or the saved UI config.
-
-    The settings page persists its values in the database.  Reading only
-    ``DSH_*`` variables made a Docker deployment appear configured in the UI
-    while every agent turn still started without a model credential.
-    """
+    """Load the model credentials configured from the Settings page."""
     from ..db import SessionLocal
     from ..llm_config import decrypt_api_key
 
     async with SessionLocal() as db:
         saved = await db.get(LlmConfiguration, 1)
 
-    saved_base_url = (saved.base_url or "").strip() if saved else ""
-    saved_model = (saved.model or "").strip() if saved else ""
-    saved_api_key = decrypt_api_key(saved.api_key_encrypted) if saved else ""
-    base_url = (os.environ.get("DSH_BASE_URL") or saved_base_url or "https://api.deepseek.com/v1").strip()
-    api_key = (os.environ.get("DSH_API_KEY") or saved_api_key).strip()
-    model = (os.environ.get("DSH_MODEL") or saved_model or "deepseek-chat").strip()
-    if not api_key:
-        raise RuntimeError("缺少 DSH API Key：请前往「系统设置 - LLM & DSH 配置」保存 API Key，或设置 DSH_API_KEY 环境变量")
+    base_url = (saved.base_url or "").strip() if saved else ""
+    model = (saved.model or "").strip() if saved else ""
+    api_key = decrypt_api_key(saved.api_key_encrypted) if saved else ""
+    if not (base_url and model and api_key):
+        raise RuntimeError("尚未配置 DSH 模型：请前往「系统设置 - LLM & DSH 配置」保存 Base URL、模型和 API Key")
     return {"base_url": base_url, "api_key": api_key, "model": model}
 
 
@@ -926,19 +918,20 @@ async def run_llm_connectivity_test(
     """Run a minimal DSH SDK agent turn to verify LLM connectivity / tool calling.
 
     Single SDK-backed connectivity probe used by the LLM settings UI; no research
-    project is required. Values not given fall back to the engine DSH_* env.
+    project is required. Omitted values come from the saved Settings configuration.
     """
     from deepseek_harness import DeepSeekHarness  # imported lazily (heavy import)
 
-    url = (base_url or os.environ.get("DSH_BASE_URL") or "https://api.deepseek.com/v1").strip()
-    key = (api_key or os.environ.get("DSH_API_KEY") or "").strip()
-    mdl = (model or os.environ.get("DSH_MODEL") or "deepseek-chat").strip()
+    saved_config = await _runtime_llm_config() if not (base_url and api_key and model) else None
+    url = (base_url or saved_config["base_url"]).strip()
+    key = (api_key or saved_config["api_key"]).strip()
+    mdl = (model or saved_config["model"]).strip()
 
     core_path = _cordis_path()
     if not core_path.exists():
         return False, f"DSH cordis 配置缺失: {core_path}"
     if not key:
-        return False, "缺少 DSH API Key（DSH_API_KEY）"
+        return False, "缺少 DSH API Key：请前往「系统设置 - LLM & DSH 配置」保存配置"
 
     ws = (settings.data_root / "dsh" / "connectivity_test").resolve()
     ws.mkdir(parents=True, exist_ok=True)

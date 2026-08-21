@@ -12,7 +12,7 @@ QuantLab 是一个基于 NautilusTrader 的策略研究与回测管理平台。�
 cp .env.example .env
 ```
 
-再为数据库密码、认证密钥和（如需环境变量覆盖设置页配置时）DSH API Key 填入真实值。Docker Compose 与本地后端、前端开发服务器均读取这同一份文件；不要再创建 `backend/.env` 或 `backend/.env.dsh`。
+再为数据库密码、认证密钥填入真实值。DSH 的 Base URL、模型与 API Key 仅在「系统设置 - LLM & DSH 配置」中保存并加密写入 PostgreSQL，不放入 `.env`。Docker Compose 与本地后端、前端开发服务器均读取这同一份文件；不要再创建 `backend/.env` 或 `backend/.env.dsh`。
 
 ### 方式一：Docker Compose 全栈一键启动（推荐）
 
