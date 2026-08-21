@@ -4031,8 +4031,11 @@ body:has(.research-page) {
    Backtest Parameters Edit Modal
    -------------------------------------------------------------------------- */
 .backtest-edit-modal {
-  width: 680px !important;
-  max-width: 95vw !important;
+  /* This form contains multi-column configuration and parameter tables. Give it
+     a desktop work surface instead of inheriting the compact confirmation size. */
+  width: calc(100vw - 64px) !important;
+  max-width: none !important;
+  max-height: calc(100dvh - 48px);
   background: #0d1520 !important;
   border: 1px solid rgba(56, 189, 248, 0.3) !important;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(56, 189, 248, 0.1) !important;
@@ -4280,12 +4283,13 @@ body:has(.research-page) {
 
 /* Dynamic parameters */
 .dynamic-params-table {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
 .empty-params-note {
+  grid-column: 1 / -1;
   font-size: 12px;
   color: #64748b;
   font-style: italic;
@@ -4342,6 +4346,7 @@ body:has(.research-page) {
 }
 
 .add-param-row {
+  grid-column: 1 / -1;
   display: grid;
   grid-template-columns: 140px 1fr auto;
   gap: 8px;
@@ -4486,6 +4491,35 @@ body:has(.research-page) {
 }
 
 @media (max-width: 720px) {
+  .modal-backdrop:has(.backtest-edit-modal) {
+    padding: 12px;
+  }
+
+  .backtest-edit-modal {
+    width: 100% !important;
+    max-height: calc(100dvh - 24px);
+    padding: 18px;
+  }
+
+  .backtest-edit-modal .form-grid-2,
+  .backtest-edit-modal .form-grid-3 {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-edit-modal .dynamic-param-row,
+  .backtest-edit-modal .add-param-row {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .backtest-edit-modal .dynamic-params-table {
+    grid-template-columns: 1fr;
+  }
+
+  .backtest-edit-modal .dynamic-param-row .param-key-label,
+  .backtest-edit-modal .add-param-row input:first-child {
+    grid-column: 1 / -1;
+  }
+
   body:has(.research-page-v2) {
     min-width: 0;
     overflow: hidden;

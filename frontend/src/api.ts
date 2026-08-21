@@ -157,6 +157,6 @@ export const api={
     window.URL.revokeObjectURL(url)
     document.body.removeChild(a)
   },
-  checkBacktestCatalog:(data:{symbols:string[];timeframes:string[];start_date:string;end_date:string;venue?:string;catalog_path?:string|null})=>request<import('./types').CatalogCheckResponse>('/backtests/check-catalog',{method:'POST',body:JSON.stringify(data)}),
+  checkBacktestCatalog:(data:{symbols:string[];timeframes:string[];start_date:string;end_date:string;venue?:string;market_type?:'spot'|'um';catalog_path?:string|null})=>request<import('./types').CatalogCheckResponse>('/backtests/check-catalog',{method:'POST',body:JSON.stringify(data)}),
   dashboardStats:()=>request<import('./types').DashboardStats>('/dashboard/stats'),
 }

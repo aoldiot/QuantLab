@@ -11,7 +11,7 @@ dependencies = [
   "pydantic-settings>=2.10",
   "redis>=6.2",
   "orjson>=3.10",
-  "nautilus_trader==1.227.0",
+  "nautilus_trader==1.230.0",
   "pandas>=2.2",
   "pyarrow>=19",
   "cryptography>=50.0.0",

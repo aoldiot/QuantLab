@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -10,6 +12,37 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal
 from .models import BacktestRun, ResearchProject, ResearchStatus, RunStatus
+
+
+_ACTIVE_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
+
+
+async def cancel_active_backtest(run_id: str, worker_pid: int | None = None) -> bool:
+    """Stop the live worker process, if this API process owns it."""
+    process = _ACTIVE_PROCESSES.get(run_id)
+    if process is None:
+        if not worker_pid:
+            return False
+        try:
+            os.killpg(worker_pid, signal.SIGTERM)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return False
+    if process.returncode is not None:
+        return False
+    try:
+        # The worker is its own process group, so descendants cannot survive it.
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+        return True
+    finally:
+        _ACTIVE_PROCESSES.pop(run_id, None)
 
 
 def append_log(run_id: str, message: str) -> None:
@@ -48,7 +81,11 @@ def research_status_for_run(status: RunStatus) -> ResearchStatus:
 async def _update(run_id: str, **values) -> None:
     async with SessionLocal() as db:
         run = await db.get(BacktestRun, run_id)
-        if run is None:
+        if run is None or run.status == RunStatus.CANCELED:
+            return
+        # Cancellation is terminal. A late integrity check or worker completion
+        # must never resurrect a run as FAILED/COMPLETED.
+        if run.status == RunStatus.CANCELED and values.get("status") != RunStatus.CANCELED:
             return
         for key, value in values.items():
             setattr(run, key, value)
@@ -79,6 +116,7 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
     from nautilus_trader.model.data import Bar
     from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
     from .backtests.builder import instrument_id, timeframe_to_bar_spec
+    from .backtests.coverage import date_bounds, query_coverage
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     append_log(run_id, f"[{timestamp}] [INFO] 开始数据完整性检查...")
@@ -92,6 +130,7 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
     symbols = [s.strip() for s in config.get("symbols", []) if s.strip()]
     timeframes = config.get("timeframes", [])
     venue = config.get("venue", "BINANCE")
+    market_type = config.get("market_type", "um")
     start_date = str(config.get("start_date", ""))
     end_date = str(config.get("end_date", ""))
     catalog_path = config.get("catalog_path") or settings.catalog_path
@@ -103,7 +142,7 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
         details = [
             {
                 "symbol": s,
-                "instrument_id": instrument_id(s, venue),
+                "instrument_id": instrument_id(s, venue, market_type),
                 "timeframe": tf,
                 "status": "MISSING_DATA",
                 "message": f"Catalog 目录不存在: {resolved_path}",
@@ -135,9 +174,10 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
     except Exception as err:
         append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] 读取 Catalog Instruments 失败: {err}")
 
-    bar_dir = resolved_path / "data" / "bar"
-    start_str = f"{start_date}T00:00:00Z"
-    end_str = f"{end_date}T23:59:59Z"
+    start_ns, end_exclusive_ns = date_bounds(
+        datetime.fromisoformat(start_date).date(),
+        datetime.fromisoformat(end_date).date(),
+    )
 
     details = []
     missing_symbol_set = set()
@@ -145,7 +185,7 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
     current_check = 0
 
     for s in symbols:
-        inst_id = instrument_id(s, venue)
+        inst_id = instrument_id(s, venue, market_type)
         is_inst_registered = inst_id in registered_instruments
 
         for tf in timeframes:
@@ -172,17 +212,8 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
                 append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] [{current_check}/{total_checks}] {s} {tf} -> 不支持的数据周期")
                 continue
 
-            bar_dir_name = f"{inst_id}-{spec}-EXTERNAL"
-            bar_path = bar_dir / bar_dir_name
-
-            files = []
-            if bar_path.is_dir() and catalog is not None:
-                try:
-                    files = catalog._query_files(Bar, [bar_dir_name], start_str, end_str)
-                except Exception:
-                    files = list(bar_path.glob("*.parquet"))
-
-            if not is_inst_registered and not bar_path.exists():
+            bar_type = f"{inst_id}-{spec}-EXTERNAL"
+            if not is_inst_registered:
                 details.append({
                     "symbol": s,
                     "instrument_id": inst_id,
@@ -192,35 +223,20 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
                 })
                 missing_symbol_set.add(s)
                 append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] [{current_check}/{total_checks}] {s} {tf} -> 未找到交易对定义及行情数据")
-            elif not bar_path.exists() or len(list(bar_path.glob("*.parquet"))) == 0:
-                details.append({
-                    "symbol": s,
-                    "instrument_id": inst_id,
-                    "timeframe": tf,
-                    "status": "MISSING_DATA",
-                    "message": f"缺少 {tf} 周期 Parquet 行情数据",
-                })
-                missing_symbol_set.add(s)
-                append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] [{current_check}/{total_checks}] {s} {tf} -> 缺少 {tf} 周期行情数据")
-            elif not files:
-                details.append({
-                    "symbol": s,
-                    "instrument_id": inst_id,
-                    "timeframe": tf,
-                    "status": "PARTIAL_RANGE",
-                    "message": f"{tf} 周期在请求时间范围 ({start_date} ~ {end_date}) 内未找到可用数据",
-                })
-                missing_symbol_set.add(s)
-                append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] [{current_check}/{total_checks}] {s} {tf} -> 请求时间范围内无可用数据")
             else:
+                coverage = query_coverage(catalog, Bar, bar_type, start_ns, end_exclusive_ns, tf)
+                status = "OK" if coverage.complete else ("MISSING_DATA" if coverage.actual_count == 0 else "PARTIAL_RANGE")
                 details.append({
                     "symbol": s,
                     "instrument_id": inst_id,
                     "timeframe": tf,
-                    "status": "OK",
-                    "message": "数据完整",
+                    "status": status,
+                    "message": coverage.message,
                 })
-                append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] [{current_check}/{total_checks}] {s} {tf} -> 数据完整 ({len(files)} 个 Parquet 文件)")
+                if not coverage.complete:
+                    missing_symbol_set.add(s)
+                level = "INFO" if coverage.complete else "WARN"
+                append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] [{current_check}/{total_checks}] {s} {tf} -> {coverage.message}")
 
             # Brief non-blocking yield so UI gets smooth progress updates
             await asyncio.sleep(0.02)
@@ -228,7 +244,7 @@ async def _check_data_integrity_and_wait(run_id: str, strategy: dict) -> None:
     missing_symbols = sorted(missing_symbol_set)
     has_missing = len(missing_symbols) > 0
     if has_missing:
-        summary_text = f"检测到 {len(missing_symbols)} 个标的缺少数据：{', '.join(missing_symbols)}"
+        summary_text = f"检测到 {len(missing_symbols)} 个标的数据不完整，可确认后带警告继续：{', '.join(missing_symbols)}"
     else:
         summary_text = "所有标的 Catalog 数据均已完备"
 
@@ -277,7 +293,7 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
     )
     async with SessionLocal() as db:
         run = await db.get(BacktestRun, run_id)
-        if run is None:
+        if run is None or run.status == RunStatus.CANCELED:
             return
         # The worker runs from an exported Git snapshot, so a relative catalog
         # path would otherwise be resolved against ``artifacts/<id>/source/backend``.
@@ -326,6 +342,7 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
             (current_app / "strategy_contract.py", snapshot_backend / "app" / "strategy_contract.py"),
             (current_app / "strategy_base.py", snapshot_backend / "app" / "strategy_base.py"),
             (current_app / "backtests" / "builder.py", snapshot_backend / "app" / "backtests" / "builder.py"),
+            (current_app / "backtests" / "coverage.py", snapshot_backend / "app" / "backtests" / "coverage.py"),
             (current_app / "backtests" / "worker.py", snapshot_backend / "app" / "backtests" / "worker.py"),
             (current_app / "backtests" / "analytics.py", snapshot_backend / "app" / "backtests" / "analytics.py"),
         )
@@ -371,7 +388,11 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
         cwd=worker_cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
+    _ACTIVE_PROCESSES[run_id] = process
+    config["worker_pid"] = process.pid
+    await _update(run_id, config=config)
 
     log_file = work_dir / "backtest.log"
     log_lines: list[str] = []
@@ -398,6 +419,8 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
         append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] 回测执行超时 (超过最大运行时间 {settings.backtest_timeout_seconds} 秒)")
         await _update(run_id, status=RunStatus.FAILED, stage="执行超时", progress=100, error_message="回测超过最大运行时间", finished_at=datetime.now(UTC))
         return
+    finally:
+        _ACTIVE_PROCESSES.pop(run_id, None)
 
     if process.returncode != 0 or not output_path.exists():
         full_log = "".join(log_lines)
@@ -419,6 +442,12 @@ async def _execute_backtest(run_id: str, strategy: dict) -> None:
         append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] 回测失败: {err_msg}")
         await _update(run_id, status=RunStatus.FAILED, stage="回测失败", progress=100, error_message=err_msg, finished_at=datetime.now(UTC))
         return
+
+    async with SessionLocal() as db:
+        latest = await db.get(BacktestRun, run_id)
+        if latest is None or latest.status == RunStatus.CANCELED:
+            append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] 回测已取消，丢弃 worker 结果。")
+            return
 
     append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [INFO] 回测执行完成，正在分析与保存绩效报告...")
     await _update(run_id, status=RunStatus.ANALYZING, stage="保存报告与绩效指标", progress=90)

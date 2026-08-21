@@ -105,8 +105,9 @@ async def run_nautilus_backtest(
             "initial_balance": initial_balance,
             "leverage": leverage,
             "execution_model": "CONSERVATIVE",
-            "funding": bool(manifest.data_requirements().get("funding", True)),
-            "ignore_missing_data": True,
+            # Automated research runs cannot ask for interactive confirmation,
+            # so fail closed instead of silently skipping catalog gaps.
+            "ignore_missing_data": False,
             "strategy_version": {
                 "version": version_obj.version,
                 "code_hash": version_obj.code_hash,

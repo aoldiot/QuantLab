@@ -67,13 +67,17 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .indicator-section {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .indicator-section-tag {
@@ -110,8 +114,11 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
+.indicator-page { width: 26px; min-width: 26px; padding: 0!important; justify-content: center; }
+.indicator-page:disabled { opacity: .35; cursor: not-allowed; }
 
 .indicator-legend-chip {
   display: inline-flex;

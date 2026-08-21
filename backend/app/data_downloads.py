@@ -13,7 +13,6 @@ import threading
 import time
 import uuid
 import zipfile
-from collections import defaultdict
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -42,8 +41,30 @@ EXCHANGE_INFO = {
     "spot": "https://api.binance.com/api/v3/exchangeInfo",
     "um": "https://fapi.binance.com/fapi/v1/exchangeInfo",
 }
-TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"}
+TIMEFRAMES = {
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+}
 CATALOG_FORMAT_VERSION = 2
+DEFAULT_FEES = {
+    "spot": (Decimal("0.001"), Decimal("0.001")),
+    "um": (Decimal("0.0002"), Decimal("0.0005")),
+}
+DEFAULT_MARGIN_INIT = Decimal(1)
+DEFAULT_MARGIN_MAINT = Decimal("0.005")
 
 _HTTP_CLIENT = httpx.Client(
     timeout=httpx.Timeout(30.0, connect=10.0),
@@ -52,7 +73,9 @@ _HTTP_CLIENT = httpx.Client(
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept-Encoding": "gzip, deflate",
     },
-    limits=httpx.Limits(max_keepalive_connections=128, max_connections=256, keepalive_expiry=60.0),
+    limits=httpx.Limits(
+        max_keepalive_connections=128, max_connections=256, keepalive_expiry=60.0
+    ),
 )
 
 
@@ -64,6 +87,10 @@ class DownloadCreate(BaseModel):
     end_date: date
     catalog_path: str | None = None
     mode: str = "incremental"
+    maker_fee: Decimal | None = Field(default=None, ge=0)
+    taker_fee: Decimal | None = Field(default=None, ge=0)
+    margin_init: Decimal | None = Field(default=None, gt=0, le=1)
+    margin_maint: Decimal | None = Field(default=None, gt=0, le=1)
 
     @field_validator("market_type")
     @classmethod
@@ -160,30 +187,52 @@ def _publish(task_id: str, force_save: bool = False, **changes: Any) -> None:
         _save_task_to_disk(task, force=force_save)
 
 
-def _log(task_id: str, message: str, level: str = "info", force_save: bool = False, **_kwargs: Any) -> None:
+def _log(
+    task_id: str,
+    message: str,
+    level: str = "info",
+    force_save: bool = False,
+    **_kwargs: Any,
+) -> None:
     with _lock:
         task = _tasks.get(task_id)
         if not task:
             return
-        task["logs"].append({"time": datetime.now(UTC).strftime("%H:%M:%S"), "level": level, "message": message})
+        task["logs"].append(
+            {
+                "time": datetime.now(UTC).strftime("%H:%M:%S"),
+                "level": level,
+                "message": message,
+            }
+        )
         task["logs"] = task["logs"][-1000:]
         task["updated_at"] = _now()
         _save_task_to_disk(task, force=force_save or bool(_kwargs.get("force_log")))
 
 
-def _json_get(url: str) -> dict[str, Any]:
+def _json_get(url: str, params: dict[str, Any] | None = None) -> Any:
     last_error: Exception | None = None
     for attempt in range(5):
         try:
-            response = _HTTP_CLIENT.get(url)
+            response = _HTTP_CLIENT.get(url, params=params)
             if response.status_code == 429 or response.status_code >= 500:
                 retry_after = response.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after and retry_after.isdigit() else (2**attempt) * 0.5
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else (2**attempt) * 0.5
+                )
                 time.sleep(min(delay, 15))
                 continue
             response.raise_for_status()
             return response.json()
-        except (httpx.HTTPError, TimeoutError, OSError, ssl.SSLError, json.JSONDecodeError) as exc:
+        except (
+            httpx.HTTPError,
+            TimeoutError,
+            OSError,
+            ssl.SSLError,
+            json.JSONDecodeError,
+        ) as exc:
             last_error = exc
             if attempt == 4:
                 break
@@ -201,7 +250,11 @@ def _download(url: str) -> bytes | None:
                 if attempt == 4:
                     response.raise_for_status()
                 retry_after = response.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after and retry_after.isdigit() else (2**attempt) * 0.5
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else (2**attempt) * 0.5
+                )
                 time.sleep(min(delay, 20))
                 continue
             response.raise_for_status()
@@ -229,7 +282,11 @@ def _fetch_archive(archive: Archive) -> bytes | None:
 
 def _symbol_map(market_type: str) -> dict[str, dict[str, Any]]:
     payload = _json_get(EXCHANGE_INFO[market_type])
-    return {item["symbol"].upper(): item for item in payload.get("symbols", []) if item.get("status") == "TRADING"}
+    return {
+        item["symbol"].upper(): item
+        for item in payload.get("symbols", [])
+        if item.get("status") == "TRADING"
+    }
 
 
 def normalize_symbol(value: str) -> str:
@@ -237,7 +294,9 @@ def normalize_symbol(value: str) -> str:
     return "".join(char for char in value if char.isalnum())
 
 
-def archive_plan(symbol: str, interval: str, start: date, end: date, market_type: str) -> list[Archive]:
+def archive_plan(
+    symbol: str, interval: str, start: date, end: date, market_type: str
+) -> list[Archive]:
     path = "spot" if market_type == "spot" else "futures/um"
     archives: list[Archive] = []
     cursor = start.replace(day=1)
@@ -296,16 +355,37 @@ def _fixed_quantity(value: str, precision: int) -> Quantity:
 
 
 def _filter(info: dict[str, Any], kind: str) -> dict[str, Any]:
-    return next((item for item in info.get("filters", []) if item.get("filterType") == kind), {})
+    return next(
+        (item for item in info.get("filters", []) if item.get("filterType") == kind), {}
+    )
 
 
-def make_instrument(info: dict[str, Any], market_type: str):
+def make_instrument(
+    info: dict[str, Any],
+    market_type: str,
+    *,
+    maker_fee: Decimal | None = None,
+    taker_fee: Decimal | None = None,
+    margin_init: Decimal | None = None,
+    margin_maint: Decimal | None = None,
+):
     raw = info["symbol"]
     price_filter, lot_filter = _filter(info, "PRICE_FILTER"), _filter(info, "LOT_SIZE")
-    tick, step = price_filter.get("tickSize", "0.00000001"), lot_filter.get("stepSize", "0.00000001")
+    tick, step = (
+        price_filter.get("tickSize", "0.00000001"),
+        lot_filter.get("stepSize", "0.00000001"),
+    )
     price_precision, size_precision = _precision(tick), _precision(step)
-    base, quote = Currency.from_str(info["baseAsset"]), Currency.from_str(info["quoteAsset"])
-    instrument_id = InstrumentId.from_str(f"{raw}{'-PERP' if market_type == 'um' else ''}.BINANCE")
+    base, quote = (
+        Currency.from_str(info["baseAsset"]),
+        Currency.from_str(info["quoteAsset"]),
+    )
+    instrument_id = InstrumentId.from_str(
+        f"{raw}{'-PERP' if market_type == 'um' else ''}.BINANCE"
+    )
+    default_maker, default_taker = DEFAULT_FEES[market_type]
+    maker_fee = default_maker if maker_fee is None else maker_fee
+    taker_fee = default_taker if taker_fee is None else taker_fee
     common = {
         "instrument_id": instrument_id,
         "raw_symbol": Symbol(raw),
@@ -317,13 +397,31 @@ def make_instrument(info: dict[str, Any], market_type: str):
         "size_increment": _fixed_quantity(step, size_precision),
         "ts_event": 0,
         "ts_init": 0,
-        "min_quantity": _fixed_quantity(lot_filter["minQty"], size_precision) if lot_filter.get("minQty") and Decimal(lot_filter["minQty"]) > 0 else None,
-        "max_quantity": _fixed_quantity(lot_filter["maxQty"], size_precision) if lot_filter.get("maxQty") and Decimal(lot_filter["maxQty"]) > 0 else None,
-        "info": {"source": "data.binance.vision", "market_type": market_type},
+        "min_quantity": _fixed_quantity(lot_filter["minQty"], size_precision)
+        if lot_filter.get("minQty") and Decimal(lot_filter["minQty"]) > 0
+        else None,
+        "max_quantity": _fixed_quantity(lot_filter["maxQty"], size_precision)
+        if lot_filter.get("maxQty") and Decimal(lot_filter["maxQty"]) > 0
+        else None,
+        "margin_init": margin_init or DEFAULT_MARGIN_INIT,
+        "margin_maint": margin_maint or DEFAULT_MARGIN_MAINT,
+        "maker_fee": maker_fee,
+        "taker_fee": taker_fee,
+        "info": {
+            "source": "data.binance.vision",
+            "market_type": market_type,
+            "fee_source": "QuantLab configurable Binance VIP0 defaults",
+        },
     }
     if market_type == "spot":
         return CurrencyPair(**common)
-    return CryptoPerpetual(**common, settlement_currency=Currency.from_str(info.get("marginAsset", info["quoteAsset"])), is_inverse=False)
+    return CryptoPerpetual(
+        **common,
+        settlement_currency=Currency.from_str(
+            info.get("marginAsset", info["quoteAsset"])
+        ),
+        is_inverse=False,
+    )
 
 
 def _timestamp_ns(raw: str) -> int:
@@ -331,10 +429,19 @@ def _timestamp_ns(raw: str) -> int:
     return value * (1_000 if value >= 100_000_000_000_000 else 1_000_000)
 
 
-def parse_archive(content: bytes, instrument: Any, interval: str, start: date, end: date) -> list[Bar]:
-    bar_type = BarType.from_str(f"{instrument.id}-{interval_to_spec(interval)}-EXTERNAL")
-    lower = int(datetime.combine(start, datetime.min.time(), UTC).timestamp() * 1_000_000_000)
-    upper = int(datetime.combine(end + timedelta(days=1), datetime.min.time(), UTC).timestamp() * 1_000_000_000)
+def parse_archive(
+    content: bytes, instrument: Any, interval: str, start: date, end: date
+) -> list[Bar]:
+    bar_type = BarType.from_str(
+        f"{instrument.id}-{interval_to_spec(interval)}-EXTERNAL"
+    )
+    lower = int(
+        datetime.combine(start, datetime.min.time(), UTC).timestamp() * 1_000_000_000
+    )
+    upper = int(
+        datetime.combine(end + timedelta(days=1), datetime.min.time(), UTC).timestamp()
+        * 1_000_000_000
+    )
     bars: list[Bar] = []
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
@@ -349,21 +456,25 @@ def parse_archive(content: bytes, instrument: Any, interval: str, start: date, e
                 if not lower <= open_ns < upper:
                     continue
                 close_ns = _timestamp_ns(row[6])
-                bars.append(Bar(
-                    bar_type,
-                    _fixed_price(row[1], instrument.price_precision),
-                    _fixed_price(row[2], instrument.price_precision),
-                    _fixed_price(row[3], instrument.price_precision),
-                    _fixed_price(row[4], instrument.price_precision),
-                    _fixed_quantity(row[5], instrument.size_precision),
-                    close_ns,
-                    close_ns,
-                ))
+                bars.append(
+                    Bar(
+                        bar_type,
+                        _fixed_price(row[1], instrument.price_precision),
+                        _fixed_price(row[2], instrument.price_precision),
+                        _fixed_price(row[3], instrument.price_precision),
+                        _fixed_price(row[4], instrument.price_precision),
+                        _fixed_quantity(row[5], instrument.size_precision),
+                        close_ns,
+                        close_ns,
+                    )
+                )
     return bars
 
 
 def interval_to_spec(interval: str) -> str:
-    unit = {"m": "MINUTE", "h": "HOUR", "d": "DAY", "w": "WEEK", "M": "MONTH"}[interval[-1]]
+    unit = {"m": "MINUTE", "h": "HOUR", "d": "DAY", "w": "WEEK", "M": "MONTH"}[
+        interval[-1]
+    ]
     return f"{int(interval[:-1])}-{unit}-LAST"
 
 
@@ -389,23 +500,52 @@ def _save_manifest(target: Path, manifest: dict[str, Any]) -> None:
 
 def run_download(task_id: str, payload: DownloadCreate) -> None:
     try:
-        catalog_path = Path(payload.catalog_path or settings.catalog_path).expanduser().resolve()
+        catalog_path = (
+            Path(payload.catalog_path or settings.catalog_path).expanduser().resolve()
+        )
         catalog_path.mkdir(parents=True, exist_ok=True)
-        _publish(task_id, status="running", stage="读取 Binance 交易品种", catalog_path=str(catalog_path))
+        _publish(
+            task_id,
+            status="running",
+            stage="读取 Binance 交易品种",
+            catalog_path=str(catalog_path),
+        )
         _log(task_id, f"Catalog: {catalog_path}")
         markets = _symbol_map(payload.market_type)
-        symbols = list(dict.fromkeys(normalize_symbol(item) for item in payload.symbols))
+        symbols = list(
+            dict.fromkeys(normalize_symbol(item) for item in payload.symbols)
+        )
         missing = [item for item in symbols if item not in markets]
         if missing:
             _log(task_id, f"跳过未在交易中的品种: {', '.join(missing)}", "warning")
             symbols = [item for item in symbols if item in markets]
         if not symbols:
             raise ValueError("没有可用的有效交易品种")
-        instruments = {symbol: make_instrument(markets[symbol], payload.market_type) for symbol in symbols}
+        instruments = {
+            symbol: make_instrument(
+                markets[symbol],
+                payload.market_type,
+                maker_fee=payload.maker_fee,
+                taker_fee=payload.taker_fee,
+                margin_init=payload.margin_init,
+                margin_maint=payload.margin_maint,
+            )
+            for symbol in symbols
+        }
         catalog = ParquetDataCatalog(str(catalog_path))
         # Instrument metadata is tiny and uses a deterministic catalog path.
-        # Always rewrite the requested definitions so corrected exchange
-        # filters replace stale precision metadata from earlier imports.
+        # Replace the exact zero-timestamp metadata row so corrected fees,
+        # margin and exchange filters cannot be silently skipped by NT's
+        # write-if-absent catalog behavior. Market-data files are untouched.
+        registered_ids = {str(item.id) for item in catalog.instruments()}
+        for instrument in instruments.values():
+            if str(instrument.id) in registered_ids:
+                catalog.delete_data_range(
+                    type(instrument),
+                    identifier=str(instrument.id),
+                    start=0,
+                    end=0,
+                )
         catalog.write_data(list(instruments.values()))
         _log(task_id, f"已校准 {len(instruments)} 个 Instrument")
         manifest_path, manifest = _manifest(catalog_path)
@@ -413,7 +553,13 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
             (symbol, interval, archive)
             for symbol in symbols
             for interval in payload.intervals
-            for archive in archive_plan(symbol, interval, payload.start_date, payload.end_date, payload.market_type)
+            for archive in archive_plan(
+                symbol,
+                interval,
+                payload.start_date,
+                payload.end_date,
+                payload.market_type,
+            )
         ]
         concurrency = min(max(settings.data_download_concurrency, 1), 64)
         total_files = len(plan)
@@ -423,8 +569,18 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
         skipped = 0
         missing_files = 0
 
-        _publish(task_id, force_save=True, total_files=total_files, stage="下载并转换 K 线", progress=0)
-        _log(task_id, f"计划处理 {total_files} 个归档候选，高并发度 {concurrency}", force_save=True)
+        _publish(
+            task_id,
+            force_save=True,
+            total_files=total_files,
+            stage="下载并转换 K 线",
+            progress=0,
+        )
+        _log(
+            task_id,
+            f"计划处理 {total_files} 个归档候选，高并发度 {concurrency}",
+            force_save=True,
+        )
 
         catalog_lock = threading.Lock()
         state_lock = threading.Lock()
@@ -435,14 +591,29 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
         def flush_manifest(force: bool = False) -> None:
             with catalog_lock:
                 now = time.time()
-                if pending_manifest and (force or (now - last_manifest_save[0]) >= 0.8 or len(pending_manifest) >= 50):
+                if pending_manifest and (
+                    force
+                    or (now - last_manifest_save[0]) >= 0.8
+                    or len(pending_manifest) >= 50
+                ):
                     manifest["archives"].update(pending_manifest)
                     pending_manifest.clear()
                     _save_manifest(manifest_path, manifest)
                     last_manifest_save[0] = now
 
-        def update_progress(item_log: str | None = None, log_level: str = "info", force_log: bool = False) -> None:
-            nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files, last_log_time
+        def update_progress(
+            item_log: str | None = None,
+            log_level: str = "info",
+            force_log: bool = False,
+        ) -> None:
+            nonlocal \
+                completed_files, \
+                total_files, \
+                rows, \
+                downloaded, \
+                skipped, \
+                missing_files, \
+                last_log_time
             with state_lock:
                 pct = min(100, round(completed_files / max(1, total_files) * 100))
                 _publish(
@@ -457,13 +628,25 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                 )
             if item_log:
                 now = time.time()
-                if force_log or log_level in {"warning", "error"} or (now - last_log_time) >= 0.15:
+                if (
+                    force_log
+                    or log_level in {"warning", "error"}
+                    or (now - last_log_time) >= 0.15
+                ):
                     last_log_time = now
                     _log(task_id, item_log, log_level)
 
         def process_archive(symbol: str, interval: str, archive: Archive) -> bool:
-            nonlocal completed_files, total_files, rows, downloaded, skipped, missing_files
-            if payload.mode == "incremental" and archive.key in manifest.get("archives", {}):
+            nonlocal \
+                completed_files, \
+                total_files, \
+                rows, \
+                downloaded, \
+                skipped, \
+                missing_files
+            if payload.mode == "incremental" and archive.key in manifest.get(
+                "archives", {}
+            ):
                 with state_lock:
                     skipped += 1
                     completed_files += 1
@@ -476,19 +659,35 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
 
             try:
                 digest = hashlib.sha256(content).hexdigest()
-                bars = parse_archive(content, instruments[symbol], interval, payload.start_date, payload.end_date)
-                
+                bars = parse_archive(
+                    content,
+                    instruments[symbol],
+                    interval,
+                    payload.start_date,
+                    payload.end_date,
+                )
+
                 with catalog_lock:
                     if bars:
                         try:
                             catalog.write_data(bars)
                         except Exception as write_err:
                             if "non-disjoint intervals" in str(write_err):
-                                logger.info("Parquet 区间已存在或重叠 (%s)，自动跳过写入: %s", archive.key, write_err)
+                                logger.info(
+                                    "Parquet 区间已存在或重叠 (%s)，自动跳过写入: %s",
+                                    archive.key,
+                                    write_err,
+                                )
                             else:
                                 raise
-                    pending_manifest[archive.key] = {"sha256": digest, "rows": len(bars), "completed_at": _now()}
-                    if (time.time() - last_manifest_save[0]) >= 0.8 or len(pending_manifest) >= 50:
+                    pending_manifest[archive.key] = {
+                        "sha256": digest,
+                        "rows": len(bars),
+                        "completed_at": _now(),
+                    }
+                    if (time.time() - last_manifest_save[0]) >= 0.8 or len(
+                        pending_manifest
+                    ) >= 50:
                         manifest["archives"].update(pending_manifest)
                         pending_manifest.clear()
                         _save_manifest(manifest_path, manifest)
@@ -499,7 +698,10 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                     downloaded += 1
                     completed_files += 1
 
-                update_progress(f"写入完成 {len(bars):,} 根 K 线 ({symbol} {interval} {archive.key.split('/')[-1]})", "success")
+                update_progress(
+                    f"写入完成 {len(bars):,} 根 K 线 ({symbol} {interval} {archive.key.split('/')[-1]})",
+                    "success",
+                )
                 return True
             except Exception as e:  # noqa: BLE001
                 with state_lock:
@@ -513,9 +715,15 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
         fallback_daily_items: list[tuple[str, str, Archive]] = []
 
         if monthly_items:
-            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="binance-monthly") as pool:
+            with ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix="binance-monthly"
+            ) as pool:
                 futures = {
-                    pool.submit(process_archive, symbol, interval, archive): (symbol, interval, archive)
+                    pool.submit(process_archive, symbol, interval, archive): (
+                        symbol,
+                        interval,
+                        archive,
+                    )
                     for symbol, interval, archive in monthly_items
                 }
                 for future in as_completed(futures):
@@ -528,16 +736,29 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                         with state_lock:
                             total_files += len(archive.fallbacks) - 1
                             _publish(task_id, total_files=total_files)
-                        _log(task_id, f"月归档不存在，拆分为 {len(archive.fallbacks)} 个日归档 ({symbol} {interval})", "warning", force_log=True)
-                        fallback_daily_items.extend((symbol, interval, daily) for daily in archive.fallbacks)
+                        _log(
+                            task_id,
+                            f"月归档不存在，拆分为 {len(archive.fallbacks)} 个日归档 ({symbol} {interval})",
+                            "warning",
+                            force_log=True,
+                        )
+                        fallback_daily_items.extend(
+                            (symbol, interval, daily) for daily in archive.fallbacks
+                        )
 
         flush_manifest(force=True)
 
         all_daily_items = direct_daily_items + fallback_daily_items
         if all_daily_items:
-            with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="binance-daily") as pool:
+            with ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix="binance-daily"
+            ) as pool:
                 futures = {
-                    pool.submit(process_archive, symbol, interval, archive): (symbol, interval, archive)
+                    pool.submit(process_archive, symbol, interval, archive): (
+                        symbol,
+                        interval,
+                        archive,
+                    )
                     for symbol, interval, archive in all_daily_items
                 }
                 for future in as_completed(futures):
@@ -550,14 +771,35 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                         with state_lock:
                             missing_files += 1
                             completed_files += 1
-                        update_progress(f"远端归档不存在或下载失败，已跳过 {archive.url}", "warning")
+                        update_progress(
+                            f"远端归档不存在或下载失败，已跳过 {archive.url}", "warning"
+                        )
 
         flush_manifest(force=True)
 
-        _publish(task_id, force_save=True, status="completed", stage="完成", progress=100, finished_at=_now())
-        _log(task_id, f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个，缺失/跳过 {missing_files} 个", "success", force_save=True)
+        _publish(
+            task_id,
+            force_save=True,
+            status="completed",
+            stage="完成",
+            progress=100,
+            finished_at=_now(),
+        )
+        _log(
+            task_id,
+            f"任务完成：新增 {rows:,} 根 K 线，下载 {downloaded} 个文件，跳过 {skipped} 个，缺失/跳过 {missing_files} 个",
+            "success",
+            force_save=True,
+        )
     except Exception as exc:  # noqa: BLE001 - task failures must be reflected in task state
-        _publish(task_id, force_save=True, status="failed", stage="失败", error=str(exc), finished_at=_now())
+        _publish(
+            task_id,
+            force_save=True,
+            status="failed",
+            stage="失败",
+            error=str(exc),
+            finished_at=_now(),
+        )
         _log(task_id, str(exc), "error", force_save=True)
 
 
@@ -569,19 +811,26 @@ def symbols(market_type: str = "um"):
         markets = _symbol_map(market_type)
     except Exception as exc:
         raise HTTPException(502, f"读取 Binance 品种失败: {exc}") from exc
-    return [{"symbol": key, "base": value["baseAsset"], "quote": value["quoteAsset"]} for key, value in sorted(markets.items())]
+    return [
+        {"symbol": key, "base": value["baseAsset"], "quote": value["quoteAsset"]}
+        for key, value in sorted(markets.items())
+    ]
 
 
 @router.get("/downloads")
 def list_downloads():
     with _lock:
-        return sorted(_tasks.values(), key=lambda x: str(x.get("created_at", "")), reverse=True)
+        return sorted(
+            _tasks.values(), key=lambda x: str(x.get("created_at", "")), reverse=True
+        )
 
 
 @router.get("/downloads/latest")
 def get_latest_download():
     with _lock:
-        tasks = sorted(_tasks.values(), key=lambda x: str(x.get("created_at", "")), reverse=True)
+        tasks = sorted(
+            _tasks.values(), key=lambda x: str(x.get("created_at", "")), reverse=True
+        )
         if not tasks:
             return None
         return dict(tasks[0])
@@ -610,7 +859,12 @@ def create_download(payload: DownloadCreate):
     with _lock:
         _tasks[task_id] = task
         _save_task_to_disk(task)
-    threading.Thread(target=run_download, args=(task_id, payload), daemon=True, name=f"binance-download-{task_id[:8]}").start()
+    threading.Thread(
+        target=run_download,
+        args=(task_id, payload),
+        daemon=True,
+        name=f"binance-download-{task_id[:8]}",
+    ).start()
     return task
 
 
@@ -656,7 +910,9 @@ _PARQUET_FILE_CACHE: dict[str, tuple[int, int, int, int | None, int | None]] = {
 _CATALOG_INSTRUMENTS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
-def _get_parquet_file_stats(file_path: str, st_mtime_ns: int, st_size: int) -> tuple[int, int | None, int | None]:
+def _get_parquet_file_stats(
+    file_path: str, st_mtime_ns: int, st_size: int
+) -> tuple[int, int | None, int | None]:
     """Get row count, min timestamp (ns), max timestamp (ns) for a Parquet file using stat cache & footer column stats."""
     cached = _PARQUET_FILE_CACHE.get(file_path)
     if cached and cached[0] == st_mtime_ns and cached[1] == st_size:
@@ -718,11 +974,41 @@ def _get_registered_instruments(catalog_path: Path) -> dict[str, Any]:
 
 
 COVERAGE_BUCKET_SPECS = [
-    {"key": "gte_3y", "label": "≥ 3 年", "min_days": 1095, "max_days": None, "desc": "1095天及以上"},
-    {"key": "1y_3y", "label": "1 - 3 年", "min_days": 365, "max_days": 1094, "desc": "365 ~ 1094天"},
-    {"key": "6m_1y", "label": "6 个月 - 1 年", "min_days": 180, "max_days": 364, "desc": "180 ~ 364天"},
-    {"key": "1m_6m", "label": "1 - 6 个月", "min_days": 30, "max_days": 179, "desc": "30 ~ 179天"},
-    {"key": "lt_1m", "label": "< 1 个月", "min_days": 0, "max_days": 29, "desc": "30天以内"},
+    {
+        "key": "gte_3y",
+        "label": "≥ 3 年",
+        "min_days": 1095,
+        "max_days": None,
+        "desc": "1095天及以上",
+    },
+    {
+        "key": "1y_3y",
+        "label": "1 - 3 年",
+        "min_days": 365,
+        "max_days": 1094,
+        "desc": "365 ~ 1094天",
+    },
+    {
+        "key": "6m_1y",
+        "label": "6 个月 - 1 年",
+        "min_days": 180,
+        "max_days": 364,
+        "desc": "180 ~ 364天",
+    },
+    {
+        "key": "1m_6m",
+        "label": "1 - 6 个月",
+        "min_days": 30,
+        "max_days": 179,
+        "desc": "30 ~ 179天",
+    },
+    {
+        "key": "lt_1m",
+        "label": "< 1 个月",
+        "min_days": 0,
+        "max_days": 29,
+        "desc": "30天以内",
+    },
 ]
 
 
@@ -779,25 +1065,29 @@ def _compute_coverage_stats(symbols_list: list[dict[str, Any]]) -> list[dict[str
         sym = entry.get("symbol", "")
         if sym and sym not in b["symbols"]:
             b["symbols"].append(sym)
-        b["symbol_details"].append({
-            "symbol": sym,
-            "instrument_id": entry.get("instrument_id", ""),
-            "market_type": entry.get("market_type", "um"),
-            "market_type_label": entry.get("market_type_label", ""),
-            "start_date": entry.get("start_date"),
-            "end_date": entry.get("end_date"),
-            "days_span": days,
-            "total_bars": entry.get("total_bars", 0),
-            "total_size_bytes": entry.get("total_size_bytes", 0),
-            "timeframes": [tf["interval"] for tf in entry.get("timeframes", [])],
-        })
+        b["symbol_details"].append(
+            {
+                "symbol": sym,
+                "instrument_id": entry.get("instrument_id", ""),
+                "market_type": entry.get("market_type", "um"),
+                "market_type_label": entry.get("market_type_label", ""),
+                "start_date": entry.get("start_date"),
+                "end_date": entry.get("end_date"),
+                "days_span": days,
+                "total_bars": entry.get("total_bars", 0),
+                "total_size_bytes": entry.get("total_size_bytes", 0),
+                "timeframes": [tf["interval"] for tf in entry.get("timeframes", [])],
+            }
+        )
 
     result: list[dict[str, Any]] = []
     for spec in COVERAGE_BUCKET_SPECS:
         b = buckets[spec["key"]]
         b["symbols"].sort()
         b["symbol_details"].sort(key=lambda x: (-x["days_span"], x["symbol"]))
-        b["percentage"] = round((b["count"] / total_count * 100), 1) if total_count > 0 else 0.0
+        b["percentage"] = (
+            round((b["count"] / total_count * 100), 1) if total_count > 0 else 0.0
+        )
         result.append(b)
 
     return result
@@ -849,7 +1139,9 @@ def scan_catalog_summary(
                 try:
                     st = f.stat()
                     tf_size += st.st_size
-                    f_rows, f_min, f_max = _get_parquet_file_stats(str(f), st.st_mtime_ns, st.st_size)
+                    f_rows, f_min, f_max = _get_parquet_file_stats(
+                        str(f), st.st_mtime_ns, st.st_size
+                    )
                     tf_bars += f_rows
                     if f_min is not None:
                         tf_start = f_min if tf_start is None else min(tf_start, f_min)
@@ -866,13 +1158,25 @@ def scan_catalog_summary(
 
             if inst_id not in symbols_map:
                 inst_obj = registered_instruments.get(inst_id)
-                base = inst_obj.base_currency.code if inst_obj else raw_symbol.replace("USDT", "").replace("USDC", "").replace("BUSD", "")
-                quote = inst_obj.quote_currency.code if inst_obj else ("USDT" if "USDT" in raw_symbol else "USD")
+                base = (
+                    inst_obj.base_currency.code
+                    if inst_obj
+                    else raw_symbol.replace("USDT", "")
+                    .replace("USDC", "")
+                    .replace("BUSD", "")
+                )
+                quote = (
+                    inst_obj.quote_currency.code
+                    if inst_obj
+                    else ("USDT" if "USDT" in raw_symbol else "USD")
+                )
                 symbols_map[inst_id] = {
                     "symbol": raw_symbol,
                     "instrument_id": inst_id,
                     "market_type": inst_market_type,
-                    "market_type_label": "U本位永续" if inst_market_type == "um" else "现货",
+                    "market_type_label": "U本位永续"
+                    if inst_market_type == "um"
+                    else "现货",
                     "base_currency": base,
                     "quote_currency": quote,
                     "total_bars": 0,
@@ -896,21 +1200,33 @@ def scan_catalog_summary(
             if tf_end is not None:
                 entry["_max_ns"] = max(entry.get("_max_ns", tf_end), tf_end)
 
-            start_dt_str = datetime.fromtimestamp(tf_start / 1e9, UTC).strftime("%Y-%m-%d %H:%M:%S") if tf_start else None
-            end_dt_str = datetime.fromtimestamp(tf_end / 1e9, UTC).strftime("%Y-%m-%d %H:%M:%S") if tf_end else None
+            start_dt_str = (
+                datetime.fromtimestamp(tf_start / 1e9, UTC).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                if tf_start
+                else None
+            )
+            end_dt_str = (
+                datetime.fromtimestamp(tf_end / 1e9, UTC).strftime("%Y-%m-%d %H:%M:%S")
+                if tf_end
+                else None
+            )
 
-            entry["timeframes"].append({
-                "interval": tf_interval,
-                "spec": spec,
-                "bar_type": d.name,
-                "bars": tf_bars,
-                "size_bytes": tf_size,
-                "file_count": len(parquet_files),
-                "start_time": start_dt_str,
-                "end_time": end_dt_str,
-                "start_date": start_dt_str[:10] if start_dt_str else None,
-                "end_date": end_dt_str[:10] if end_dt_str else None,
-            })
+            entry["timeframes"].append(
+                {
+                    "interval": tf_interval,
+                    "spec": spec,
+                    "bar_type": d.name,
+                    "bars": tf_bars,
+                    "size_bytes": tf_size,
+                    "file_count": len(parquet_files),
+                    "start_time": start_dt_str,
+                    "end_time": end_dt_str,
+                    "start_date": start_dt_str[:10] if start_dt_str else None,
+                    "end_date": end_dt_str[:10] if end_dt_str else None,
+                }
+            )
 
     all_timeframes_set: set[str] = set()
 
@@ -926,10 +1242,14 @@ def scan_catalog_summary(
             entry["end_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
             entry["end_date"] = dt.strftime("%Y-%m-%d")
 
-        entry["days_span"] = _calculate_days_span(entry["start_date"], entry["end_date"])
+        entry["days_span"] = _calculate_days_span(
+            entry["start_date"], entry["end_date"]
+        )
 
         # Sort timeframes
-        entry["timeframes"].sort(key=lambda x: (x["interval"] not in TIMEFRAMES, x["interval"]))
+        entry["timeframes"].sort(
+            key=lambda x: (x["interval"] not in TIMEFRAMES, x["interval"])
+        )
         for tf in entry["timeframes"]:
             all_timeframes_set.add(tf["interval"])
 
@@ -941,7 +1261,11 @@ def scan_catalog_summary(
     for inst_id, entry in symbols_map.items():
         if query:
             q = query.strip().upper()
-            if q not in entry["symbol"].upper() and q not in inst_id.upper() and q not in entry["base_currency"].upper():
+            if (
+                q not in entry["symbol"].upper()
+                and q not in inst_id.upper()
+                and q not in entry["base_currency"].upper()
+            ):
                 continue
 
         if market_type and market_type != "all":
@@ -968,7 +1292,7 @@ def scan_catalog_summary(
         filtered_items.append(entry)
 
     # Sort filtered items
-    reverse = (sort_order == "desc")
+    reverse = sort_order == "desc"
     if sort_by == "bars":
         filtered_items.sort(key=lambda x: x["total_bars"], reverse=reverse)
     elif sort_by == "size":
@@ -986,7 +1310,11 @@ def scan_catalog_summary(
 
     # Pagination
     if page_size > 0:
-        total_pages = max(1, math.ceil(total_filtered_symbols / page_size)) if total_filtered_symbols > 0 else 1
+        total_pages = (
+            max(1, math.ceil(total_filtered_symbols / page_size))
+            if total_filtered_symbols > 0
+            else 1
+        )
         page = min(max(1, page), total_pages)
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
@@ -1014,7 +1342,9 @@ def scan_catalog_summary(
     }
 
 
-def delete_catalog_symbol_data(catalog_path: Path, instrument_id: str, interval: str | None = None) -> bool:
+def delete_catalog_symbol_data(
+    catalog_path: Path, instrument_id: str, interval: str | None = None
+) -> bool:
     """Delete a symbol or specific timeframe data from catalog and update manifest."""
     catalog_path = catalog_path.expanduser().resolve()
     bar_dir = catalog_path / "data" / "bar"
@@ -1035,7 +1365,7 @@ def delete_catalog_symbol_data(catalog_path: Path, instrument_id: str, interval:
             if not d.name.startswith(f"{instrument_id}-"):
                 continue
             if interval:
-                spec = d.name[len(instrument_id) + 1:]
+                spec = d.name[len(instrument_id) + 1 :]
                 if parse_spec_to_interval(spec) != interval:
                     continue
             shutil.rmtree(d, ignore_errors=True)
@@ -1043,7 +1373,9 @@ def delete_catalog_symbol_data(catalog_path: Path, instrument_id: str, interval:
 
     if not interval:
         is_perp = "-PERP." in instrument_id or instrument_id.endswith("-PERP")
-        type_dir = catalog_path / "data" / ("crypto_perpetual" if is_perp else "currency_pair")
+        type_dir = (
+            catalog_path / "data" / ("crypto_perpetual" if is_perp else "currency_pair")
+        )
         inst_folder = type_dir / instrument_id
         if inst_folder.exists():
             shutil.rmtree(inst_folder, ignore_errors=True)
@@ -1052,8 +1384,10 @@ def delete_catalog_symbol_data(catalog_path: Path, instrument_id: str, interval:
     if "archives" in manifest:
         raw_symbol = instrument_id.split(".")[0].replace("-PERP", "")
         keys_to_delete = [
-            k for k in manifest["archives"]
-            if f"/{raw_symbol}/" in k and (not interval or f"/{raw_symbol}/{interval}/" in k)
+            k
+            for k in manifest["archives"]
+            if f"/{raw_symbol}/" in k
+            and (not interval or f"/{raw_symbol}/{interval}/" in k)
         ]
         for k in keys_to_delete:
             manifest["archives"].pop(k, None)
@@ -1093,8 +1427,9 @@ def catalog_summary(
 
 
 @router.delete("/catalog/symbols/{instrument_id}")
-def delete_catalog_symbol(instrument_id: str, interval: str | None = None, catalog_path: str | None = None):
+def delete_catalog_symbol(
+    instrument_id: str, interval: str | None = None, catalog_path: str | None = None
+):
     path = Path(catalog_path or settings.catalog_path)
     deleted = delete_catalog_symbol_data(path, instrument_id, interval)
     return {"ok": True, "deleted": deleted}
-

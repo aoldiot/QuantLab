@@ -52,7 +52,7 @@ async def ensure_strategy_db_record(
             s_cat = "trend"
             s_ver = "1.0.0"
             s_pschema = {}
-            s_dreq = {"timeframes": ["15m"], "primary_timeframe": "15m", "multi_symbol": True, "funding": True, "supports_short": True}
+            s_dreq = {"timeframes": ["15m"], "primary_timeframe": "15m", "multi_symbol": True, "supports_short": True}
             m_hash = c_hash
 
         slug_candidates = list(dict.fromkeys(filter(None, [

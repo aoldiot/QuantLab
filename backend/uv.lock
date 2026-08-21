@@ -536,7 +536,7 @@ wheels = [
 
 [[package]]
 name = "nautilus-trader"
-version = "1.227.0"
+version = "1.230.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -550,20 +550,20 @@ dependencies = [
     { name = "tqdm" },
     { name = "uvloop", marker = "sys_platform != 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/18/32/ec759e1464b136661b9fd64bda9b1f663bbb24eb4decc210bbc797d36f07/nautilus_trader-1.227.0.tar.gz", hash = "sha256:fbb9c1194f1f50f14fbf0933c35b81e05ea522ab944f584be3c75efb36887ca7", size = 7571723, upload-time = "2026-05-18T06:15:03.24Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/33/af01e6a9d26b9594228a903eb00b7175d82777955cc331aab0faffbc614e/nautilus_trader-1.230.0.tar.gz", hash = "sha256:cc7eaa247e640e46588094fcca44f34f4b6330eeec41e9247068f2500921757d", size = 9519123, upload-time = "2026-06-29T12:04:09.982Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0b/4e/606273a0e13ec0a24fa3d0520cc96d25b1f04b2adf97922d0cbc61b559ef/nautilus_trader-1.227.0-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:735fbbc0737be8f945ee641aeb0dbf0ea6b4c6111f11f10c244fe198f8158953", size = 145812901, upload-time = "2026-05-18T05:29:17.647Z" },
-    { url = "https://files.pythonhosted.org/packages/8d/5f/aaaa800683bc2a780665195d0717ca7c9fc7ec9b689af313aa032e83c8ed/nautilus_trader-1.227.0-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:a557ae2e109c5a7f38e6115aff123d3a793c111f1712e333befe218f47d06187", size = 163211165, upload-time = "2026-05-18T05:30:01.959Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/f5/3dc279d12dae33ac77a3dd599a3e907c89d1571f027dfb092eb52d80a1ef/nautilus_trader-1.227.0-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:19482db9166560fc415019ddb1d7775c70b6b268bd0629da5c1ee20d951bf3d8", size = 171152190, upload-time = "2026-05-18T05:29:03.718Z" },
-    { url = "https://files.pythonhosted.org/packages/45/f6/d7d1174483a44cea00fab946d49c4abda2532c57d1691beed9c7a89cdf61/nautilus_trader-1.227.0-cp312-cp312-win_amd64.whl", hash = "sha256:777bd0693abceebd1cfc835ce1b411fe7f448cb8288a37e0db16753e6a4c9e7d", size = 101843474, upload-time = "2026-05-18T05:30:12.781Z" },
-    { url = "https://files.pythonhosted.org/packages/4d/71/b426bb71048eefba42b44eec63e8fbd08bf371e3ede2e21369a826d5ebf4/nautilus_trader-1.227.0-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:66bdd6ead6e278852dde8d1bdaea665757a1fd6dea37066f79ae3769c2dea80c", size = 145893419, upload-time = "2026-05-18T05:30:25.887Z" },
-    { url = "https://files.pythonhosted.org/packages/1e/e0/90f0d000a14b5e8b6e9906d33ac6d925a150d163c32376589918d35f5f4e/nautilus_trader-1.227.0-cp313-cp313-manylinux_2_35_aarch64.whl", hash = "sha256:c3e83dcb8bdb27b5b7f33da21c5ab82784ff6ff95abf01b03a1cd1dbb3703d22", size = 163280761, upload-time = "2026-05-18T05:30:57.029Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/12/2b6487c5ce2c84eaf6b25cf7386583d77c20ebdf0155627f112530c33529/nautilus_trader-1.227.0-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:4d1f16442744696919e6351ce6a720a47b944d392568d9f528694f35ed63e159", size = 171088187, upload-time = "2026-05-18T05:30:41.27Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/98/f9677d1aca433ec2000ee4a2679ff144f20f3cc37841ae7866c4d6e33892/nautilus_trader-1.227.0-cp313-cp313-win_amd64.whl", hash = "sha256:9525878ba8b3fe3f378336c1242d116e72956f775e86c326f425fd6ca9c11492", size = 101813467, upload-time = "2026-05-18T05:28:37.342Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/da/4827909e4e8eecb0afb98f3926b8a82b78a218270e25c3a6b7826cfaba50/nautilus_trader-1.227.0-cp314-cp314-macosx_15_0_arm64.whl", hash = "sha256:72e9fd76e78be9567ba3cd798b31e9240abc548ae605f8629007b93ccacd9321", size = 146003898, upload-time = "2026-05-18T05:29:47.068Z" },
-    { url = "https://files.pythonhosted.org/packages/90/00/542d1a40bbbea8ea8a097e43feeb8d60472fea27e18796de850873450d8b/nautilus_trader-1.227.0-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:d9073b14cc3554eda89fae110a2b4ae79bffcd141c61c0fdc20b481e524d90b2", size = 163364165, upload-time = "2026-05-18T05:31:12.854Z" },
-    { url = "https://files.pythonhosted.org/packages/82/63/d9f1f883a3ed052121af12e9ce438ecbe52650e5dd59d129df46833729ae/nautilus_trader-1.227.0-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:763bdd81d54feba7ae280c96f6da251dff9bd86430232975bebe50dab4f2ad11", size = 171126423, upload-time = "2026-05-18T05:29:33.265Z" },
-    { url = "https://files.pythonhosted.org/packages/44/64/d89d95b3806fe180bc6ee3c450be369a6cff35533b4f9205f35564c1fa08/nautilus_trader-1.227.0-cp314-cp314-win_amd64.whl", hash = "sha256:5d1f1b8cd7844e4418535e1b9a43042551716b76904fa37ab0462abf965c47f0", size = 104158026, upload-time = "2026-05-18T05:28:48.091Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/85/01ebade671867357059aa876d9d0da0ae7dbac63d9fc019092a1e2599bd5/nautilus_trader-1.230.0-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:033f6207d1c52095d64a7644f43b90cab939c2038044db70a4165f2acef3d079", size = 156035900, upload-time = "2026-06-29T11:59:03.777Z" },
+    { url = "https://files.pythonhosted.org/packages/33/e7/34c51e170086e11aad482067b7ad81bcf3633b43cbe0a04ae35e9314c2f6/nautilus_trader-1.230.0-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:de69df04918ad52095dca2e462f2e1e7755a53e74df13f35de9631ef71513beb", size = 168348884, upload-time = "2026-06-29T11:59:12.31Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/ce/f5d1ebe03896d5dc5c0e77a99bea3959d7cc78338e6b575981835dbd82ed/nautilus_trader-1.230.0-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:8f4ff2e8af10e93ed643496eb62999b00558085f0e0bff17fc76e08809ba91b9", size = 182608916, upload-time = "2026-06-29T11:59:20.916Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/eb/10cd2e6dfaaa235de0a195a0ae95f5803d0fe706f122a12ef27ec21a6982/nautilus_trader-1.230.0-cp312-cp312-win_amd64.whl", hash = "sha256:9420b151e92a504841b7fc768ba937dc7f3bffe387096215f39b83c6fcda27e8", size = 109597078, upload-time = "2026-06-29T11:59:27.748Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/0a/bc9da3ab8f5eb74875f3b846807dfaf79b1b97aff43de70d6f298020c743/nautilus_trader-1.230.0-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:af8a83f7cabb91460dcf5b966259eab1f4edee7f5bba965119e70c06a876e997", size = 156113454, upload-time = "2026-06-29T11:59:35.256Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/e8/3506c5c995ad3107484df8035fb1a9c3006f98861f5c64e15aaa4b74624a/nautilus_trader-1.230.0-cp313-cp313-manylinux_2_35_aarch64.whl", hash = "sha256:8143907c667fda91bb6466c02ff2ec9f6389aa2fcc35fb0843e75a2ab4e4bfa8", size = 168414885, upload-time = "2026-06-29T11:59:43.575Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/aa/0bcade1efbe58e6877be9d43e4535ceba52c2c71de71b582ed5b03bbd17e/nautilus_trader-1.230.0-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:b5755ae5057b260827404aef23c3051969107d6724dd8c525f17301c9c5b24c0", size = 182538533, upload-time = "2026-06-29T11:59:52.381Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/75/a8463ccad00e2b75013c75714d4fb872c22b4a116575d5491fed460ca501/nautilus_trader-1.230.0-cp313-cp313-win_amd64.whl", hash = "sha256:8817c46dc34e0aafc606948aacf1dd0fbbe1a31273c8a2f20983cf4ab2ddeef1", size = 109566360, upload-time = "2026-06-29T11:59:59.683Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/57/c9172b9dce07d634539eaaafa0069118368b6ffb87c145d3d901d85251ee/nautilus_trader-1.230.0-cp314-cp314-macosx_15_0_arm64.whl", hash = "sha256:4163833dc3b930d3f8a6f769eb2e7d6422c144d0db748d63ac0e5fdb1f4842b5", size = 156249962, upload-time = "2026-06-29T12:00:07.215Z" },
+    { url = "https://files.pythonhosted.org/packages/38/5a/25a9c2ccf5c34981c148ed98b6bcef0acd2550ecb10ebdcadbbcee48c2be/nautilus_trader-1.230.0-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:94b0e9180a4e023f80c3e000f2039976d346387fff40987cb3525e6c11873e3f", size = 168529278, upload-time = "2026-06-29T12:00:15.648Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/e2/6800e26d781133b1e96b23cf71d8d9e9ebb3cc2e30ede54f467762ac432c/nautilus_trader-1.230.0-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:2178899b700050f931d94ab11a23bcbc4d506b200b387827431e7d6eb0cd1e44", size = 182624564, upload-time = "2026-06-29T12:00:24.712Z" },
+    { url = "https://files.pythonhosted.org/packages/33/36/676ea67fdf0eb8a5fbbfcb703f205d117ce581c1706ab998f88d0631ecbb/nautilus_trader-1.230.0-cp314-cp314-win_amd64.whl", hash = "sha256:57f814d13947169538f8cedc881db72e7dc4320626c5a3f37b9ce36ed5527720", size = 112049155, upload-time = "2026-06-29T12:00:31.538Z" },
 ]
 
 [[package]]
@@ -1046,7 +1046,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.116" },
     { name = "greenlet", specifier = ">=3.2" },
     { name = "httpx", specifier = ">=0.28" },
-    { name = "nautilus-trader", specifier = "==1.227.0" },
+    { name = "nautilus-trader", specifier = "==1.230.0" },
     { name = "orjson", specifier = ">=3.10" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyarrow", specifier = ">=19" },

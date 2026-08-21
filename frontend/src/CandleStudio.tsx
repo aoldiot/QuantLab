@@ -14,7 +14,7 @@ import {
   type MouseEventParams,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import {ChevronLeft, ChevronRight, Eye, EyeOff, History, Layers3, PanelLeftClose, PanelRightClose} from 'lucide-react'
+import {ChevronLeft, ChevronRight, Eye, EyeOff, History, Layers3} from 'lucide-react'
 import {api} from './api'
 import type {ChartBar, ChartData, ChartFill, IndicatorPoint, PlotSeriesSpec, Run} from './types'
 
@@ -96,6 +96,8 @@ export default function CandleStudio({run}: {run: Run}) {
   const [symbolQuery, setSymbolQuery] = useState('')
   const [tradeSort, setTradeSort] = useState<'time-desc' | 'time-asc' | 'pnl-desc' | 'pnl-asc'>('time-desc')
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null)
+  const [mainIndicatorPage, setMainIndicatorPage] = useState(0)
+  const [subplotPage, setSubplotPage] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -181,6 +183,11 @@ export default function CandleStudio({run}: {run: Run}) {
 
   const hasMainPlots = Object.keys(mainPlotConfig).length > 0
   const hasSubplots = Object.keys(subplotsConfig).length > 0
+  const pageSize = 4
+  const mainEntries = Object.entries(mainPlotConfig)
+  const subplotEntries = Object.entries(subplotsConfig)
+  const mainPages = Math.max(1, Math.ceil(mainEntries.length / pageSize))
+  const subplotPages = Math.max(1, Math.ceil(subplotEntries.length / pageSize))
 
   return (
     <section className={`candle-studio ${left ? 'has-left' : ''} ${right ? 'has-right' : ''}`} style={{height: studioHeight}}>
@@ -199,7 +206,8 @@ export default function CandleStudio({run}: {run: Run}) {
                 <Layers3 size={11} />主图
               </span>
               <div className="legend-chips-container">
-                {Object.entries(mainPlotConfig).map(([column, spec]) => {
+                {mainPages > 1 && <button className="indicator-page" disabled={mainIndicatorPage===0} onClick={()=>setMainIndicatorPage(page=>page-1)} title="上一页主图指标"><ChevronLeft size={14}/></button>}
+                {mainEntries.slice(mainIndicatorPage*pageSize,(mainIndicatorPage+1)*pageSize).map(([column, spec]) => {
                   const isActive = enabledMainSeries.has(column)
                   const label = getIndicatorLabel(column, spec)
                   return (
@@ -215,6 +223,7 @@ export default function CandleStudio({run}: {run: Run}) {
                     </button>
                   )
                 })}
+                {mainPages > 1 && <button className="indicator-page" disabled={mainIndicatorPage===mainPages-1} onClick={()=>setMainIndicatorPage(page=>page+1)} title="下一页主图指标"><ChevronRight size={14}/></button>}
               </div>
             </div>
           )}
@@ -227,7 +236,8 @@ export default function CandleStudio({run}: {run: Run}) {
                 副图
               </span>
               <div className="legend-chips-container">
-                {Object.entries(subplotsConfig).map(([name, seriesMap]) => {
+                {subplotPages > 1 && <button className="indicator-page" disabled={subplotPage===0} onClick={()=>setSubplotPage(page=>page-1)} title="上一页副图指标"><ChevronLeft size={14}/></button>}
+                {subplotEntries.slice(subplotPage*pageSize,(subplotPage+1)*pageSize).map(([name, seriesMap]) => {
                   const isActive = enabledPanes.has(name)
                   const seriesList = Object.values(seriesMap)
                   return (
@@ -247,18 +257,14 @@ export default function CandleStudio({run}: {run: Run}) {
                     </button>
                   )
                 })}
+                {subplotPages > 1 && <button className="indicator-page" disabled={subplotPage===subplotPages-1} onClick={()=>setSubplotPage(page=>page+1)} title="下一页副图指标"><ChevronRight size={14}/></button>}
               </div>
             </div>
           )}
         </div>
-
-        <div>
-          <button title="显示/隐藏标的列表" onClick={() => setLeft(!left)}>
-            <PanelLeftClose />
-          </button>
-          <button title="显示/隐藏交易历史" onClick={() => setRight(!right)}>
-            <PanelRightClose />
-          </button>
+        <div className="toolbar-reveals">
+          {!left && <button className="edge-reveal" onClick={()=>setLeft(true)} title="展开标的列表"><ChevronRight/><span>标的</span></button>}
+          {!right && <button className="edge-reveal" onClick={()=>setRight(true)} title="展开交易历史"><History/><span>交易</span></button>}
         </div>
       </header>
 

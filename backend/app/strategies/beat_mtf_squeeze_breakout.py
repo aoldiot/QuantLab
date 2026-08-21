@@ -651,7 +651,7 @@ STRATEGY_MANIFEST = StrategyManifest(
         "max_total_exposure_pct": ParameterSpec(title="总敞口上限", type="number", default=1.0, minimum=0.1, maximum=2.0),
         "trade_size": ParameterSpec(title="备用交易数量", type="number", default=0.01, minimum=0.0001, maximum=100.0),
     },
-    timeframes=("1h", "4h"),
+    timeframes=("1h",),
     primary_timeframe="1h",
     plot_config={
         "main_plot": {
@@ -686,5 +686,5 @@ STRATEGY_MANIFEST = StrategyManifest(
     },
     mode=StrategyMode.SINGLE_INSTRUMENT,
     supports_short=True,
-    requires_funding=True,
+    requires_funding=False,
 )

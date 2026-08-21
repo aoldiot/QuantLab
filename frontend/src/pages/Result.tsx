@@ -1,7 +1,7 @@
 import {useEffect,useRef,useState} from 'react'
 import {AlertTriangle,ArrowLeft,CandlestickChart,Check,Copy,Download,Play,RefreshCw,RotateCw,Search,ShieldCheck,Terminal,Trash2,Wrench,X} from 'lucide-react'
 import {Link,useNavigate,useParams} from 'react-router-dom'
-import {Area,AreaChart,Bar,BarChart,CartesianGrid,Line,LineChart,ResponsiveContainer,Tooltip,XAxis,YAxis} from 'recharts'
+import {Area,AreaChart,Bar,BarChart,CartesianGrid,ResponsiveContainer,Tooltip,XAxis,YAxis} from 'recharts'
 import {api} from '../api'
 import {Card,Metric} from '../components'
 import type {CatalogCheckResponse,Run} from '../types'
@@ -10,7 +10,7 @@ import CandleStudio from '../CandleStudio'
 
 type Tab='overview'|'candles'|'parameters'|'logs'
 const terminal=new Set(['COMPLETED','FAILED','CANCELED'])
-const labels:Record<string,string>={strategy_version_id:'策略版本 ID',strategy_parameters:'策略参数',venue:'市场',symbols:'交易品种',timeframes:'周期',start_date:'开始日期',end_date:'结束日期',initial_balance:'初始资金',leverage:'杠杆',execution_model:'成交模型',funding:'资金费率',catalog_path:'Catalog 路径',chunk_size:'分块大小',strategy_revision:'代码版本',check_data_integrity:'检查数据完整性'}
+const labels:Record<string,string>={strategy_version_id:'策略版本 ID',strategy_parameters:'策略参数',venue:'交易所',market_type:'市场类型',symbols:'交易品种',timeframes:'周期',start_date:'开始日期',end_date:'结束日期',initial_balance:'初始资金',leverage:'杠杆',execution_model:'成交模型',catalog_path:'Catalog 路径',chunk_size:'分块大小',strategy_revision:'代码版本',check_data_integrity:'检查数据完整性'}
 
 export default function Result(){
   const{id}=useParams(),navigate=useNavigate(),[run,setRun]=useState<Run>(),[tab,setTab]=useState<Tab>('overview'),[strategyId,setStrategyId]=useState(''),[error,setError]=useState(''),[repairing,setRepairing]=useState(false),[repairError,setRepairError]=useState(''),[actionBusy,setActionBusy]=useState(false)
@@ -29,6 +29,21 @@ export default function Result(){
     {tab==='candles'&&<CandleStudio run={run}/>}
     {tab==='parameters'&&<section className="card parameter-page"><div className="section-title"><div><h3>本次回测配置</h3><p>以下参数为任务创建时锁定的完整配置。</p></div><button className="button primary" onClick={copyRun}><Copy/>复制参数重新回测</button></div><dl className="parameter-list">{Object.entries(run.config).filter(([key])=>key!=='strategy_revision'&&key!=='catalog_check'&&key!=='waiting_confirmation').map(([key,item])=><div key={key}><dt>{labels[key]??key}</dt><dd><pre>{value(item)}</pre></dd></div>)}</dl></section>}
     {tab==='logs'&&<LogViewer runId={run.id} runStatus={run.status}/>}
+  </>
+}
+
+function OverviewCharts({run}:{run:Run}){
+  const charts=run.result?.charts
+  if(!charts)return <Card><p className="muted">该历史回测未保存分析序列，请重新运行后查看。</p></Card>
+  const tooltip={background:'#111a25',border:'1px solid #2a3b50'}
+  const tick=(value:string)=>value?.slice(0,10)
+  const monthly=charts.monthly_returns.map(point=>({...point,label:`${point.year}-${String(point.month).padStart(2,'0')}`}))
+  return <>
+    <Card title="权益与最大回撤" className="chart chart-wide"><ResponsiveContainer width="100%" height={300}><AreaChart data={charts.equity}><CartesianGrid stroke="#213041" vertical={false}/><XAxis dataKey="timestamp" tickFormatter={tick}/><YAxis/><Tooltip contentStyle={tooltip}/><Area dataKey="value" name="权益" stroke="#18c8d8" fill="#18c8d833"/></AreaChart></ResponsiveContainer><ResponsiveContainer width="100%" height={180}><AreaChart data={charts.drawdown}><XAxis dataKey="timestamp" tickFormatter={tick}/><YAxis unit="%"/><Tooltip contentStyle={tooltip}/><Area dataKey="value" name="回撤" stroke="#ff5c68" fill="#ff5c6830"/></AreaChart></ResponsiveContainer></Card>
+    <Card title="月度收益"><ResponsiveContainer width="100%" height={240}><BarChart data={monthly}><XAxis dataKey="label"/><YAxis unit="%"/><Tooltip contentStyle={tooltip}/><Bar dataKey="value" name="收益" fill="#2bd486"/></BarChart></ResponsiveContainer></Card>
+    <Card title="年度收益"><ResponsiveContainer width="100%" height={240}><BarChart data={charts.yearly_returns}><XAxis dataKey="year"/><YAxis unit="%"/><Tooltip contentStyle={tooltip}/><Bar dataKey="value" name="收益" fill="#18c8d8"/></BarChart></ResponsiveContainer></Card>
+    <Card title="单笔交易收益分布"><ResponsiveContainer width="100%" height={240}><BarChart data={charts.returns_distribution.map(x=>({...x,label:`${x.from.toFixed(1)}~${x.to.toFixed(1)}%`}))}><XAxis dataKey="label" hide/><YAxis/><Tooltip contentStyle={tooltip}/><Bar dataKey="count" name="次数" fill="#f3b743"/></BarChart></ResponsiveContainer></Card>
+    <Card title="收益率序列"><ResponsiveContainer width="100%" height={240}><AreaChart data={run.result?.series?.portfolio_returns??[]}><XAxis dataKey="timestamp" tickFormatter={tick}/><YAxis/><Tooltip contentStyle={tooltip}/><Area dataKey="value" name="组合收益率" stroke="#a78bfa" fill="#a78bfa22"/></AreaChart></ResponsiveContainer></Card>
   </>
 }
 
@@ -105,22 +120,14 @@ function Overview({run,onRepair,repairing,repairError,onConfirm,onCancel,actionB
   const m=run.metrics!,show=(value:number|null|undefined,suffix='')=>value==null?'—':`${value}${suffix}`
   const fallback=run.result.equity.map((value,index)=>({timestamp:run.result!.timestamps[index]??String(index),value}))
   const charts=run.result.charts
-  const equity=charts?.equity??fallback,drawdown=charts?.drawdown??run.result.drawdown.map((value,index)=>({timestamp:run.result!.timestamps[index]??String(index),value}))
-  const monthNames=['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月']
-  const years=[...new Set(charts?.monthly_returns.map(item=>item.year)??[])]
-  const tooltip={background:'#111a25',border:'1px solid #2a3b50'}
-  const tick=(value:string)=>value?.slice(0,10)
-  return <><div className="metrics"><Metric label="总收益" value={show(m.total_return,'%')}/><Metric label="最大回撤" value={show(m.max_drawdown,'%')}/><Metric label="Sharpe" value={show(m.sharpe)}/><Metric label="胜率" value={show(m.win_rate,'%')}/><Metric label="Profit Factor" value={show(m.profit_factor)}/><Metric label="交易次数" value={show(m.trades)}/></div>
+  const equity=charts?.equity??fallback
+  const percentage=(value:number|null|undefined)=>value==null?'—':`${value.toFixed(2)}%`
+  const calculatedDrawdown=equity.reduce((state,point)=>{const peak=Math.max(state.peak,point.value);return {peak,drawdown:Math.min(state.drawdown,(point.value/peak-1)*100)}},{peak:equity[0]?.value??0,drawdown:0}).drawdown
+  const maxDrawdown=m.max_drawdown??calculatedDrawdown
+  return <><div className="metrics"><Metric label="总收益" value={percentage(m.total_return)}/><Metric label="最大回撤" value={percentage(maxDrawdown)}/><Metric label="Sharpe（365 天）" value={show(m.sharpe)}/><Metric label="胜率" value={percentage(m.win_rate)}/><Metric label="Profit Factor" value={show(m.profit_factor)}/><Metric label="交易次数" value={show(m.trades)}/></div>
     <div className="analysis-grid">
-      <Card title="权益曲线" className="chart chart-wide"><ResponsiveContainer width="100%" height={300}><AreaChart data={equity}><CartesianGrid stroke="#213041" vertical={false}/><XAxis dataKey="timestamp" tickFormatter={tick} minTickGap={40} stroke="#718096"/><YAxis stroke="#718096" domain={['auto','auto']}/><Tooltip contentStyle={tooltip}/><Area type="monotone" dataKey="value" name="权益" stroke="#18c8d8" fill="#18c8d833" strokeWidth={2}/></AreaChart></ResponsiveContainer></Card>
-      <Card title="回撤曲线" className="chart"><ResponsiveContainer width="100%" height={250}><AreaChart data={drawdown}><CartesianGrid stroke="#213041" vertical={false}/><XAxis dataKey="timestamp" tickFormatter={tick} minTickGap={40} stroke="#718096"/><YAxis stroke="#718096" unit="%"/><Tooltip contentStyle={tooltip}/><Area type="monotone" dataKey="value" name="回撤" stroke="#ff5c68" fill="#ff5c6830"/></AreaChart></ResponsiveContainer></Card>
-      <Card title="滚动 Sharpe（30日）" className="chart"><ResponsiveContainer width="100%" height={250}><LineChart data={charts?.rolling_sharpe??[]}><CartesianGrid stroke="#213041" vertical={false}/><XAxis dataKey="timestamp" tickFormatter={tick} minTickGap={40} stroke="#718096"/><YAxis stroke="#718096"/><Tooltip contentStyle={tooltip}/><Line type="monotone" dataKey="value" name="Sharpe" stroke="#f3b743" dot={false}/></LineChart></ResponsiveContainer></Card>
-      <Card title="月度收益热力图" className="chart chart-wide monthly-return-card"><div className="returns-heatmap"><div/><>{monthNames.map(name=><b key={name}>{name}</b>)}</>{years.map(year=><div className="heat-row" key={year}><strong>{year}</strong>{monthNames.map((_,month)=>{const point=charts?.monthly_returns.find(item=>item.year===year&&item.month===month+1),value=point?.value;return <span key={month} className={value==null?'empty':value>=0?'gain':'loss'} title={value==null?'无数据':`${value}%`}>{value==null?'—':value.toFixed(2)+'%'}</span>})}</div>)}</div></Card>
-      <Card title="收益分布" className="chart"><ResponsiveContainer width="100%" height={250}><BarChart data={charts?.returns_distribution.map(item=>({...item,label:`${item.from.toFixed(2)}~${item.to.toFixed(2)}%`}))??[]}><CartesianGrid stroke="#213041" vertical={false}/><XAxis dataKey="label" hide/><YAxis stroke="#718096"/><Tooltip contentStyle={tooltip}/><Bar dataKey="count" name="次数" fill="#18c8d8"/></BarChart></ResponsiveContainer></Card>
-      <Card title="年度收益" className="chart"><ResponsiveContainer width="100%" height={250}><BarChart data={charts?.yearly_returns??[]}><CartesianGrid stroke="#213041" vertical={false}/><XAxis dataKey="year" stroke="#718096"/><YAxis stroke="#718096" unit="%"/><Tooltip contentStyle={tooltip}/><Bar dataKey="value" name="收益率" fill="#2bd486"/></BarChart></ResponsiveContainer></Card>
-      <Card title="品种贡献" className="chart"><ResponsiveContainer width="100%" height={250}><BarChart data={run.result.contribution} layout="vertical"><XAxis type="number" hide/><YAxis dataKey="symbol" type="category" stroke="#aeb9c7" width={110}/><Tooltip contentStyle={tooltip}/><Bar dataKey="value" name="已实现盈亏" fill="#18c8d8" radius={[0,4,4,0]}/></BarChart></ResponsiveContainer></Card>
-      <Card title="原生数据收集"><div className="report-summary">{run.result.reports?Object.entries(run.result.reports).map(([name,item])=><p key={name}><span>{name}</span><b>{item.rows.toLocaleString()} 行</b></p>):<p>历史任务未包含报告清单</p>}<p><span>BacktestResult</span><b>{run.result.native?'已保存':'历史任务未保存'}</b></p><p><span>Analyzer Statistics</span><b>{run.result.statistics?'已保存':'历史任务未保存'}</b></p></div></Card>
-      <Card title="运行信息"><div className="run-info"><p><span>任务 ID</span><code>{run.id}</code></p><p><span>创建时间</span>{new Date(run.created_at).toLocaleString()}</p><p><span>执行器</span>NautilusTrader BacktestNode</p><p><span>数据性质</span>真实历史 K 线 · 模拟成交</p><p><span>迭代次数</span>{String(run.result.native?.iterations??'—')}</p><p><span>运行耗时</span>{String(run.result.native?.elapsed_time??'—')} 秒</p></div></Card>
+      <Card title="回测口径" className="chart chart-wide"><div className="notice"><ShieldCheck/>Sharpe 按加密市场 365 天年化。成交采用 K 线级保守模拟（自适应 OHLC 路径 + 一跳滑点），并非逐笔或订单簿成交。{run.result.funding?.snapshot?.enabled?`固定资金费：每 8 小时 ${((run.result.funding.snapshot.rate_per_8h??0)*100).toFixed(2)}%，累计 ${Number(run.result.funding.net_cost||0).toFixed(4)} USDT。`:''}</div></Card>
+      <OverviewCharts run={run}/>
     </div></>
 }
 

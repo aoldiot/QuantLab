@@ -43,12 +43,12 @@ export default function NewBacktest(){
       const raw=f.get('param_'+key)
       params[key]=spec.type==='boolean'?raw==='on':spec.type==='integer'?Number(raw):spec.type==='number'?Number(raw):raw
     })
-    const checkIntegrity=f.get('check_data_integrity')==='on'
     const payload={
       name:f.get('name'),
       strategy_version_id:strategy.latest_version_id,
       strategy_parameters:params,
       venue:copied?.venue??'BINANCE',
+      market_type:f.get('market_type'),
       symbols:String(f.get('symbols')).split(',').map(x=>x.trim()).filter(Boolean),
       timeframes:strategy.data_requirements.timeframes,
       start_date:String(f.get('start')),
@@ -56,10 +56,9 @@ export default function NewBacktest(){
       initial_balance:Number(f.get('capital')),
       leverage:Number(f.get('leverage')),
       execution_model:f.get('model'),
-      funding:strategy.data_requirements.funding,
       catalog_path:(f.get('catalog_path') as string)||null,
       ignore_missing_data:true,
-      check_data_integrity:checkIntegrity,
+      check_data_integrity:true,
       research_project_id:researchProjectId,
     }
 
@@ -94,18 +93,19 @@ export default function NewBacktest(){
           <div className="form-grid">
             <label className="wide">Nautilus Catalog 路径<input name="catalog_path" defaultValue={copied?.catalog_path??''} placeholder="留空使用后端 CATALOG_PATH"/><small>必须是已写入 Instrument 和 Bar 的 ParquetDataCatalog</small></label>
             <label className="wide">交易品种<input name="symbols" defaultValue={copied?.symbols?.join(', ')??'BTCUSDT, ETHUSDT, SOLUSDT'}/><small>{strategy?.data_requirements.mode==='PORTFOLIO'?'整个币池交给同一个组合策略统一排序和调仓':'每个标的创建一个独立策略实例'}</small></label>
+            <label>市场类型<select name="market_type" defaultValue={copied?.market_type??'um'}><option value="um">U 本位永续</option><option value="spot">现货</option></select></label>
             <label>初始资金<input name="capital" type="number" defaultValue={copied?.initial_balance??10000}/><em>USDT</em></label>
             <label>杠杆<input name="leverage" type="number" defaultValue={copied?.leverage??4}/><em>x</em></label>
             <label className="wide checkbox-field" style={{display:'flex',flexDirection:'row',alignItems:'center',gap:10,marginTop:6,cursor:'pointer'}}>
-              <input type="checkbox" name="check_data_integrity" defaultChecked={copied?.check_data_integrity??true} style={{width:16,height:16,accentColor:'var(--cyan)'}}/>
-              <span style={{fontWeight:500,color:'#e2ecf5'}}>检查数据完整性</span>
-              <small style={{color:'var(--muted)',fontSize:12}}>（勾选后将在回测开始前验证 Parquet 行情覆盖度并显示进度；不勾选则跳过检查直接开始回测）</small>
+              <input type="checkbox" name="check_data_integrity" checked readOnly style={{width:16,height:16,accentColor:'var(--cyan)'}}/>
+              <span style={{fontWeight:500,color:'#e2ecf5'}}>强制检查数据完整性</span>
+              <small style={{color:'var(--muted)',fontSize:12}}>回测前必须展示缺失数量；有缺口仍可由你确认后继续。</small>
             </label>
           </div>
         </Card>
         <Card title="执行模型">
           <div className="model-select">
-            {[['FAST','快速','固定 OHLC 路径'],['STANDARD','标准','自适应 K 线路径'],['CONSERVATIVE','保守','自适应 K 线路径']].map(([v,t,s])=><label key={v}><input type="radio" name="model" value={v} defaultChecked={v===(copied?.execution_model??'CONSERVATIVE')}/><span><b>{t}</b><small>{s}</small></span></label>)}
+            <label><input type="radio" name="model" value="CONSERVATIVE" checked readOnly/><span><b>固定 NT 保守模型</b><small>自适应 OHLC 路径 + NT OneTickSlippage；全量回测统一使用，确保结果可比。</small></span></label>
           </div>
         </Card>
         {error&&<div className="form-error">{error}</div>}
@@ -127,7 +127,7 @@ export default function NewBacktest(){
           <ul className="checks">
             <li><Check/>策略契约已加载</li>
             <li><Check/>参数由 Manifest 动态生成</li>
-            <li><Check/>支持数据完整性自检与实时日志监控</li>
+            <li><Check/>数据缺口会明确告警，可由用户确认后继续</li>
           </ul>
           <div className="notice"><ShieldCheck/>复制配置不会修改原回测，提交后会创建独立的新任务。</div>
         </Card>
@@ -136,4 +136,3 @@ export default function NewBacktest(){
     </form>
   </>
 }
-

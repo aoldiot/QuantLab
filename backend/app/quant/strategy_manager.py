@@ -95,7 +95,6 @@ async def ensure_strategy_db_record(
                 "timeframes": ["15m"],
                 "primary_timeframe": "15m",
                 "multi_symbol": True,
-                "funding": True,
                 "supports_short": True,
             }
             m_hash = c_hash

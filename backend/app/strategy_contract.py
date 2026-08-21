@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib import import_module, reload
 from pathlib import Path
@@ -129,7 +129,9 @@ class StrategyManifest:
     )
     mode: StrategyMode = StrategyMode.SINGLE_INSTRUMENT
     supports_short: bool = True
-    requires_funding: bool = True
+    # Retained only so existing strategy manifests remain loadable. Funding is
+    # currently not exposed to, loaded by, or settled in QuantLab backtests.
+    requires_funding: bool = False
     strategy_id: str = ""
     id: str = ""
     supported_modes: Any = None
@@ -185,7 +187,6 @@ class StrategyManifest:
             "timeframes": list(self.timeframes),
             "primary_timeframe": self.primary_timeframe,
             "multi_symbol": True,
-            "funding": self.requires_funding,
             "supports_short": self.supports_short,
             "config_path": self.config_path,
             "mode": self.mode.value,

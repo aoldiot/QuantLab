@@ -171,7 +171,6 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
           },
           mode=StrategyMode.SINGLE_INSTRUMENT,
           supports_short=True,
-          requires_funding=True,
       )
       ```
 

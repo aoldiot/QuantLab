@@ -1,12 +1,12 @@
 export type ParameterSpec={title:string;type:string;default:unknown;min?:number;max?:number}
-export type DataRequirements={timeframes:string[];primary_timeframe:string;multi_symbol:boolean;funding:boolean;mode:'SINGLE_INSTRUMENT'|'PORTFOLIO'}
+export type DataRequirements={timeframes:string[];primary_timeframe:string;multi_symbol:boolean;mode:'SINGLE_INSTRUMENT'|'PORTFOLIO'}
 export type Strategy={id:string;name:string;slug:string;description:string;category:string;status:'DRAFT'|'READY'|'DISABLED';latest_version_id:string;version:string;version_count:number;module:string;created_at:string|null;updated_at:string|null;parameter_schema:Record<string,ParameterSpec>;data_requirements:DataRequirements}
 export type StrategyVersion={id:string;strategy_id:string;version:string;description:string;entrypoint:string;code?:string;code_hash?:string|null;parameter_schema:Record<string,ParameterSpec>;data_requirements:DataRequirements;is_latest:boolean;git_commit:string|null;git_ref:string|null;manifest_hash:string|null;created_at:string|null}
 export type StrategyFile={name:string;filename:string;module:string;code_hash?:string;git_status?:string;draft_description?:string|null;draft_category?:string|null;created_at?:number;updated_at?:number;content?:string}
 export type StrategyGitStatus={dirty:boolean;files:string[];head:string;branch:string}
 export type SeriesPoint={timestamp:string;value:number}
 export type RunCharts={equity:SeriesPoint[];drawdown:SeriesPoint[];monthly_returns:{year:number;month:number;value:number}[];yearly_returns:{year:number;value:number}[];returns_distribution:{from:number;to:number;count:number}[];rolling_sharpe:SeriesPoint[]}
-export type RunResult={equity:number[];drawdown:number[];timestamps:string[];contribution:{symbol:string;value:number}[];stats_pnls:Record<string,unknown>;stats_returns:Record<string,unknown>;native?:Record<string,unknown>;statistics?:Record<string,Record<string,unknown>>;series?:Record<string,SeriesPoint[]>;reports?:Record<string,{rows:number;columns:string[];file:string}>;charts?:RunCharts}
+export type RunResult={equity:number[];drawdown:number[];timestamps:string[];contribution:{symbol:string;value:number}[];stats_pnls:Record<string,unknown>;stats_returns:Record<string,unknown>;native?:Record<string,unknown>;statistics?:Record<string,Record<string,unknown>>;series?:Record<string,SeriesPoint[]>;reports?:Record<string,{rows:number;columns:string[];file:string}>;charts?:RunCharts;funding?:{net_cost:number;settlements:number;snapshot:{enabled?:boolean;rate_per_8h?:number}}}
 export type Run={id:string;name:string;status:string;stage:string;progress:number;config:Record<string,any>;metrics:Record<string,number|null>|null;result:RunResult|null;error_message:string|null;research_project_id:string|null;created_at:string}
 export type ChartBar={time:number;open:number;high:number;low:number;close:number;volume:number}
 export type ChartFill={time:number;price:number;quantity:number;side:string}
@@ -39,7 +39,7 @@ export interface DshLiveEventsResponse{events:DshLiveEvent[];status:{project_id:
 export interface DshApproval{request_id:string;project_id:string;tool:string;proposal_key?:string;arguments:Record<string,any>;status:'pending'|'approved'|'declined';feedback:string;created_at:string;summary?:string;message?:string}
 export type DshAction='WRITE_STRATEGY'|'RUN_BACKTEST'|'FIX_ERROR'|'ANALYZE_BACKTEST'
 export interface DshActionRequest{action:DshAction;content?:string;run_id?:string;arguments?:Record<string,any>}
-export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;funding:boolean;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}
+export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;market_type:'spot'|'um';symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}
 
 export interface DashboardRecentRun {
   id: string

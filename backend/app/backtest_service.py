@@ -11,6 +11,12 @@ from .runner import check_data_integrity_and_wait, execute_backtest
 from .schemas import BacktestCreate
 from .strategy_contract import load_manifest, validate_parameters
 
+DEFAULT_FUNDING_RATE_EIGHT_HOURS = 0.0001
+BINANCE_DEFAULT_FEES = {
+    "spot": {"maker": 0.001, "taker": 0.001},
+    "um": {"maker": 0.0002, "taker": 0.0005},
+}
+
 
 def _build_strategy_payload(version: StrategyVersion, strategy_code: str, manifest) -> dict:
     return {
@@ -18,6 +24,19 @@ def _build_strategy_payload(version: StrategyVersion, strategy_code: str, manife
         "code": strategy_code,
         "code_hash": version.code_hash,
         "data_requirements": manifest.data_requirements(),
+    }
+
+
+def _strategy_snapshot(version: StrategyVersion, manifest) -> dict:
+    """Freeze every manifest-derived value used by one historical run."""
+    return {
+        "entrypoint": version.entrypoint,
+        "version": version.version,
+        "code_hash": version.code_hash,
+        "manifest_hash": version.manifest_hash,
+        "parameter_schema": version.parameter_schema,
+        "data_requirements": version.data_requirements or manifest.data_requirements(),
+        "manifest": manifest.data_requirements(),
     }
 
 
@@ -47,29 +66,34 @@ async def create_backtest_run(data: BacktestCreate, db: AsyncSession, research_p
         research_project_id=research_project_id or data.research_project_id,
     )
     run.config["strategy_parameters"] = resolved_parameters
+    # Coverage warnings are mandatory: missing data may be accepted by the user,
+    # but it must never be silently omitted from a run.
+    run.config["check_data_integrity"] = True
     run.config["strategy_version"] = {
         "version": version.version,
         "code_hash": version.code_hash,
         "manifest_hash": version.manifest_hash,
     }
+    run.config["strategy_snapshot"] = _strategy_snapshot(version, manifest)
+    run.config["fee_snapshot"] = BINANCE_DEFAULT_FEES[data.market_type]
+    run.config["funding_snapshot"] = {
+        "enabled": data.market_type == "um",
+        "rate_per_8h": DEFAULT_FUNDING_RATE_EIGHT_HOURS,
+        "settlement_hours_utc": [0, 8, 16],
+        "end_time": f"{data.end_date}T23:59:59.999999999Z",
+        "long_pays_when_positive": True,
+        "method": "fixed_rate_position_notional",
+    }
 
     strategy_payload = _build_strategy_payload(version, strategy_code, manifest)
 
-    if data.check_data_integrity:
-        run.stage = "准备检查数据完整性"
-        run.progress = 0
-        run.config["waiting_confirmation"] = False
-        db.add(run)
-        await db.commit()
-        await db.refresh(run)
-        asyncio.create_task(check_data_integrity_and_wait(run.id, strategy_payload))
-    else:
-        run.stage = "等待执行"
-        run.progress = 0
-        db.add(run)
-        await db.commit()
-        await db.refresh(run)
-        asyncio.create_task(execute_backtest(run.id, strategy_payload))
+    run.stage = "准备检查数据完整性"
+    run.progress = 0
+    run.config["waiting_confirmation"] = False
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    asyncio.create_task(check_data_integrity_and_wait(run.id, strategy_payload))
 
     return run
 
@@ -84,11 +108,6 @@ async def confirm_and_start_backtest(run_id: str, db: AsyncSession, ignore_missi
     version = await db.get(StrategyVersion, run.strategy_version_id)
     if not version:
         raise HTTPException(400, "策略版本不存在")
-
-    try:
-        manifest = load_manifest(version.entrypoint)
-    except Exception as exc:
-        raise HTTPException(400, f"加载策略 Manifest 失败: {exc}") from exc
 
     strategy_code = version.code
     if not strategy_code:
@@ -110,6 +129,14 @@ async def confirm_and_start_backtest(run_id: str, db: AsyncSession, ignore_missi
     await db.commit()
     await db.refresh(run)
 
-    strategy_payload = _build_strategy_payload(version, strategy_code, manifest)
+    # Do not re-import the mutable workspace Manifest here. The worker imports
+    # the versioned source in its sandbox and analytics receives this snapshot.
+    snapshot = run.config.get("strategy_snapshot") or {}
+    strategy_payload = {
+        "module": version.entrypoint,
+        "code": strategy_code,
+        "code_hash": version.code_hash,
+        "data_requirements": snapshot.get("data_requirements", version.data_requirements),
+    }
     asyncio.create_task(execute_backtest(run.id, strategy_payload))
     return run

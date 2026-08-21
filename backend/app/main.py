@@ -34,7 +34,7 @@ from .models import (
     StrategyVersion,
 )
 from .research import router as research_router
-from .runner import append_log, get_backtest_logs
+from .runner import append_log, cancel_active_backtest, get_backtest_logs
 from .schemas import (
     BacktestConfirmRequest,
     BacktestCreate,
@@ -574,6 +574,7 @@ def check_catalog_coverage_batch(req: CatalogCheckRequest) -> CatalogCheckRespon
     from nautilus_trader.model.data import Bar
     from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
     from .backtests.builder import instrument_id, timeframe_to_bar_spec
+    from .backtests.coverage import date_bounds, query_coverage
     import logging
 
     resolved_path = Path(req.catalog_path or settings.catalog_path).expanduser().resolve()
@@ -582,7 +583,7 @@ def check_catalog_coverage_batch(req: CatalogCheckRequest) -> CatalogCheckRespon
         details = [
             CatalogMissingDetail(
                 symbol=s,
-                instrument_id=instrument_id(s, req.venue),
+                instrument_id=instrument_id(s, req.venue, req.market_type),
                 timeframe=tf,
                 status="MISSING_DATA",
                 message=f"Catalog 目录不存在: {resolved_path}",
@@ -609,15 +610,13 @@ def check_catalog_coverage_batch(req: CatalogCheckRequest) -> CatalogCheckRespon
     except Exception as err:
         logging.getLogger("uvicorn.error").warning("读取 Catalog Instruments 失败: %s", err)
 
-    bar_dir = resolved_path / "data" / "bar"
-    start_str = f"{req.start_date}T00:00:00Z"
-    end_str = f"{req.end_date}T23:59:59Z"
+    start_ns, end_exclusive_ns = date_bounds(req.start_date, req.end_date)
 
     details: list[CatalogMissingDetail] = []
     missing_symbol_set: set[str] = set()
 
     for s in [sym.strip() for sym in req.symbols if sym.strip()]:
-        inst_id = instrument_id(s, req.venue)
+        inst_id = instrument_id(s, req.venue, req.market_type)
         is_inst_registered = inst_id in registered_instruments
 
         for tf in req.timeframes:
@@ -636,17 +635,8 @@ def check_catalog_coverage_batch(req: CatalogCheckRequest) -> CatalogCheckRespon
                 missing_symbol_set.add(s)
                 continue
 
-            bar_dir_name = f"{inst_id}-{spec}-EXTERNAL"
-            bar_path = bar_dir / bar_dir_name
-
-            files = []
-            if bar_path.is_dir() and catalog is not None:
-                try:
-                    files = catalog._query_files(Bar, [bar_dir_name], start_str, end_str)
-                except Exception:
-                    files = list(bar_path.glob("*.parquet"))
-
-            if not is_inst_registered and not bar_path.exists():
+            bar_type = f"{inst_id}-{spec}-EXTERNAL"
+            if not is_inst_registered:
                 details.append(
                     CatalogMissingDetail(
                         symbol=s,
@@ -657,43 +647,23 @@ def check_catalog_coverage_batch(req: CatalogCheckRequest) -> CatalogCheckRespon
                     )
                 )
                 missing_symbol_set.add(s)
-            elif not bar_path.exists() or len(list(bar_path.glob("*.parquet"))) == 0:
-                details.append(
-                    CatalogMissingDetail(
-                        symbol=s,
-                        instrument_id=inst_id,
-                        timeframe=tf,
-                        status="MISSING_DATA",
-                        message=f"缺少 {tf} 周期 Parquet 行情数据",
-                    )
-                )
-                missing_symbol_set.add(s)
-            elif not files:
-                details.append(
-                    CatalogMissingDetail(
-                        symbol=s,
-                        instrument_id=inst_id,
-                        timeframe=tf,
-                        status="PARTIAL_RANGE",
-                        message=f"{tf} 周期在请求时间范围 ({req.start_date} ~ {req.end_date}) 内未找到可用数据",
-                    )
-                )
-                missing_symbol_set.add(s)
             else:
-                details.append(
-                    CatalogMissingDetail(
-                        symbol=s,
-                        instrument_id=inst_id,
-                        timeframe=tf,
-                        status="OK",
-                        message="数据完整",
-                    )
-                )
+                coverage = query_coverage(catalog, Bar, bar_type, start_ns, end_exclusive_ns, tf)
+                status = "OK" if coverage.complete else ("MISSING_DATA" if coverage.actual_count == 0 else "PARTIAL_RANGE")
+                details.append(CatalogMissingDetail(
+                    symbol=s,
+                    instrument_id=inst_id,
+                    timeframe=tf,
+                    status=status,
+                    message=coverage.message,
+                ))
+                if not coverage.complete:
+                    missing_symbol_set.add(s)
 
     missing_symbols = sorted(missing_symbol_set)
     has_missing = len(missing_symbols) > 0
     if has_missing:
-        summary_text = f"检测到 {len(missing_symbols)} 个币种缺少 Catalog 数据：{', '.join(missing_symbols)}"
+        summary_text = f"检测到 {len(missing_symbols)} 个品种数据不完整，可确认后带警告继续：{', '.join(missing_symbols)}"
     else:
         summary_text = "所有标的 Catalog 数据均已完备"
 
@@ -746,9 +716,10 @@ async def cancel_backtest(run_id: str, db: AsyncSession = Depends(get_db)):
     r = await db.get(BacktestRun, run_id)
     if not r: raise HTTPException(404, "回测不存在")
     if r.status in {RunStatus.COMPLETED, RunStatus.FAILED}: raise HTTPException(409, "任务已结束")
+    stopped = await cancel_active_backtest(run_id, (r.config or {}).get("worker_pid"))
     r.status, r.stage = RunStatus.CANCELED, "已取消"
     r.finished_at = datetime.now(UTC)
-    append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] 回测任务已被取消。")
+    append_log(run_id, f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [WARN] 回测任务已被取消{'，worker 已终止' if stopped else ''}。")
     if r.research_project_id:
         project = await db.get(ResearchProject, r.research_project_id)
         if project and project.status != ResearchStatus.ARCHIVED:

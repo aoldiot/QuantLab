@@ -93,6 +93,7 @@ class CatalogCheckRequest(BaseModel):
     start_date: date
     end_date: date
     venue: str = "BINANCE"
+    market_type: Literal["spot", "um"] = "um"
     catalog_path: str | None = None
 
 
@@ -119,6 +120,7 @@ class BacktestCreate(BaseModel):
     strategy_version_id: str
     strategy_parameters: dict[str, Any]
     venue: str = "BINANCE"
+    market_type: Literal["spot", "um"] = "um"
     symbols: list[str] = Field(min_length=1)
     timeframes: list[str] = Field(min_length=1)
     start_date: date
@@ -126,13 +128,13 @@ class BacktestCreate(BaseModel):
     initial_balance: float = Field(gt=0)
     leverage: float = Field(gt=0, le=125)
     execution_model: Literal["FAST", "STANDARD", "CONSERVATIVE"] = "CONSERVATIVE"
-    funding: bool = True
     catalog_path: str | None = None
     chunk_size: int | None = Field(default=None, gt=0)
     ignore_missing_data: bool = True
     check_data_integrity: bool = True
+    research_project_id: str | None = None
 
-    def model_post_init(self, __context):
+    def model_post_init(self, __context, /):
         if self.end_date <= self.start_date:
             raise ValueError("结束日期必须晚于开始日期")
 
