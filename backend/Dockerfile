@@ -1,3 +1,10 @@
+FROM node:22-slim AS dsh-runtime-deps
+
+WORKDIR /app/dsh_runtime
+COPY dsh_runtime/package.json dsh_runtime/package-lock.json ./
+RUN npm ci --omit=dev
+
+
 FROM python:3.12-slim
 
 # Install system dependencies
@@ -27,6 +34,12 @@ COPY alembic.ini ./
 COPY app/ ./app/
 COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
+
+# The DSH SDK loads these Cordis files and the QuantLab bridge plugin at runtime.
+# Install the plugin's Node dependencies in the image rather than relying on a
+# developer's local node_modules directory being present in the build context.
+COPY dsh_runtime/ ./dsh_runtime/
+COPY --from=dsh-runtime-deps /app/dsh_runtime/node_modules ./dsh_runtime/node_modules
 
 # Create runtime directories
 RUN mkdir -p data catalog data/backtests data/strategy-repository data/agent
