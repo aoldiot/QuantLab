@@ -336,15 +336,99 @@ def _implementation_prompt(
     project: ResearchProject,
     user_confirmation: str,
     approved_plan: str = "",
+    candidate_code: str = "",
+    original_idea: str = "",
 ) -> str:
+    eff_idea = (original_idea or project.original_idea or "").strip()
+    candidate_section = (
+        f"\n\n【已有候选源码草稿（已通过 4 级 Pre-Flight 校验）】\n```python\n{candidate_code}\n```\n"
+        "如已有草稿完全符合要求，可直接调用 write_strategy_code 提交正式发布审批，或调用 stage_strategy_candidate 进行微调。"
+        if candidate_code
+        else ""
+    )
     return (
-        "用户已明确确认进入策略编码阶段。请生成完整策略代码，先调用 stage_strategy_candidate 落入隔离候选区并完成校验；"
+        "用户已明确确认进入策略编码阶段。请生成完整策略代码，第一步直接调用 stage_strategy_candidate 提交策略源码并完成 4 级 Pre-Flight 校验；"
+        "禁止在写码前调用 list_files/search_code/run_command 做多余的漫游检索；"
         "失败时只用 patch_strategy_candidate 修复报错片段；通过后再调用 write_strategy_code 提交真实发布审批。"
         "不要重新研究、不要再次询问授权、不要执行回测。\n\n"
-        f"【完整原始需求】\n{project.original_idea.strip()}\n\n"
+        f"【完整原始需求】\n{eff_idea}\n\n"
         f"【已确认的最新研究方案】\n{approved_plan.strip()}\n\n"
         f"【用户最新确认与范围调整】\n{user_confirmation.strip()}"
+        f"{candidate_section}"
     )
+
+
+async def _resolve_implementation_context(
+    project: ResearchProject,
+    db: AsyncSession,
+) -> tuple[str, str, str]:
+    """Retrieve robust original idea, substantive research plan, and existing candidate code."""
+    from .models import CandidateRevision
+
+    # 1. Resolve original idea
+    original_idea = (getattr(project, "original_idea", "") or "").strip()
+    if not original_idea and hasattr(db, "scalar"):
+        try:
+            first_user_msg = await db.scalar(
+                select(ResearchMessage.content)
+                .where(ResearchMessage.project_id == project.id, ResearchMessage.role == "user")
+                .order_by(ResearchMessage.created_at.asc())
+                .limit(1)
+            )
+            if first_user_msg and first_user_msg.strip():
+                original_idea = first_user_msg.strip()
+                project.original_idea = original_idea
+        except Exception:
+            pass
+
+    # 2. Resolve substantive approved plan
+    approved_plan = ""
+    if hasattr(db, "scalars"):
+        try:
+            specs = list((await db.scalars(
+                select(StrategySpecification)
+                .where(StrategySpecification.project_id == project.id)
+                .order_by(StrategySpecification.version.asc())
+            )).all())
+            for spec in reversed(specs):
+                content = spec.content or {}
+                plan = str(content.get("approved_plan") or "").strip()
+                if len(plan) > 100:
+                    approved_plan = plan
+                    break
+
+            if not approved_plan:
+                assistant_msgs = list((await db.scalars(
+                    select(ResearchMessage)
+                    .where(ResearchMessage.project_id == project.id, ResearchMessage.role == "assistant")
+                    .order_by(ResearchMessage.created_at.desc())
+                    .limit(15)
+                )).all())
+                for msg in assistant_msgs:
+                    text = (msg.content or "").strip()
+                    if len(text) > 100:
+                        approved_plan = text
+                        break
+                if not approved_plan and assistant_msgs:
+                    approved_plan = (assistant_msgs[0].content or "").strip()
+        except Exception:
+            pass
+
+    # 3. Check for existing candidate revision code
+    candidate_code = ""
+    if hasattr(db, "scalar"):
+        try:
+            latest_candidate = await db.scalar(
+                select(CandidateRevision)
+                .where(CandidateRevision.project_id == project.id)
+                .order_by(CandidateRevision.created_at.desc())
+                .limit(1)
+            )
+            candidate_code = (latest_candidate.code or "").strip() if latest_candidate else ""
+        except Exception:
+            pass
+
+    return original_idea, approved_plan, candidate_code
 
 
 async def _recent_intent_context(
@@ -1598,16 +1682,15 @@ async def run_dsh_action_endpoint(
     recent_messages = await _recent_intent_context(project.id, db)
     task_profile = data.action
     if data.action == "WRITE_STRATEGY":
-        latest_plan = next(
-            (item["content"] for item in reversed(recent_messages) if item["role"] == "assistant"),
-            "",
-        )
+        eff_idea, latest_plan, candidate_code = await _resolve_implementation_context(project, db)
         await _approve_research_specification(project, latest_plan, db)
         phase = "IMPLEMENTATION"
         prompt = _implementation_prompt(
             project,
             data.content.strip() or "按已确认方案直接生成策略代码",
             latest_plan,
+            candidate_code=candidate_code,
+            original_idea=eff_idea,
         )
         step = "DSH 正在直接编写策略并进行一次集中验证..."
     elif data.action == "RUN_BACKTEST":
@@ -1845,15 +1928,14 @@ async def run_dsh_pipeline_endpoint(
     project.updated_at = datetime.now(UTC)
     await db.commit()
     if phase == "IMPLEMENTATION":
-        latest_plan = next(
-            (item["content"] for item in reversed(recent_messages) if item["role"] == "assistant"),
-            "",
-        )
+        eff_idea, latest_plan, candidate_code = await _resolve_implementation_context(project, db)
         await _approve_research_specification(project, latest_plan, db)
         turn_prompt = _implementation_prompt(
             project,
             intent_result.get("normalized_request") or data.content,
             latest_plan,
+            candidate_code=candidate_code,
+            original_idea=eff_idea,
         )
         step = "DSH 正在生成完整策略代码并准备审批提案..."
     else:

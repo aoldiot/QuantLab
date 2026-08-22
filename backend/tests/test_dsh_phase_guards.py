@@ -355,3 +355,24 @@ def test_empty_final_response_gets_one_synthesis_retry(monkeypatch) -> None:
     assert result["final_response"] == "最终研究结论"
     assert result["metrics"]["recovered_empty_response"] is True
     assert len(calls) == 2
+
+
+def test_write_strategy_timeout_is_960_seconds() -> None:
+    assert engine.TASK_TIMEOUT_SECONDS["WRITE_STRATEGY"] == 960
+
+
+def test_archive_session_directory_archives_and_cleans_folders(tmp_path, monkeypatch) -> None:
+    fake_data_root = tmp_path / "data"
+    sessions_root = fake_data_root / "dsh" / "sessions"
+    target_session_dir = sessions_root / "test-workspace" / "dsh_project_test_123_coding"
+    target_session_dir.mkdir(parents=True, exist_ok=True)
+    (target_session_dir / "session.jsonl.zstd").write_text("corrupted", encoding="utf-8")
+
+    monkeypatch.setattr(engine.settings, "data_root", fake_data_root)
+
+    archived = engine._archive_session_directory("dsh_project_test_123_coding")
+    assert len(archived) == 1
+    assert not target_session_dir.exists()
+    assert archived[0].exists()
+    assert (archived[0] / "session.jsonl.zstd").read_text(encoding="utf-8") == "corrupted"
+    assert "_archived_" in archived[0].name
