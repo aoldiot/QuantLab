@@ -73,7 +73,8 @@ def test_implementation_phase_uses_focused_instructions_and_complete_prompt() ->
     assert _instructions_for_phase("IMPLEMENTATION") == IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "不要重新输出研究方案" in IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "write_strategy_code" in IMPLEMENTATION_PHASE_INSTRUCTIONS
-    assert "完整 QuantLab 项目文件系统和终端" in IMPLEMENTATION_PHASE_INSTRUCTIONS
+    assert "只读 coding-tools" in IMPLEMENTATION_PHASE_INSTRUCTIONS
+    assert "不得使用终端" in IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "最多三轮" in IMPLEMENTATION_PHASE_INSTRUCTIONS
     assert "完整策略规格" in prompt
     assert "已确认研究方案" in prompt
@@ -224,6 +225,7 @@ def test_research_cordis_has_no_terminal_or_filesystem() -> None:
     text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-research.yml").read_text(encoding="utf-8")
     assert "dsh-bash-local" not in text
     assert "dsh-fs-local" not in text
+    assert "coding-tools" not in text
     assert "quantlab-tools" in text
 
 
@@ -239,8 +241,8 @@ def test_default_cordis_has_no_raw_terminal() -> None:
     text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis.yml").read_text(encoding="utf-8")
     assert "dsh-bash-local" not in text
     assert "dsh-fs-local" not in text
-    assert "coding-tools" in text
-    assert "quantlab-tools" in text
+    assert "coding-tools" not in text
+    assert "quantlab-tools" not in text
 
 
 def test_repair_phase_instructions_cover_manifest_and_contracts() -> None:
@@ -248,7 +250,7 @@ def test_repair_phase_instructions_cover_manifest_and_contracts() -> None:
     assert "STRATEGY_MANIFEST" in instructions
     assert "StrategyManifest" in instructions
     assert "calculate_indicators" in instructions
-    assert "完整项目文件系统" in instructions
+    assert "只读 coding-tools" in instructions
     assert "不生成审批卡" in instructions
 
 
@@ -279,13 +281,25 @@ def test_cordis_path_routes_to_phase_specific_configs() -> None:
     assert engine._cordis_path("RESULT_REVIEW").name == "cordis-analysis.yml"
 
 
-def test_coding_worker_has_full_project_tools() -> None:
+def test_coding_worker_has_read_only_project_tools() -> None:
     runtime = Path(__file__).parents[1] / "dsh_runtime"
     config = (runtime / "cordis-coding.yml").read_text(encoding="utf-8")
     tools = (runtime / "src" / "coding-tools.mjs").read_text(encoding="utf-8")
     assert "coding-tools.mjs" in config
-    for name in ("read_file", "search_code", "replace_in_file", "run_command"):
+    for name in ("read_file", "search_code", "list_files"):
         assert f"name: '{name}'" in tools
+    assert "writablePaths: []" in config
+    assert "name: 'run_command'" not in tools
+    assert "realpath" in tools
+
+
+def test_backtest_and_analysis_have_dedicated_instructions() -> None:
+    backtest = _instructions_for_phase("BACKTEST_RETRY")
+    analysis = _instructions_for_phase("RESULT_REVIEW")
+    assert "quant_market_data_query" in backtest
+    assert "不得读取项目文件" in backtest
+    assert "回测结果归因负责人" in analysis
+    assert "不得修改策略" in analysis
 
 
 def test_capabilities_tool_is_self_contained() -> None:
@@ -319,6 +333,41 @@ def test_research_tool_budget_is_enforced(monkeypatch) -> None:
         assert denied["error_code"] == "RESEARCH_TOOL_BUDGET_EXCEEDED"
 
     asyncio.run(scenario())
+
+
+def test_dispatch_tools_are_allowlisted_per_phase(monkeypatch) -> None:
+    calls = []
+
+    async def fake_dispatch(tool_name, arguments, **kwargs):
+        calls.append(tool_name)
+        return {"ok": True}
+
+    monkeypatch.setattr(bridge, "dispatch_dsh_tool_call", fake_dispatch)
+
+    async def scenario():
+        backtest = SimpleNamespace(id="backtest-project", research_phase="BACKTEST")
+        allowed = await bridge._exec_dispatch_tool(
+            backtest,
+            {"tool_name": "quant_market_data_query", "arguments": {}},
+            None,
+        )
+        denied = await bridge._exec_dispatch_tool(
+            backtest,
+            {"tool_name": "quant_parameter_sweep", "arguments": {}},
+            None,
+        )
+        unknown = SimpleNamespace(id="unknown-project", research_phase="UNKNOWN")
+        fail_closed = await bridge._exec_dispatch_tool(
+            unknown,
+            {"tool_name": "quant_market_data_query", "arguments": {}},
+            None,
+        )
+        assert allowed["ok"] is True
+        assert denied["ok"] is False
+        assert fail_closed["ok"] is False
+
+    asyncio.run(scenario())
+    assert calls == ["quant_market_data_query"]
 
 
 def test_empty_final_response_gets_one_synthesis_retry(monkeypatch) -> None:

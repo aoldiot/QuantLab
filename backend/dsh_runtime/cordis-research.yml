@@ -1,5 +1,4 @@
-# Research-only DSH runtime. Intentionally excludes local Bash and filesystem
-# plugins: research uses bounded QuantLab/domain tools and web sources only.
+# Research-only DSH runtime. Uses bounded QuantLab/domain tools only.
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
 

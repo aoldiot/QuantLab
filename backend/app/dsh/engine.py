@@ -172,13 +172,11 @@ def _build_harness(
     from .profiles import worker_for_phase
 
     worker = worker_for_phase(phase)
-    # Coding needs the same source tree, virtualenv and tests as a desktop DSH
-    # coding session. Other workers retain the compact project artifact workspace.
-    workspace = (
-        settings.strategy_repo_path.resolve()
-        if worker.value == "CODING"
-        else (settings.data_root / "dsh" / "workspaces" / project.id).resolve()
-    )
+    # Cordis path grants are repository-relative for every worker.  Keep a
+    # single, explicit resolution root and let each phase's Cordis profile
+    # provide the least-privilege view.  Using an empty per-project cwd made
+    # paths such as app/quant and data/backtests point at nonexistent files.
+    workspace = settings.strategy_repo_path.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     sessions = (settings.data_root / "dsh" / "sessions").resolve()
     sessions.mkdir(parents=True, exist_ok=True)

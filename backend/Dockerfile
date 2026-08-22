@@ -1,7 +1,7 @@
 FROM node:22-slim AS dsh-runtime-deps
 
 WORKDIR /app/dsh_runtime
-COPY dsh_runtime/package.json dsh_runtime/package-lock.json ./
+COPY backend/dsh_runtime/package.json backend/dsh_runtime/package-lock.json ./
 RUN npm ci --omit=dev
 
 
@@ -24,21 +24,23 @@ ENV UV_DEFAULT_INDEX="https://mirrors.aliyun.com/pypi/simple" \
     UV_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 
 # Copy dependency specifications
-COPY pyproject.toml uv.lock ./
+COPY backend/pyproject.toml backend/uv.lock ./
 
 # Install python dependencies in isolated venv
 RUN uv sync --frozen --no-dev
 
 # Copy application source code and migrations
-COPY alembic.ini ./
-COPY app/ ./app/
-COPY migrations/ ./migrations/
-COPY scripts/ ./scripts/
+COPY backend/alembic.ini ./
+COPY backend/app/ ./app/
+COPY backend/migrations/ ./migrations/
+COPY backend/scripts/ ./scripts/
+COPY docs/ ./docs/
+COPY .agents/skills/ ./.agents/skills/
 
 # The DSH SDK loads these Cordis files and the QuantLab bridge plugin at runtime.
 # Install the plugin's Node dependencies in the image rather than relying on a
 # developer's local node_modules directory being present in the build context.
-COPY dsh_runtime/ ./dsh_runtime/
+COPY backend/dsh_runtime/ ./dsh_runtime/
 COPY --from=dsh-runtime-deps /app/dsh_runtime/node_modules ./dsh_runtime/node_modules
 
 # Create runtime directories

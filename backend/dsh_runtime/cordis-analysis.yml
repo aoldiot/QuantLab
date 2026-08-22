@@ -23,5 +23,28 @@
 - id: subprocess
   name: '@deepseek-ai/dsh-subprocess-local'
 
+- id: coding-tools
+  name: './src/coding-tools.mjs'
+  config:
+    readablePaths:
+      - 'backend/data/backtests'
+      - 'data/backtests'
+      - 'backend/app/quant'
+      - 'app/quant'
+      - 'docs'
+    writablePaths: []
+    ignoredDirs:
+      - 'node_modules'
+      - '.venv'
+      - 'venv'
+      - '__pycache__'
+      - '.ruff_cache'
+      - '.pytest_cache'
+      - '.git'
+      - '.idea'
+      - '.vscode'
+      - '.sessions'
+      - 'frontend'
+
 - id: quantlab-tools
   name: './src/quantlab-tools.mjs'

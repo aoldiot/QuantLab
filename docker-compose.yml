@@ -36,8 +36,8 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: quantlab-backend
     restart: unless-stopped
     env_file: .env
@@ -49,6 +49,7 @@ services:
       DATA_ROOT: /app/data
       ARTIFACT_ROOT: /app/data/backtests
       CATALOG_PATH: /app/catalog
+      STRATEGY_REPO_PATH: /app
       DSH_BRIDGE_URL: http://127.0.0.1:8000/api
       AUTH_USERNAME: ${AUTH_USERNAME:-admin}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-admin123}

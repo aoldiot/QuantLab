@@ -1,5 +1,5 @@
 # Unified strategy Coding Worker. It handles first implementation, technical repair,
-# verification and smoke tests in one persistent session with the complete repository.
+# verification and smoke tests in one persistent session with scoped project directories.
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
 
@@ -25,6 +25,35 @@
 
 - id: coding-tools
   name: './src/coding-tools.mjs'
+  config:
+    readablePaths:
+      - 'backend/app/strategies'
+      - 'app/strategies'
+      - 'backend/app/quant'
+      - 'app/quant'
+      - 'backend/app/strategy_contract.py'
+      - 'app/strategy_contract.py'
+      - 'backend/app/strategy_base.py'
+      - 'app/strategy_base.py'
+      - 'backend/app/schemas.py'
+      - 'app/schemas.py'
+      - '.agents/skills'
+      - 'docs'
+    # Candidate mutations must go through stage_strategy_candidate and
+    # patch_strategy_candidate so they remain project-scoped and verified.
+    writablePaths: []
+    ignoredDirs:
+      - 'node_modules'
+      - '.venv'
+      - 'venv'
+      - '__pycache__'
+      - '.ruff_cache'
+      - '.pytest_cache'
+      - '.git'
+      - '.idea'
+      - '.vscode'
+      - '.sessions'
+      - 'frontend'
 
 - id: quantlab-tools
   name: './src/quantlab-tools.mjs'

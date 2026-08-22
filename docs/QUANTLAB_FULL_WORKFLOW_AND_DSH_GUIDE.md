@@ -249,7 +249,6 @@ DSH SDK 返回细粒度的扁平事件流，平台将其映射后持久化入库
 | `search_code` | `query`: 搜索关键词<br>`path`: 相对目录<br>`limit`: 最大结果数 | 在项目中进行代码搜索，定位符号或函数调用。 |
 | `list_files` | `path`: 相对目录<br>`contains`: 路径过滤关键词 | 递归列出项目目录下的文件。 |
 | `replace_in_file` | `path`: 文件路径<br>`old`: 旧代码片段<br>`new`: 新代码片段 | 单文件单处精准替换，若 `old` 匹配次数不为 1 则安全拒绝。 |
-| `run_command` | `command`: Shell 命令<br>`timeout_seconds`: 超时时间 | 在工作区执行受控 Shell 命令（如跑特定的 pytest 单测或静态分析）。 |
 
 ---
 

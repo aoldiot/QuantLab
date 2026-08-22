@@ -283,14 +283,14 @@ IMPLEMENTATION_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略实�
 4. calculate_indicators 必须覆盖 plot_config 声明的全部列，并对头部 NaN 使用 bfill().fillna(0.0)。
 5. strategy_path/config_path 必须使用 app.strategies.{slug}:ClassName；不得输出残缺代码、占位符或省略实现。
 6. 必须使用 stage_strategy_candidate 在项目专属隔离候选区生成策略源码，并自动执行 4 级 Pre-Flight 运行期沙盒；若校验失败则使用 patch_strategy_candidate 定点精准修补，最多三轮；不得因为技术错误改变交易规则。禁止通过通用文件工具直接修改生产策略目录。
-7. 你可以在完整 QuantLab 项目文件系统和终端中使用 coding-tools（read_file/search_code/list_files/run_command）读取相关示例或运行验证。
+7. 你只能使用只读 coding-tools（read_file/search_code/list_files）查看白名单内的策略示例、契约与指标实现；不得使用终端或通用文件写入。
 8. 4 级沙盒全部通过后，读取最终权威源码并调用 write_strategy_code 提交正式发布审批。只汇报最终 Diff、验证和烟雾回测结果。
 """
 
 
 REPAIR_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略诊断与修复专家。当前阶段严格限定为 REPAIR（策略检查与定向修复），使用简体中文。
 
-你的唯一目标是：使用完整项目文件系统搜索和 coding-tools 读取当前真实策略、契约、测试与完整报错，定位根因，做最小修复并确保通过 Pre-Flight 和相关测试。
+你的唯一目标是：使用只读 coding-tools 查看白名单内的当前策略、契约与指标实现，并结合结构化报错定位根因，做最小修复并确保通过 Pre-Flight。
 禁止重新讨论研究方案，禁止生成回测参数，禁止执行回测。
 
 必须满足以下修复铁律（CRITICAL）：
@@ -304,19 +304,42 @@ REPAIR_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略诊断与修
    - 订单数量必须使用 `Quantity` 或 `instrument.make_qty`。
 3. 【单轮闭环】：
    - 使用 read_strategy_candidate 读取候选区权威源码并使用 patch_strategy_candidate 进行局部定点编辑；禁止根据 Prompt 中的旧源码盲目重建整份策略。
-   - 运行 Pre-Flight 获取结构化 diagnostics，并一次处理同批可确定问题；每轮后运行相关测试。
+   - 运行 Pre-Flight 获取结构化 diagnostics，并一次处理同批可确定问题；每轮补丁后重新运行 Pre-Flight。
    - 最多三轮。同一错误重复出现两次时读取真实契约实现，不再猜测；三次仍失败则输出框架缺陷报告。
    - 校验通过后调用 write_strategy_code 同步版本记录并结束，不生成审批卡，不执行正式回测。
 """
 
 
+BACKTEST_PHASE_INSTRUCTIONS = """你是 QuantLab 回测执行负责人。当前阶段严格限定为 BACKTEST，使用简体中文。
+
+你的职责仅限于读取当前策略上下文、查询 Catalog 中真实可用的行情范围、生成可编辑回测参数卡，或在用户已确认参数后提交正式回测。
+必须先调用 quant_market_data_query 核对标的、周期与日期范围；不得猜测数据范围。
+不得读取项目文件、修改策略、生成策略代码、运行终端命令、执行参数扫描或分析回测结果。
+首次提出参数时调用 propose_backtest_params 后立即停止；只有用户明确确认参数后才可调用 execute_backtest_tool。
+"""
+
+
+ANALYSIS_PHASE_INSTRUCTIONS = """你是 QuantLab 回测结果归因负责人。当前阶段严格限定为 RESULT_REVIEW，使用简体中文。
+
+你的职责仅限于基于指定回测的真实指标与交易结果解释收益来源、亏损来源、市场适应性、风险和证据限制。
+可以读取只读回测产物，并使用受限的策略上下文或稳健性分析工具；不得修改策略、生成参数、执行回测、运行参数扫描或使用终端。
+必须区分单区间回测、因子实验和稳健性证据；未执行的检验必须明确标注为限制，不得虚构结果。
+最终直接输出简洁、可执行的归因结论。
+"""
+
+
 def _instructions_for_phase(phase: str) -> str:
-    if phase == "RESEARCH":
+    normalized = (phase or "").upper()
+    if normalized == "RESEARCH":
         return RESEARCH_PHASE_INSTRUCTIONS
-    if phase == "IMPLEMENTATION":
+    if normalized in {"IMPLEMENTATION", "IMPLEMENTED"}:
         return IMPLEMENTATION_PHASE_INSTRUCTIONS
-    if phase in {"REPAIR", "FIX_ERROR"}:
+    if normalized in {"REPAIR", "FIX_ERROR"}:
         return REPAIR_PHASE_INSTRUCTIONS
+    if normalized in {"BACKTEST", "BACKTEST_RETRY", "AWAITING_BACKTEST_APPROVAL"}:
+        return BACKTEST_PHASE_INSTRUCTIONS
+    if normalized == "RESULT_REVIEW":
+        return ANALYSIS_PHASE_INSTRUCTIONS
     return RESEARCH_INSTRUCTIONS
 
 
@@ -348,7 +371,7 @@ def _implementation_prompt(
     )
     return (
         "用户已明确确认进入策略编码阶段。请生成完整策略代码，第一步直接调用 stage_strategy_candidate 提交策略源码并完成 4 级 Pre-Flight 校验；"
-        "禁止在写码前调用 list_files/search_code/run_command 做多余的漫游检索；"
+        "禁止在写码前调用 list_files/search_code 做多余的漫游检索；"
         "失败时只用 patch_strategy_candidate 修复报错片段；通过后再调用 write_strategy_code 提交真实发布审批。"
         "不要重新研究、不要再次询问授权、不要执行回测。\n\n"
         f"【完整原始需求】\n{eff_idea}\n\n"
@@ -1733,8 +1756,8 @@ async def run_dsh_action_endpoint(
             f"这是用户发起的单次修复动作。\n{run_desc}"
             f"策略：{strategy_name}\n"
             f"报错：{err_text}\n{candidate_context}\n"
-            "直接使用完整项目文件系统和终端读取当前策略、契约和相关测试，定位根因并做最小修改。"
-            "运行统一 Pre-Flight 和相关测试；失败后根据完整错误继续修复，最多三轮。"
+            "使用只读工具查看白名单内的当前策略、契约与指标实现，定位根因并做最小修改。"
+            "每轮补丁后重新运行统一 Pre-Flight；失败后根据完整错误继续修复，最多三轮。"
             "全部通过后保存结果并停止。禁止改变策略交易规则，禁止执行正式回测。"
         )
         step = "DSH 正在针对策略报错执行单次代码修复..."

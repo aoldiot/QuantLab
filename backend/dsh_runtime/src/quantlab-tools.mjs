@@ -5,6 +5,23 @@ const BRIDGE_URL = (process.env.DSH_BRIDGE_URL || 'http://127.0.0.1:8000/api').r
 const BRIDGE_TOKEN = process.env.DSH_BRIDGE_TOKEN || ''
 const PROJECT_ID = process.env.DSH_PROJECT_ID || ''
 const PHASE = (process.env.DSH_RESEARCH_PHASE || '').toUpperCase()
+const PHASE_ALIASES = {
+  IMPLEMENTED: 'IMPLEMENTATION',
+  BACKTEST_RETRY: 'BACKTEST',
+  AWAITING_IMPLEMENTATION_APPROVAL: 'RESEARCH',
+  AWAITING_BACKTEST_APPROVAL: 'BACKTEST',
+}
+const EFFECTIVE_PHASE = PHASE_ALIASES[PHASE] || PHASE
+const DISPATCH_TOOLS_BY_PHASE = {
+  RESEARCH: [
+    'quant_get_capabilities', 'quant_get_research_context', 'quant_get_strategy_context',
+    'quant_web_research', 'quant_market_data_query', 'quant_factor_analysis', 'quant_run_experiment',
+  ],
+  REPAIR: ['quant_get_strategy_context', 'quant_get_strategy', 'quant_preflight_verify'],
+  FIX_ERROR: ['quant_get_strategy_context', 'quant_get_strategy', 'quant_preflight_verify'],
+  BACKTEST: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy', 'quant_market_data_query'],
+  RESULT_REVIEW: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy', 'quant_robustness_test'],
+}
 
 async function bridge(path, body) {
   const res = await fetch(`${BRIDGE_URL}${path}`, {
@@ -253,10 +270,7 @@ export function apply(ctx) {
       tool_name: {
         type: 'string', required: true,
         enum: [
-          'quant_get_capabilities', 'quant_get_research_context', 'quant_get_strategy_context',
-          'quant_web_research', 'quant_market_data_query', 'quant_factor_analysis',
-          'quant_run_experiment', 'quant_parameter_sweep', 'quant_robustness_test',
-          'quant_get_strategy', 'quant_preflight_verify',
+          ...(DISPATCH_TOOLS_BY_PHASE[EFFECTIVE_PHASE] || []),
         ],
         description: 'Name of the analysis tool to run',
       },
@@ -278,35 +292,25 @@ export function apply(ctx) {
   })
 
   // Phase-aware tool registration gating
-  if (PHASE === 'RESEARCH') {
+  if (EFFECTIVE_PHASE === 'RESEARCH') {
     ctx.tools.register(dispatchToolCall)
-    ctx.tools.register(writeStrategyCodeTool) // for submitting strategy proposal if user explicitly requests
-  } else if (PHASE === 'REPAIR' || PHASE === 'FIX_ERROR') {
+  } else if (EFFECTIVE_PHASE === 'REPAIR' || EFFECTIVE_PHASE === 'FIX_ERROR') {
     ctx.tools.register(readStrategyCandidateTool)
     ctx.tools.register(patchStrategyCandidateTool)
     ctx.tools.register(verifyStrategyFileTool)
     ctx.tools.register(writeStrategyCodeTool)
     ctx.tools.register(dispatchToolCall)
-  } else if (PHASE === 'IMPLEMENTATION') {
+  } else if (EFFECTIVE_PHASE === 'IMPLEMENTATION') {
     ctx.tools.register(stageStrategyCandidateTool)
     ctx.tools.register(readStrategyCandidateTool)
     ctx.tools.register(patchStrategyCandidateTool)
     ctx.tools.register(writeStrategyCodeTool)
     ctx.tools.register(verifyStrategyFileTool)
-  } else if (PHASE === 'BACKTEST') {
-    ctx.tools.register(proposeBacktestParamsTool)
-    ctx.tools.register(executeBacktestTool)
-  } else if (PHASE === 'RESULT_REVIEW') {
+  } else if (EFFECTIVE_PHASE === 'BACKTEST') {
     ctx.tools.register(dispatchToolCall)
-  } else {
-    // Fallback: register all tools if phase is unspecific
     ctx.tools.register(proposeBacktestParamsTool)
-    ctx.tools.register(stageStrategyCandidateTool)
-    ctx.tools.register(readStrategyCandidateTool)
-    ctx.tools.register(patchStrategyCandidateTool)
-    ctx.tools.register(writeStrategyCodeTool)
-    ctx.tools.register(verifyStrategyFileTool)
     ctx.tools.register(executeBacktestTool)
+  } else if (EFFECTIVE_PHASE === 'RESULT_REVIEW') {
     ctx.tools.register(dispatchToolCall)
   }
 }

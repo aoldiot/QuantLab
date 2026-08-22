@@ -4,7 +4,10 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Source lives at ``<repo>/backend/app`` locally but at ``/app/app`` in the
+# backend image.  In the latter layout BACKEND_DIR already is the project root;
+# blindly taking another parent would make the agent workspace ``/``.
+PROJECT_ROOT = BACKEND_DIR.parent if BACKEND_DIR.name == "backend" else BACKEND_DIR
 
 
 class Settings(BaseSettings):

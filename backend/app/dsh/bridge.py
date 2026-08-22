@@ -44,6 +44,14 @@ RESEARCH_DISPATCH_TOOLS = {
     "quant_get_capabilities", "quant_get_research_context", "quant_get_strategy_context",
     "quant_web_research", "quant_market_data_query", "quant_factor_analysis", "quant_run_experiment",
 }
+DISPATCH_TOOLS_BY_PHASE = {
+    "RESEARCH": RESEARCH_DISPATCH_TOOLS,
+    "REPAIR": {"quant_get_strategy_context", "quant_get_strategy", "quant_preflight_verify"},
+    "FIX_ERROR": {"quant_get_strategy_context", "quant_get_strategy", "quant_preflight_verify"},
+    "BACKTEST": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy", "quant_market_data_query"},
+    "BACKTEST_RETRY": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy", "quant_market_data_query"},
+    "RESULT_REVIEW": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy", "quant_robustness_test"},
+}
 _turn_tool_counts: dict[str, int] = {}
 
 _strategy_name_re = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
@@ -655,9 +663,12 @@ async def _exec_dispatch_tool(
     tool_name = (arguments.get("tool_name") or "").strip()
     tool_args = arguments.get("arguments") or {}
     phase = project.research_phase or "RESEARCH"
+    allowed_tools = DISPATCH_TOOLS_BY_PHASE.get(phase)
+    if allowed_tools is None:
+        return {"ok": False, "error": f"当前阶段 {phase} 禁止调用分析工具"}
+    if tool_name not in allowed_tools:
+        return {"ok": False, "error": f"{phase} 阶段不允许调用 {tool_name}"}
     if phase == "RESEARCH":
-        if tool_name not in RESEARCH_DISPATCH_TOOLS:
-            return {"ok": False, "error": f"研究阶段不允许调用 {tool_name}"}
         count = _turn_tool_counts.get(project.id, 0) + 1
         _turn_tool_counts[project.id] = count
         if count > settings.dsh_research_max_tool_calls:
@@ -759,8 +770,9 @@ async def dsh_call(
     if not executor:
         return {"status": "error", "error": f"未知工具：{req.tool}"}
 
-    if req.tool == "verify_strategy_file" and phase == "RESEARCH":
-        return {"status": "error", "error": "研究阶段禁止执行策略验证；请先完成规格并进入 Coding Worker"}
+    coding_phases = {"IMPLEMENTATION", "REPAIR", "FIX_ERROR"}
+    if req.tool in {"verify_strategy_file", "write_strategy_code"} and phase not in coding_phases:
+        return {"status": "error", "error": "当前阶段禁止验证或发布策略；请进入 Coding Worker"}
     if req.tool in {"read_strategy_candidate", "stage_strategy_candidate", "patch_strategy_candidate"} and phase not in {"IMPLEMENTATION", "REPAIR", "FIX_ERROR"}:
         return {"status": "error", "error": "当前阶段不允许读写策略候选区"}
     if req.tool == "execute_backtest_tool" and phase not in {"IMPLEMENTATION", "IMPLEMENTED", "AWAITING_BACKTEST_APPROVAL", "BACKTEST", "BACKTEST_RETRY"}:
