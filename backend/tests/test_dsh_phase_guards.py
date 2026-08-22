@@ -214,6 +214,59 @@ def test_fixed_backtest_action_executes_directly_without_intent_turn(monkeypatch
     assert any(getattr(item, "role", None) == "assistant" for item in added)
 
 
+def test_generate_backtest_params_uses_bound_strategy_and_dedicated_profile(monkeypatch) -> None:
+    project = SimpleNamespace(
+        id="parameter-card",
+        status=ResearchStatus.READY_FOR_BACKTEST,
+        updated_at=None,
+        research_phase="IMPLEMENTATION",
+        strategy_id="strategy-id",
+    )
+    started = {}
+
+    class FakeDb:
+        def add(self, value) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+    async def fake_project(project_id, db):
+        return project
+
+    async def fake_context(project_id, db):
+        return []
+
+    async def fake_create_task(*args, **kwargs):
+        return SimpleNamespace(id="task-1", attempt=0, max_attempts=2)
+
+    async def fake_resolve(project_arg, given_name, db):
+        assert given_name is None
+        return "bound_strategy"
+
+    def fake_start(project_arg, content, **kwargs):
+        started.update(project=project_arg, content=content, **kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(research, "_project", fake_project)
+    monkeypatch.setattr(research, "_recent_intent_context", fake_context)
+    monkeypatch.setattr(research, "_start_dsh_turn", fake_start)
+    monkeypatch.setattr("app.workflow.task_service.create_task", fake_create_task)
+    monkeypatch.setattr(bridge, "_resolve_strategy_name_for_project", fake_resolve)
+
+    result = asyncio.run(research.run_dsh_action_endpoint(
+        project.id,
+        DshActionRequest(action="GENERATE_BACKTEST_PARAMS"),
+        FakeDb(),
+    ))
+
+    assert result["action"] == "GENERATE_BACKTEST_PARAMS"
+    assert result["phase"] == "BACKTEST"
+    assert started["task_profile"] == "GENERATE_BACKTEST_PARAMS"
+    assert "唯一且正确的策略标识符】bound_strategy" in started["content"]
+    assert "只能调用它一次" in started["content"]
+
+
 def test_intent_cordis_is_tool_free() -> None:
     text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-intent.yml").read_text(encoding="utf-8")
     assert "quantlab-tools" not in text

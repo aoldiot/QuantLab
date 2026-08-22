@@ -1,6 +1,7 @@
 import queue
 import subprocess
 import threading
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,33 @@ def test_quantlab_tools_load_without_research_phase():
         text=True,
     )
     assert result.stdout.strip() == "[]"
+
+
+def test_generate_backtest_params_exposes_only_parameter_proposal_tool():
+    runtime = Path(__file__).parents[1] / "dsh_runtime"
+    script = """
+      const plugin = await import('./src/quantlab-tools.mjs')
+      const registered = []
+      plugin.apply({
+        tools: { register(tool) { registered.push(tool.name) } },
+        systemPrompt: { section() {} },
+      })
+      console.log(JSON.stringify(registered))
+    """
+    env = os.environ.copy()
+    env.update({
+        "DSH_RESEARCH_PHASE": "BACKTEST",
+        "DSH_TASK_PROFILE": "GENERATE_BACKTEST_PARAMS",
+    })
+    result = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        cwd=runtime,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == '["propose_backtest_params"]'
 
 
 @pytest.mark.anyio

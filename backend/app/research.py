@@ -611,6 +611,7 @@ def _fast_intent_decision(user_message: str, pending: list[dict[str, Any]]) -> d
 
 _ACTION_INSTRUCTIONS = {
     "WRITE_STRATEGY": "本轮是固定写码动作。直接实现，不重复研究；最多进行一次集中验证，随后提交 write_strategy_code 审批并停止。",
+    "GENERATE_BACKTEST_PARAMS": "本轮只生成回测参数卡。只能调用一次 propose_backtest_params；不得调用任何查询、策略读取、标的列表或执行回测工具。必须逐字使用提示中给出的策略标识符，提交参数卡后立即停止。",
     "RUN_BACKTEST": "本轮是固定回测动作。只读取当前策略上下文并生成参数卡，不调用 quant_market_data_query 或任何标的列表接口，不讨论策略方案，不修改代码，不做结果分析。",
     "FIX_ERROR": "本轮是单次定向修复。只读取指定失败记录和当前策略，完成一次修复与集中验证后提交 write_strategy_code；禁止回测。",
     "ANALYZE_BACKTEST": "本轮只分析指定回测记录。不得修改代码、生成参数或重新回测；直接输出简洁归因结论。",
@@ -1536,7 +1537,7 @@ async def run_dsh_action_endpoint(
         raise HTTPException(409, "当前 DSH 任务仍在执行，请等待完成或先停止任务")
 
     action_run: BacktestRun | None = None
-    if data.action in {"RUN_BACKTEST", "FIX_ERROR"} and not project.strategy_id:
+    if data.action in {"GENERATE_BACKTEST_PARAMS", "RUN_BACKTEST", "FIX_ERROR"} and not project.strategy_id:
         from .dsh.bridge import _resolve_strategy_name_for_project
         resolved_name = await _resolve_strategy_name_for_project(
             project, (data.arguments or {}).get("strategy_name"), db
@@ -1545,7 +1546,7 @@ async def run_dsh_action_endpoint(
         if strat_rec and strat_rec[0]:
             project.strategy_id = strat_rec[0].id
             await db.commit()
-        elif data.action == "RUN_BACKTEST":
+        elif data.action in {"GENERATE_BACKTEST_PARAMS", "RUN_BACKTEST"}:
             raise HTTPException(409, "当前项目还没有可执行策略，请先编写策略")
 
     if data.action == "FIX_ERROR":
@@ -1568,6 +1569,7 @@ async def run_dsh_action_endpoint(
 
     labels = {
         "WRITE_STRATEGY": "编写策略",
+        "GENERATE_BACKTEST_PARAMS": "生成回测参数",
         "RUN_BACKTEST": "执行回测",
         "FIX_ERROR": "修复报错",
         "ANALYZE_BACKTEST": "回测分析",
@@ -1593,6 +1595,7 @@ async def run_dsh_action_endpoint(
     worker_by_action = {
         "WRITE_STRATEGY": WorkerType.CODING,
         "FIX_ERROR": WorkerType.CODING,
+        "GENERATE_BACKTEST_PARAMS": WorkerType.BACKTEST,
         "RUN_BACKTEST": WorkerType.BACKTEST,
         "ANALYZE_BACKTEST": WorkerType.ANALYSIS,
     }
@@ -1716,6 +1719,23 @@ async def run_dsh_action_endpoint(
             original_idea=eff_idea,
         )
         step = "DSH 正在直接编写策略并进行一次集中验证..."
+    elif data.action == "GENERATE_BACKTEST_PARAMS":
+        from .dsh.bridge import _resolve_strategy_name_for_project
+
+        phase = "BACKTEST"
+        strategy_name = await _resolve_strategy_name_for_project(
+            project, (data.arguments or {}).get("strategy_name"), db
+        )
+        prompt = (
+            "这是用户点击的固定生成回测参数动作。\n"
+            f"【唯一且正确的策略标识符】{strategy_name}\n"
+            "本轮只提供 propose_backtest_params，必须且只能调用它一次。"
+            "strategy_name 必须逐字填写上面的唯一策略标识符。"
+            "不得查询策略、标的、市场数据或项目上下文；不得调用其他工具；不得执行回测。"
+            "使用可编辑默认值 BTCUSDT、1h、BINANCE、um、CONSERVATIVE、10000、1 倍杠杆，"
+            "并选用合理的历史起止日期。提交参数卡后立即停止并等待用户确认。"
+        )
+        step = "DSH 正在生成回测参数卡..."
     elif data.action == "RUN_BACKTEST":
         phase = "BACKTEST"
         prompt = (

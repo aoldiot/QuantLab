@@ -192,7 +192,7 @@ class ResearchMessageCreate(BaseModel):
 
 
 class DshActionRequest(BaseModel):
-    action: Literal["WRITE_STRATEGY", "RUN_BACKTEST", "FIX_ERROR", "ANALYZE_BACKTEST"]
+    action: Literal["WRITE_STRATEGY", "GENERATE_BACKTEST_PARAMS", "RUN_BACKTEST", "FIX_ERROR", "ANALYZE_BACKTEST"]
     content: str = Field(default="", max_length=4000)
     run_id: str | None = Field(default=None, max_length=64)
     arguments: dict[str, Any] = Field(default_factory=dict)

@@ -2131,6 +2131,7 @@ export default function Research(){
     if(!project||busy)return
     const labels:Record<DshAction,string>={
       WRITE_STRATEGY:'编写策略',
+      GENERATE_BACKTEST_PARAMS:'生成回测参数',
       RUN_BACKTEST:'执行回测',
       FIX_ERROR:'修复报错',
       ANALYZE_BACKTEST:'回测分析',
@@ -2553,8 +2554,8 @@ export default function Research(){
   async function handleGenerateBacktestParams(){
     setGeneratingBacktestParams(true)
     try{
-      await runFixedAction('RUN_BACKTEST',{
-        content:'生产回测参数',
+      await runFixedAction('GENERATE_BACKTEST_PARAMS',{
+        content:'生成回测参数',
       })
     }finally{
       setGeneratingBacktestParams(false)
@@ -3076,7 +3077,7 @@ export default function Research(){
                     onClick={handleGenerateBacktestParams}
                     title={project.strategy_id?'根据当前策略生成可编辑回测参数，不查询标的列表':'请先完成策略编写'}
                   >
-                    {generatingBacktestParams?<Loader2 size={13} className="spin"/>:<Sliders size={13}/>} 生产回测参数
+                    {generatingBacktestParams?<Loader2 size={13} className="spin"/>:<Sliders size={13}/>} 生成回测参数
                   </button>
                   <button
                     type="button"

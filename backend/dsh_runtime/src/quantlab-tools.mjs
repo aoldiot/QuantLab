@@ -5,6 +5,7 @@ const BRIDGE_URL = (process.env.DSH_BRIDGE_URL || 'http://127.0.0.1:8000/api').r
 const BRIDGE_TOKEN = process.env.DSH_BRIDGE_TOKEN || ''
 const PROJECT_ID = process.env.DSH_PROJECT_ID || ''
 const PHASE = (process.env.DSH_RESEARCH_PHASE || '').toUpperCase()
+const TASK_PROFILE = (process.env.DSH_TASK_PROFILE || '').toUpperCase()
 const PHASE_ALIASES = {
   IMPLEMENTED: 'IMPLEMENTATION',
   BACKTEST_RETRY: 'BACKTEST',
@@ -309,9 +310,14 @@ export function apply(ctx) {
     ctx.tools.register(writeStrategyCodeTool)
     ctx.tools.register(verifyStrategyFileTool)
   } else if (EFFECTIVE_PHASE === 'BACKTEST') {
-    ctx.tools.register(dispatchToolCall)
     ctx.tools.register(proposeBacktestParamsTool)
-    ctx.tools.register(executeBacktestTool)
+    // Parameter generation is intentionally isolated: the model receives no
+    // strategy, market, or generic dispatch tools, so it cannot invent a
+    // strategy name or perform unrelated reads before presenting the card.
+    if (TASK_PROFILE !== 'GENERATE_BACKTEST_PARAMS') {
+      ctx.tools.register(dispatchToolCall)
+      ctx.tools.register(executeBacktestTool)
+    }
   } else if (EFFECTIVE_PHASE === 'RESULT_REVIEW') {
     ctx.tools.register(dispatchToolCall)
   }

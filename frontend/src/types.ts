@@ -37,7 +37,7 @@ export interface ResearchThinkingStatus{status:'IDLE'|'THINKING'|'WAITING_APPROV
 export interface DshLiveEvent{seq:number;turn_id:string;received_at:string;type:string;kind?:string;chunk_type?:string;text?:string;reasoning?:string;stream_key?:string;turn?:number;step?:number|Record<string,any>;tool?:{name?:string;arguments?:any;arguments_raw?:string;input?:Record<string,any>;args?:Record<string,any>};result?:any;call_id?:string;status?:string;reason?:string}
 export interface DshLiveEventsResponse{events:DshLiveEvent[];status:{project_id:string;status:string;stage:string;progress:number;error:string;updated_at:string}}
 export interface DshApproval{request_id:string;project_id:string;tool:string;proposal_key?:string;arguments:Record<string,any>;status:'pending'|'approved'|'declined';feedback:string;created_at:string;summary?:string;message?:string}
-export type DshAction='WRITE_STRATEGY'|'RUN_BACKTEST'|'FIX_ERROR'|'ANALYZE_BACKTEST'
+export type DshAction='WRITE_STRATEGY'|'GENERATE_BACKTEST_PARAMS'|'RUN_BACKTEST'|'FIX_ERROR'|'ANALYZE_BACKTEST'
 export interface DshActionRequest{action:DshAction;content?:string;run_id?:string;arguments?:Record<string,any>}
 export interface BacktestCreateParams{name:string;strategy_version_id:string;strategy_parameters:Record<string,unknown>;venue:string;market_type:'spot'|'um';symbols:string[];timeframes:string[];start_date:string;end_date:string;initial_balance:number;leverage:number;execution_model:string;catalog_path?:string|null;chunk_size?:number|null;ignore_missing_data?:boolean;check_data_integrity?:boolean}
 
