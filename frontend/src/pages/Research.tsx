@@ -2136,11 +2136,17 @@ export default function Research(){
       FIX_ERROR:'修复报错',
       ANALYZE_BACKTEST:'回测分析',
     }
+    // The API validates fixed-action content at 4,000 characters. Backtest
+    // error logs can be much larger, so preserve a useful prefix and keep the
+    // full diagnostic payload out of the user-message field.
+    const actionContent=(options.content||labels[action]).length>4000
+      ? `${(options.content||labels[action]).slice(0,3975)}\n（报错内容过长，已截断）`
+      : (options.content||labels[action])
     const tempId=generateUUID()
     const optimisticMsg:ResearchMessage={
       id:tempId,
       role:'user',
-      content:options.content||labels[action],
+      content:actionContent,
       message_type:'message',
       metadata:{is_dsh_run:true,event_type:'fixed_action',action},
       created_at:new Date().toISOString(),
@@ -2153,7 +2159,7 @@ export default function Research(){
     autoScrollRef.current=true
     setTimeout(()=>scrollToBottom(true),30)
     try{
-      await api.runDshAction(project.id,{action,...options})
+      await api.runDshAction(project.id,{action,...options,content:actionContent})
       const[m,r,fresh,wLog,tStatus,dshP,liveEvents]=await Promise.all([
         api.researchMessages(project.id),
         api.researchRuns(project.id),
