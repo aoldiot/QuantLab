@@ -1712,6 +1712,10 @@ body:has(.research-page) {
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }
+
+  .research-page .live-status-spinner {
+    animation: live-status-pulse 1.6s ease-in-out infinite !important;
+  }
 }
 
 @media (max-width: 900px) {
@@ -5271,6 +5275,27 @@ body:has(.research-page) {
   background: rgba(56, 189, 248, 0.15);
   color: #7dd3fc;
   border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.live-status-spinner {
+  flex: 0 0 auto;
+  transform-origin: center;
+  animation: live-status-spin 1.1s linear infinite;
+}
+
+@keyframes live-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes live-status-pulse {
+  0%, 100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .live-stage-desc.thinking {

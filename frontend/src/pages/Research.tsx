@@ -2994,7 +2994,7 @@ export default function Research(){
                           <div className="live-title-group">
                             <b>DeepSeek Harness 量化主控正在执行研究任务</b>
                             <span className="live-thinking-state-badge">
-                              <Loader2 size={11} className="spin" />
+                              <Loader2 size={11} className="live-status-spinner" aria-hidden="true" />
                               {thinkingStatus?.status === 'TOOL_RUNNING'
                                 ? '工具调度中'
                                 : thinkingStatus?.status === 'GENERATING'
