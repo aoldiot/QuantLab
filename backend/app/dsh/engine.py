@@ -24,6 +24,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..config import settings
@@ -1074,11 +1075,16 @@ async def run_llm_connectivity_test(
         api_key=key,
         cordis=str(core_path),
         env={"DSH_TOOLS_PLUGIN_PATH": str(_plugin_path())},
-        request_timeout_seconds=120,
+        # Initialization requests should return immediately. A short SDK
+        # timeout surfaces Cordis/plugin boot errors instead of masking them as
+        # a 60-second upstream-model timeout. Model completion is observed from
+        # session events below, independently of this request timeout.
+        request_timeout_seconds=15,
     )
 
+    session_id = f"dsh_connectivity_test_{uuid.uuid4().hex}"
+
     def _run() -> Any:
-        session_id = f"dsh_connectivity_test_{uuid.uuid4().hex}"
         return harness.run(prompt, session_id=session_id)
 
     def _close() -> None:
@@ -1089,8 +1095,63 @@ async def run_llm_connectivity_test(
 
     logger.info("开始 DSH SDK 连通性测试 (model=%s, base_url=%s, prompt=%r)...", mdl, url, prompt)
     t0 = time.monotonic()
+    run_task: asyncio.Task[Any] | None = None
+    subscription = None
     try:
-        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=60.0)
+        # SDK 0.1.0rc6 can leave ``session/prompt`` waiting forever even after
+        # the runtime has emitted a complete turn. Observe the same session's
+        # wire notifications independently and accept its terminal turn/end.
+        # This also remains compatible with a fixed SDK, whose run task simply
+        # wins the race and supplies the normal RunResult.
+        client = getattr(harness, "client", None)
+        subscribe = getattr(client, "subscribe_session_notifications", None)
+        if callable(subscribe):
+            await asyncio.to_thread(harness.start)
+            subscription = subscribe(session_id)
+            run_task = asyncio.create_task(asyncio.to_thread(_run))
+            observed_notifications: list[Any] = []
+            observed_events: list[dict[str, Any]] = []
+            deadline = time.monotonic() + 60.0
+
+            while True:
+                notification_task = asyncio.create_task(asyncio.to_thread(subscription.next))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    notification_task.cancel()
+                    raise asyncio.TimeoutError
+                done, _ = await asyncio.wait(
+                    {run_task, notification_task},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    notification_task.cancel()
+                    raise asyncio.TimeoutError
+                if run_task in done:
+                    notification_task.cancel()
+                    result = run_task.result()
+                    break
+
+                notification = notification_task.result()
+                observed_notifications.append(notification)
+                payload = getattr(notification, "payload", None)
+                event = payload.get("event") if isinstance(payload, dict) else None
+                if (
+                    getattr(notification, "method", None) == "session.event"
+                    and isinstance(payload, dict)
+                    and payload.get("sessionId") == session_id
+                    and isinstance(event, dict)
+                ):
+                    observed_events.append(event)
+                    if event.get("type") == "turn/end":
+                        result = SimpleNamespace(
+                            final_response=_connectivity_final_response(observed_events),
+                            finish_reason=_connectivity_finish_reason(observed_events),
+                            notifications=observed_notifications,
+                        )
+                        break
+        else:
+            result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=60.0)
         duration = time.monotonic() - t0
         logger.info("DSH SDK 连通性测试完成，耗时 %.2fs", duration)
     except asyncio.TimeoutError:
@@ -1101,6 +1162,13 @@ async def run_llm_connectivity_test(
         return False, f"DSH SDK 运行失败: {exc}"
     finally:
         await asyncio.to_thread(_close)
+        if subscription is not None:
+            subscription.close()
+        if run_task is not None and not run_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(run_task), timeout=2.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("DSH 连通性测试收尾时运行线程未正常返回: %s", exc)
 
     final = (getattr(result, "final_response", "") or "").strip()
     if not final:
@@ -1109,6 +1177,36 @@ async def run_llm_connectivity_test(
             return False, f"DSH SDK 运行失败: {failure}"
         return False, "DSH 模型未返回任何文本回复"
     return True, final[:500]
+
+
+def _connectivity_final_response(events: list[dict[str, Any]]) -> str:
+    """Extract the last committed assistant text from observed SDK events."""
+    for event in reversed(events):
+        if event.get("type") != "assistant/message":
+            continue
+        data = event.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        return "".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return ""
+
+
+def _connectivity_finish_reason(events: list[dict[str, Any]]) -> str | None:
+    """Extract the terminal reason from the last observed turn/end event."""
+    for event in reversed(events):
+        if event.get("type") != "turn/end":
+            continue
+        data = event.get("data")
+        reason = data.get("reason") if isinstance(data, dict) else None
+        kind = reason.get("kind") if isinstance(reason, dict) else None
+        return kind if isinstance(kind, str) else None
+    return None
 
 
 def _connectivity_failure_message(result: Any) -> str:

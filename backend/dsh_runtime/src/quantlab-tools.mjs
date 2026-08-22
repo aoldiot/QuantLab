@@ -22,6 +22,7 @@ const DISPATCH_TOOLS_BY_PHASE = {
   BACKTEST: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy', 'quant_market_data_query'],
   RESULT_REVIEW: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy', 'quant_robustness_test'],
 }
+const ALL_DISPATCH_TOOLS = [...new Set(Object.values(DISPATCH_TOOLS_BY_PHASE).flat())]
 
 async function bridge(path, body) {
   const res = await fetch(`${BRIDGE_URL}${path}`, {
@@ -269,9 +270,10 @@ export function apply(ctx) {
     parameters: {
       tool_name: {
         type: 'string', required: true,
-        enum: [
-          ...(DISPATCH_TOOLS_BY_PHASE[EFFECTIVE_PHASE] || []),
-        ],
+        // The connectivity probe intentionally has no business phase. Tool
+        // definitions are still compiled before phase-gated registration, so
+        // an empty enum would abort the complete Cordis plugin tree at boot.
+        enum: DISPATCH_TOOLS_BY_PHASE[EFFECTIVE_PHASE] || ALL_DISPATCH_TOOLS,
         description: 'Name of the analysis tool to run',
       },
       arguments: { type: 'object', additionalProperties: true, required: true, description: 'Arguments for the named tool, e.g. {"symbol":"BTCUSDT","timeframe":"1h","factor_name":"ema_spread"}' },
