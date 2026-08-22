@@ -48,8 +48,8 @@ DISPATCH_TOOLS_BY_PHASE = {
     "RESEARCH": RESEARCH_DISPATCH_TOOLS,
     "REPAIR": {"quant_get_strategy_context", "quant_get_strategy", "quant_preflight_verify"},
     "FIX_ERROR": {"quant_get_strategy_context", "quant_get_strategy", "quant_preflight_verify"},
-    "BACKTEST": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy", "quant_market_data_query"},
-    "BACKTEST_RETRY": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy", "quant_market_data_query"},
+    "BACKTEST": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy"},
+    "BACKTEST_RETRY": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy"},
     "RESULT_REVIEW": {"quant_get_research_context", "quant_get_strategy_context", "quant_get_strategy", "quant_robustness_test"},
 }
 _turn_tool_counts: dict[str, int] = {}

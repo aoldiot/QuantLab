@@ -1963,6 +1963,7 @@ export default function Research(){
   const[input,setInput]=useState('')
   const[busy,setBusy]=useState(false)
   const[actionBusy,setActionBusy]=useState<DshAction|null>(null)
+  const[generatingBacktestParams,setGeneratingBacktestParams]=useState(false)
   const[cancelBusy,setCancelBusy]=useState(false)
   const[error,setError]=useState('')
   const[creating,setCreating]=useState(false)
@@ -2549,6 +2550,17 @@ export default function Research(){
     void runFixedAction(action,{run_id:latestCompletedRun?.id})
   }
 
+  async function handleGenerateBacktestParams(){
+    setGeneratingBacktestParams(true)
+    try{
+      await runFixedAction('RUN_BACKTEST',{
+        content:'生产回测参数',
+      })
+    }finally{
+      setGeneratingBacktestParams(false)
+    }
+  }
+
   // Compute grouped turns for Hermes thinking & tool execution bundling
   const turns = useMemo(
     () => groupMessagesIntoTurns(messages, runs, writingLog),
@@ -3061,10 +3073,19 @@ export default function Research(){
                     type="button"
                     className="quick-chip"
                     disabled={busy||!project.strategy_id||project.status==='ARCHIVED'}
+                    onClick={handleGenerateBacktestParams}
+                    title={project.strategy_id?'根据当前策略生成可编辑回测参数，不查询标的列表':'请先完成策略编写'}
+                  >
+                    {generatingBacktestParams?<Loader2 size={13} className="spin"/>:<Sliders size={13}/>} 生产回测参数
+                  </button>
+                  <button
+                    type="button"
+                    className="quick-chip"
+                    disabled={busy||!project.strategy_id||project.status==='ARCHIVED'}
                     onClick={()=>handleQuickAction('RUN_BACKTEST')}
                     title={project.strategy_id?'配置确认后直接生成回测审批卡':'请先完成策略编写'}
                   >
-                    {actionBusy==='RUN_BACKTEST'?<Loader2 size={13} className="spin"/>:<Play size={13}/>} 执行回测
+                    {actionBusy==='RUN_BACKTEST'&&!generatingBacktestParams?<Loader2 size={13} className="spin"/>:<Play size={13}/>} 执行回测
                   </button>
                   <button
                     type="button"

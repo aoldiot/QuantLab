@@ -296,7 +296,7 @@ def test_coding_worker_has_read_only_project_tools() -> None:
 def test_backtest_and_analysis_have_dedicated_instructions() -> None:
     backtest = _instructions_for_phase("BACKTEST_RETRY")
     analysis = _instructions_for_phase("RESULT_REVIEW")
-    assert "quant_market_data_query" in backtest
+    assert "禁止调用 quant_market_data_query" in backtest
     assert "不得读取项目文件" in backtest
     assert "回测结果归因负责人" in analysis
     assert "不得修改策略" in analysis
@@ -346,9 +346,14 @@ def test_dispatch_tools_are_allowlisted_per_phase(monkeypatch) -> None:
 
     async def scenario():
         backtest = SimpleNamespace(id="backtest-project", research_phase="BACKTEST")
-        allowed = await bridge._exec_dispatch_tool(
+        denied_symbol_lookup = await bridge._exec_dispatch_tool(
             backtest,
             {"tool_name": "quant_market_data_query", "arguments": {}},
+            None,
+        )
+        allowed = await bridge._exec_dispatch_tool(
+            backtest,
+            {"tool_name": "quant_get_strategy_context", "arguments": {}},
             None,
         )
         denied = await bridge._exec_dispatch_tool(
@@ -362,12 +367,13 @@ def test_dispatch_tools_are_allowlisted_per_phase(monkeypatch) -> None:
             {"tool_name": "quant_market_data_query", "arguments": {}},
             None,
         )
+        assert denied_symbol_lookup["ok"] is False
         assert allowed["ok"] is True
         assert denied["ok"] is False
         assert fail_closed["ok"] is False
 
     asyncio.run(scenario())
-    assert calls == ["quant_market_data_query"]
+    assert calls == ["quant_get_strategy_context"]
 
 
 def test_empty_final_response_gets_one_synthesis_retry(monkeypatch) -> None:

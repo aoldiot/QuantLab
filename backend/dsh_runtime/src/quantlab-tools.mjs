@@ -19,7 +19,7 @@ const DISPATCH_TOOLS_BY_PHASE = {
   ],
   REPAIR: ['quant_get_strategy_context', 'quant_get_strategy', 'quant_preflight_verify'],
   FIX_ERROR: ['quant_get_strategy_context', 'quant_get_strategy', 'quant_preflight_verify'],
-  BACKTEST: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy', 'quant_market_data_query'],
+  BACKTEST: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy'],
   RESULT_REVIEW: ['quant_get_research_context', 'quant_get_strategy_context', 'quant_get_strategy', 'quant_robustness_test'],
 }
 const ALL_DISPATCH_TOOLS = [...new Set(Object.values(DISPATCH_TOOLS_BY_PHASE).flat())]

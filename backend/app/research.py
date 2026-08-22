@@ -213,9 +213,9 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
    - 【策略代码生成与规范】：必须由 DeepSeek Harness (DSH) Agent 生成完整策略代码，并通过 `write_strategy_code` 工具写入策略文件且确保通过 4 级 Pre-Flight 运行期沙盒校验。
    - 代码编写完成后，向用户汇报策略编写完成情况与 4 级验证摘要，等待用户进一步指令。在用户未明确说明要回测之前，严禁擅自生成回测方案。
 
-4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测，且必须先查验 Catalog 真实数据）：
+4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测）：
    - 【严格限制生成时机】：只有当用户在对话中【明确提出要进行回测】（例如明确表达“进行回测”、“回测一下”、“运行回测”等意图）时，你才可以生成回测参数方案。
-   - 【必须先查验 Catalog 真实可用数据】：在生成回测方案前，你必须调用工具 `quant_market_data_query`（通过 `dispatch_tool_call` 或直接调用）检查本地 Catalog 中已存在的交易标的、K线周期与历史起止时间，**严禁臆测本地不存在的远期时间区间**（否则会导致回测 0 根 Bar 空转）！
+   - 【禁止查询标的列表】：生成回测参数时不得调用 `quant_market_data_query` 或任何标的列表接口。优先复用当前项目、策略 Manifest 或最近回测中的标的与周期；均不存在时使用可编辑默认值 `BTCUSDT`、`1h`，交由用户在参数卡中确认。
    - 在用户未明确要求回测之前（如策略讨论、代码编写完成阶段），严禁擅自生成回测参数方案，更严禁直接调用 `execute_backtest_tool` 执行回测！
    - 当用户要求回测时，根据策略 Manifest 规范与可用行情数据提出合理的回测参数，必须调用 `propose_backtest_params` 生成可编辑的参数方案卡片，然后停止并等待用户确认。只有该工具成功返回后才能声称“卡片已生成”。如果工具不可用，才可在正文末尾输出如下格式的 `backtest_params` 机器块作为兼容回退。此阶段不要调用 `execute_backtest_tool`：
 
@@ -312,8 +312,8 @@ REPAIR_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略诊断与修
 
 BACKTEST_PHASE_INSTRUCTIONS = """你是 QuantLab 回测执行负责人。当前阶段严格限定为 BACKTEST，使用简体中文。
 
-你的职责仅限于读取当前策略上下文、查询 Catalog 中真实可用的行情范围、生成可编辑回测参数卡，或在用户已确认参数后提交正式回测。
-必须先调用 quant_market_data_query 核对标的、周期与日期范围；不得猜测数据范围。
+你的职责仅限于读取当前策略上下文、生成可编辑回测参数卡，或在用户已确认参数后提交正式回测。
+生成参数时禁止调用 quant_market_data_query 或任何标的列表接口。优先复用项目上下文、策略 Manifest 或最近回测参数；没有既有值时使用可编辑默认值 BTCUSDT、1h，并明确等待用户确认。
 不得读取项目文件、修改策略、生成策略代码、运行终端命令、执行参数扫描或分析回测结果。
 首次提出参数时调用 propose_backtest_params 后立即停止；只有用户明确确认参数后才可调用 execute_backtest_tool。
 """
@@ -611,7 +611,7 @@ def _fast_intent_decision(user_message: str, pending: list[dict[str, Any]]) -> d
 
 _ACTION_INSTRUCTIONS = {
     "WRITE_STRATEGY": "本轮是固定写码动作。直接实现，不重复研究；最多进行一次集中验证，随后提交 write_strategy_code 审批并停止。",
-    "RUN_BACKTEST": "本轮是固定回测动作。只补齐回测参数并生成参数卡，不讨论策略方案，不修改代码，不做结果分析。",
+    "RUN_BACKTEST": "本轮是固定回测动作。只读取当前策略上下文并生成参数卡，不调用 quant_market_data_query 或任何标的列表接口，不讨论策略方案，不修改代码，不做结果分析。",
     "FIX_ERROR": "本轮是单次定向修复。只读取指定失败记录和当前策略，完成一次修复与集中验证后提交 write_strategy_code；禁止回测。",
     "ANALYZE_BACKTEST": "本轮只分析指定回测记录。不得修改代码、生成参数或重新回测；直接输出简洁归因结论。",
 }
@@ -1719,8 +1719,10 @@ async def run_dsh_action_endpoint(
     elif data.action == "RUN_BACKTEST":
         phase = "BACKTEST"
         prompt = (
-            "这是用户点击的固定回测动作。读取当前策略 Manifest 与本地 Catalog，"
-            "只调用必要工具生成一张可编辑的回测参数卡，然后立即停止并等待用户确认。"
+            "这是用户点击的固定回测参数生成动作。读取当前策略 Manifest 与已有项目上下文，"
+            "禁止调用 quant_market_data_query 或任何标的列表接口。优先复用当前项目或最近回测中的"
+            "标的、周期与日期；没有既有值时使用 BTCUSDT、1h 与保守日期默认值。"
+            "只生成一张可编辑的回测参数卡，然后立即停止并等待用户确认。"
             "不要重新讨论策略、不要修改代码、不要执行回测。"
         )
         step = "DSH 正在准备最小回测参数卡..."
