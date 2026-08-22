@@ -151,3 +151,59 @@ def test_fixed_funding_is_directional_and_uses_frozen_end_time():
 
     assert settlements == 2
     assert cost == -0.01
+
+
+def test_catalog_overlapping_range_write_replacement(tmp_path):
+    instrument = make_instrument(BINANCE_INFO, "um")
+    bar_type = BarType.from_str(f"{instrument.id}-1-HOUR-LAST-EXTERNAL")
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([instrument])
+
+    # Initial partial write (2 bars)
+    bars_partial = [
+        Bar.from_dict({
+            "bar_type": str(bar_type),
+            "open": "100.0",
+            "high": "101.0",
+            "low": "99.0",
+            "close": "100.0",
+            "volume": "1.000",
+            "ts_event": (i + 1) * 3600 * 1_000_000_000 - 1_000_000,
+            "ts_init": (i + 1) * 3600 * 1_000_000_000 - 1_000_000,
+        })
+        for i in range(2)
+    ]
+    catalog.write_data(bars_partial)
+
+    # Subsequent full write (24 bars for the day) overlapping with partial
+    bars_full = [
+        Bar.from_dict({
+            "bar_type": str(bar_type),
+            "open": "100.0",
+            "high": "101.0",
+            "low": "99.0",
+            "close": "100.0",
+            "volume": "1.000",
+            "ts_event": (i + 1) * 3600 * 1_000_000_000 - 1_000_000,
+            "ts_init": (i + 1) * 3600 * 1_000_000_000 - 1_000_000,
+        })
+        for i in range(24)
+    ]
+
+    try:
+        catalog.write_data(bars_full)
+    except Exception as exc:
+        if "non-disjoint intervals" in str(exc):
+            catalog.delete_data_range(
+                type(bars_full[0]),
+                identifier=str(bar_type),
+                start=bars_full[0].ts_init,
+                end=bars_full[-1].ts_init,
+            )
+            catalog.write_data(bars_full)
+
+    start_ns, end_ns = date_bounds(date(1970, 1, 1), date(1970, 1, 1))
+    coverage = query_coverage(catalog, Bar, str(bar_type), start_ns, end_ns, "1h")
+    assert coverage.complete is True
+    assert coverage.actual_count == 24
+

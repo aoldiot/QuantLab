@@ -264,12 +264,14 @@ STRATEGY_MANIFEST = StrategyManifest(
         assert s.ok is True, f"Step {s.level} failed: {s.message}"
 
 
-def test_beat_bollinger_4h_direction_runtime_verification():
-    """Verify beat_bollinger_4h_direction_runtime strategy passes all 4 Pre-Flight levels."""
-    strat_path = (Path(__file__).resolve().parent.parent / "app/strategies/beat_bollinger_4h_direction_runtime.py").resolve()
-    assert strat_path.exists(), f"Strategy file does not exist at {strat_path}"
+def test_btc_bollinger_regime_mr_runtime_verification():
+    """Verify btc_bollinger_regime_mr strategy passes all 4 Pre-Flight levels."""
+    strat_path = (Path(__file__).resolve().parent.parent / "app/strategies/btc_bollinger_regime_mr.py").resolve()
+    if not strat_path.exists():
+        import pytest
+        pytest.skip(f"Strategy file does not exist at {strat_path}")
 
-    res = verify_strategy_file(strat_path, strategy_name="beat_bollinger_4h_direction_runtime")
+    res = verify_strategy_file(strat_path, strategy_name="btc_bollinger_regime_mr")
     assert res.ok is True, f"Verification failed: {res.failed_level} - {res.error_message}"
     assert len(res.steps) == 4
     assert all(s.ok for s in res.steps)

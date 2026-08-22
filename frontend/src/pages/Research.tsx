@@ -72,12 +72,14 @@ function BacktestParamsModal({
   onClose,
   initialParams,
   project,
+  currentStrategyName,
   onConfirmAndRun,
 }: {
   isOpen: boolean
   onClose: () => void
   initialParams: Record<string, any>
   project: ResearchProject
+  currentStrategyName?: string
   onConfirmAndRun: (updatedParams: Record<string, any>) => void
 }) {
   const navigate = useNavigate()
@@ -105,7 +107,7 @@ function BacktestParamsModal({
 
   useEffect(() => {
     if (!isOpen) return
-    const sName = initialParams.strategy_name || 'strategy'
+    const sName = currentStrategyName || initialParams.strategy_name || 'strategy'
     setStrategyName(sName)
     const rawSymbols = Array.isArray(initialParams.symbols)
       ? initialParams.symbols
@@ -841,9 +843,14 @@ function groupMessagesIntoTurns(
     }
 
     if (msg.role === 'assistant') {
-      if (msg.metadata?.event_type === 'approval_execution' && msg.metadata?.tool === 'execute_backtest_tool') {
-        const runIdFromContent = msg.content.match(/"run_id"\s*:\s*"([^"]+)"/)?.[1]
-        const approvedRunId = msg.metadata?.run_id || msg.metadata?.result?.run_id || runIdFromContent
+      const isBacktestApproval = msg.metadata?.event_type === 'approval_execution' && msg.metadata?.tool === 'execute_backtest_tool'
+      const isBacktestFixedAction = (msg.metadata?.event_type === 'fixed_action_executed' || msg.metadata?.event_type === 'fixed_action') && (msg.metadata?.action === 'RUN_BACKTEST' || msg.metadata?.tool === 'execute_backtest_tool')
+      const runIdMatch = msg.content.match(/"run_id"\s*:\s*"([^"]+)"/) || msg.content.match(/回测任务(?:：|:|`|\s)*([a-f0-9\-]{36})/i)
+      const hasBacktestMeta = Boolean(msg.metadata?.run_id || (msg.metadata?.result as any)?.run_id)
+      const isBacktestMsg = isBacktestApproval || isBacktestFixedAction || hasBacktestMeta || Boolean(runIdMatch)
+
+      if (isBacktestMsg) {
+        const approvedRunId = msg.metadata?.run_id || (msg.metadata?.result as any)?.run_id || runIdMatch?.[1]
         const approvedRun = approvedRunId ? runs.find(run => run.id === approvedRunId) : null
         if (approvedRun && !currentTurn.processItems.some(item => item.runForCall?.id === approvedRun.id)) {
           currentTurn.processItems.push({
@@ -852,15 +859,65 @@ function groupMessagesIntoTurns(
             toolName: 'execute_backtest_tool',
             args: msg.metadata?.arguments || approvedRun.config || {},
             result: {
-              ok: msg.metadata?.ok !== false,
+              ok: msg.metadata?.ok !== false && approvedRun.status !== 'FAILED',
               run_id: approvedRun.id,
               metrics: approvedRun.metrics,
+              status: approvedRun.status,
             },
             isSuccess: msg.metadata?.ok !== false && approvedRun.status !== 'FAILED',
+            isCallRunning: ['QUEUED', 'RUNNING', 'ANALYZING'].includes(approvedRun.status),
             runForCall: approvedRun,
             isActionResult: true,
           })
+        } else if (!approvedRun && msg.metadata?.ok === false) {
+          const errorMatch = msg.content.match(/"error(?:_message)?"\s*:\s*"([^"]+)"/)
+          const errorMsg = errorMatch?.[1] || (msg.metadata?.result as any)?.error || (msg.metadata?.result as any)?.error_message || msg.content
+          currentTurn.processItems.push({
+            id: `${msg.id}-approved-backtest-failed`,
+            type: 'tool',
+            toolName: 'execute_backtest_tool',
+            args: msg.metadata?.arguments || {},
+            result: {
+              ok: false,
+              error: errorMsg,
+              error_message: errorMsg,
+              strategy_name: msg.metadata?.arguments?.strategy_name,
+            },
+            isSuccess: false,
+            isActionResult: true,
+          })
         }
+      } else if (msg.metadata?.event_type === 'approval_execution' && (msg.metadata?.tool === 'write_strategy_code' || msg.metadata?.tool === 'write_strategy_with_claude' || msg.metadata?.tool === 'quant_save_strategy_code')) {
+        let parsedResult: any = msg.metadata?.result
+        if (!parsedResult) {
+          const jsonMatch = msg.content.match(/```json\s*([\s\S]*?)\s*```/)
+          if (jsonMatch) {
+            try {
+              parsedResult = JSON.parse(jsonMatch[1])
+            } catch {}
+          }
+        }
+        const isOk = msg.metadata?.ok !== false && parsedResult?.ok !== false
+        const stratName = parsedResult?.strategy_name || msg.metadata?.arguments?.strategy_name || ''
+        const errorMsg = parsedResult?.error || parsedResult?.verification?.error_message || parsedResult?.verification?.summary || (isOk ? undefined : 'Pre-Flight 校验未通过')
+        const suggestion = parsedResult?.verification?.suggestion || ''
+
+        currentTurn.processItems.push({
+          id: `${msg.id}-approved-write`,
+          type: 'tool',
+          toolName: 'write_strategy_code',
+          args: msg.metadata?.arguments || { strategy_name: stratName },
+          result: parsedResult || {
+            ok: isOk,
+            status: isOk ? 'written' : 'verification_failed',
+            error: errorMsg,
+            error_message: errorMsg,
+            suggestion,
+            strategy_name: stratName,
+          },
+          isSuccess: isOk,
+          isActionResult: true,
+        })
       }
       if (msg.metadata?.reasoning_content?.trim()) {
         currentTurn.processItems.push({
@@ -1059,12 +1116,57 @@ function BacktestFailureCard({
   )
 }
 
+function BacktestRunningCard({ run }: { run: ResearchRun }) {
+  const stratName = run.config?.strategy_name || run.name || '策略'
+  const progressPct = Math.max(5, run.progress || 10)
+  return (
+    <div className="backtest-result-card-wrap" role="status" aria-live="polite">
+      <div className="backtest-main-result-card running" style={{ border: '1px solid rgba(6, 182, 212, 0.35)', background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.05), rgba(15, 23, 42, 0.6))' }}>
+        <div className="result-card-header">
+          <div className="result-card-title">
+            <Loader2 size={18} className="spin text-cyan" />
+            <span><b>NautilusTrader 正在回测中</b> ({stratName})</span>
+          </div>
+          <span className="badge running">{run.stage || '执行中'} · {run.progress}%</span>
+        </div>
+
+        <div style={{ margin: '14px 0 10px' }}>
+          <div className="tool-progress-track" style={{ height: '8px', borderRadius: '999px', background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+            <div
+              className="tool-progress-fill"
+              style={{
+                height: '100%',
+                width: `${progressPct}%`,
+                background: 'linear-gradient(90deg, #06b6d4, #3b82f6)',
+                transition: 'width 0.3s ease',
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px', color: '#94a3b8', marginTop: '6px' }}>
+          <span>{run.stage || '正在加载行情并运行回测引擎...'} ({progressPct}%)</span>
+          <Link
+            className="button mini secondary"
+            to={`/backtests/${run.id}`}
+            target="_blank"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+          >
+            查看实时日志 <ExternalLink size={11} />
+          </Link>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function TurnActionCards({
   processItems,
   hasResponseProposal,
   strategyName,
   busy,
   handleConfirmAnalysis,
+  handleConfirmRepair,
   handleOpenParamsModal,
 }: {
   processItems: ProcessItem[]
@@ -1072,19 +1174,44 @@ function TurnActionCards({
   strategyName: string
   busy: boolean
   handleConfirmAnalysis: (metrics?: Record<string, any>, stratName?: string) => void
+  handleConfirmRepair: (errorMessage?: string, stratName?: string) => void
   handleOpenParamsModal: (params: Record<string, any>) => void
 }) {
   const toolItems = processItems.filter(item => item.type === 'tool')
   const proposalItems = hasResponseProposal
     ? []
     : toolItems.filter(item => item.toolName === 'propose_backtest_params')
+
+  const backtestItems = toolItems.filter(item =>
+    item.toolName === 'execute_backtest' ||
+    item.toolName === 'execute_backtest_tool' ||
+    item.toolName === 'quant_execute_backtest' ||
+    Boolean(item.runForCall)
+  )
+
+  const runningItems = Array.from(
+    backtestItems
+      .filter(item => item.runForCall && ['QUEUED', 'RUNNING', 'ANALYZING'].includes(item.runForCall.status))
+      .reduce((items, item) => items.set(item.runForCall!.id, item), new Map<string, ProcessItem>())
+      .values()
+  )
+
   const completedItems = Array.from(
-    toolItems
+    backtestItems
       .filter(item => item.runForCall?.status === 'COMPLETED')
       .reduce((items, item) => items.set(item.runForCall!.id, item), new Map<string, ProcessItem>())
       .values()
   )
-  if (proposalItems.length === 0 && completedItems.length === 0) return null
+
+  const failedItems = Array.from(
+    backtestItems
+      .filter(item => item.runForCall?.status === 'FAILED')
+      .reduce((items, item) => items.set(item.runForCall!.id, item), new Map<string, ProcessItem>())
+      .values()
+  )
+
+  if (proposalItems.length === 0 && runningItems.length === 0 && completedItems.length === 0 && failedItems.length === 0) return null
+
   return (
     <div className="turn-action-cards" aria-label="本轮任务结果">
       {proposalItems.map(item => (
@@ -1092,6 +1219,12 @@ function TurnActionCards({
           key={`${item.id}-proposal`}
           params={item.args || {}}
           onOpenModal={handleOpenParamsModal}
+        />
+      ))}
+      {runningItems.map(item => (
+        <BacktestRunningCard
+          key={`${item.runForCall!.id}-running`}
+          run={item.runForCall!}
         />
       ))}
       {completedItems.map(item => (
@@ -1103,6 +1236,15 @@ function TurnActionCards({
           busy={busy}
           handleConfirmAnalysis={handleConfirmAnalysis}
           handleOpenParamsModal={handleOpenParamsModal}
+        />
+      ))}
+      {failedItems.map(item => (
+        <BacktestFailureCard
+          key={`${item.runForCall!.id}-failed`}
+          run={item.runForCall!}
+          busy={busy}
+          onRepair={r => handleConfirmRepair(r.error_message || '', r.config?.strategy_name || r.name)}
+          onAdjust={handleOpenParamsModal}
         />
       ))}
     </div>
@@ -1326,42 +1468,42 @@ function ProcessToolStep({
             </div>
           )}
 
-          {isBacktest && !item.runForCall && isSuccess && res.metrics && (
+          {isBacktest && isSuccess && (res.metrics || item.runForCall?.metrics) && (
             <>
               <div className="backtest-metrics-card">
                 <div className="metric-box">
                   <span className="label">总收益率</span>
-                  <b className={`value ${(res.metrics.total_return ?? 0) >= 0 ? 'pos' : 'neg'}`}>
-                    {res.metrics.total_return != null ? `${Number(res.metrics.total_return).toFixed(2)}%` : '—'}
+                  <b className={`value ${((res.metrics?.total_return ?? item.runForCall?.metrics?.total_return) ?? 0) >= 0 ? 'pos' : 'neg'}`}>
+                    {(res.metrics?.total_return ?? item.runForCall?.metrics?.total_return) != null ? `${Number(res.metrics?.total_return ?? item.runForCall?.metrics?.total_return).toFixed(2)}%` : '—'}
                   </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">夏普比率</span>
                   <b className="value">
-                    {(res.metrics.sharpe_ratio ?? res.metrics.sharpe) != null
-                      ? Number(res.metrics.sharpe_ratio ?? res.metrics.sharpe).toFixed(2)
+                    {((res.metrics?.sharpe_ratio ?? res.metrics?.sharpe) ?? (item.runForCall?.metrics?.sharpe_ratio ?? item.runForCall?.metrics?.sharpe)) != null
+                      ? Number((res.metrics?.sharpe_ratio ?? res.metrics?.sharpe) ?? (item.runForCall?.metrics?.sharpe_ratio ?? item.runForCall?.metrics?.sharpe)).toFixed(2)
                       : '—'}
                   </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">最大回撤</span>
                   <b className="value neg">
-                    {res.metrics.max_drawdown != null ? `${Number(res.metrics.max_drawdown).toFixed(2)}%` : '—'}
+                    {(res.metrics?.max_drawdown ?? item.runForCall?.metrics?.max_drawdown) != null ? `${Number(res.metrics?.max_drawdown ?? item.runForCall?.metrics?.max_drawdown).toFixed(2)}%` : '—'}
                   </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">胜率</span>
                   <b className="value">
-                    {res.metrics.win_rate != null ? `${Number(res.metrics.win_rate).toFixed(1)}%` : '—'}
+                    {(res.metrics?.win_rate ?? item.runForCall?.metrics?.win_rate) != null ? `${Number(res.metrics?.win_rate ?? item.runForCall?.metrics?.win_rate).toFixed(1)}%` : '—'}
                   </b>
                 </div>
                 <div className="metric-box">
                   <span className="label">总交易数</span>
-                  <b className="value">{res.metrics.total_trades ?? res.metrics.trades ?? '—'}</b>
+                  <b className="value">{(res.metrics?.total_trades ?? res.metrics?.trades) ?? (item.runForCall?.metrics?.total_trades ?? item.runForCall?.metrics?.trades) ?? '—'}</b>
                 </div>
-                {res.run_id && (
+                {(res.run_id || item.runForCall?.id) && (
                   <div className="metric-box action">
-                    <Link className="button mini" to={`/backtests/${res.run_id}`} target="_blank">
+                    <Link className="button mini" to={`/backtests/${res.run_id || item.runForCall?.id}`} target="_blank">
                       完整详情 <ExternalLink size={11} />
                     </Link>
                   </div>
@@ -1378,7 +1520,7 @@ function ProcessToolStep({
                     type="button"
                     className="button mini primary analysis-btn"
                     disabled={busy}
-                    onClick={() => handleConfirmAnalysis(res.metrics, res.strategy_name || strategyName || '')}
+                    onClick={() => handleConfirmAnalysis(res.metrics || item.runForCall?.metrics, res.strategy_name || item.runForCall?.config?.strategy_name || strategyName || '')}
                   >
                     <Sparkles size={12} /> 确认进行回测深度分析
                   </button>
@@ -1386,7 +1528,7 @@ function ProcessToolStep({
                     type="button"
                     className="button mini secondary"
                     onClick={() => {
-                      handleOpenParamsModal(res.arguments || res.backtest_params || {})
+                      handleOpenParamsModal(res.arguments || res.backtest_params || item.runForCall?.config || {})
                     }}
                   >
                     <Sliders size={12} /> 调整参数重新回测
@@ -1396,13 +1538,13 @@ function ProcessToolStep({
             </>
           )}
 
-          {isBacktest && !item.runForCall && !isSuccess && hasResult && (
+          {isBacktest && !isSuccess && (hasResult || item.runForCall?.status === 'FAILED') && (
             <div className="backtest-error-box">
               <div className="error-box-header">
                 <AlertCircle size={15} className="err-icon" />
                 <b>回测执行失败报错：</b>
               </div>
-              <p className="err-msg-text">{res.error_message || '执行过程出现异常'}</p>
+              <p className="err-msg-text">{res.error_message || res.error || item.runForCall?.error_message || '执行过程出现异常'}</p>
               <div className="error-prompt-tip">
                 ⚠️ 策略回测运行报错。是否确认让 DeepSeek Harness 进行代码修复？（【系统安全限制】：本次仅修复策略代码，修复后不会自动重新回测）
               </div>
@@ -1411,7 +1553,7 @@ function ProcessToolStep({
                   type="button"
                   className="button mini primary fix-btn"
                   disabled={busy}
-                  onClick={() => handleConfirmRepair(res.error_message, res.strategy_name || strategyName || '')}
+                  onClick={() => handleConfirmRepair(res.error_message || res.error || item.runForCall?.error_message, res.strategy_name || args.strategy_name || strategyName || '')}
                 >
                   <Wrench size={12} /> 确认修复策略代码
                 </button>
@@ -1419,13 +1561,13 @@ function ProcessToolStep({
                   type="button"
                   className="button mini secondary"
                   onClick={() => {
-                    handleOpenParamsModal(res.arguments || res.backtest_params || {})
+                    handleOpenParamsModal(res.arguments || res.backtest_params || item.runForCall?.config || {})
                   }}
                 >
                   <Sliders size={12} /> 重新调整回测参数
                 </button>
-                {res.run_id && (
-                  <Link className="button mini secondary" to={`/backtests/${res.run_id}`} target="_blank">
+                {(res.run_id || item.runForCall?.id) && (
+                  <Link className="button mini secondary" to={`/backtests/${res.run_id || item.runForCall?.id}`} target="_blank">
                     查看日志 <ExternalLink size={11} />
                   </Link>
                 )}
@@ -1433,9 +1575,66 @@ function ProcessToolStep({
             </div>
           )}
 
-          {isWriting && hasResult && (
+          {isWriting && hasResult && !isSuccess && (
+            <div className="backtest-error-box">
+              <div className="error-box-header">
+                <AlertCircle size={15} className="err-icon" />
+                <b>策略 Pre-Flight 校验未通过：</b>
+              </div>
+              <p className="err-msg-text">
+                {res.error_message || res.error || res.verification?.error_message || res.verification?.summary || '代码未通过 4 级沙盒契约校验'}
+              </p>
+              {res.verification?.suggestion && (
+                <div className="error-prompt-tip">
+                  💡 修复建议：{res.verification.suggestion}
+                </div>
+              )}
+              <div className="error-prompt-tip">
+                ⚠️ 策略代码未通过契约或沙盒校验。是否确认启动 DeepSeek Harness 专属修复模式（REPAIR Cordis）进行代码定向修复？
+              </div>
+              <div className="err-action-row">
+                <button
+                  type="button"
+                  className="button mini primary fix-btn"
+                  disabled={busy}
+                  onClick={() =>
+                    handleConfirmRepair(
+                      res.error_message || res.error || res.verification?.error_message || 'Pre-Flight 校验未通过',
+                      res.strategy_name || args.strategy_name || strategyName || ''
+                    )
+                  }
+                >
+                  <Wrench size={12} /> 确认修复策略代码
+                </button>
+                <button
+                  type="button"
+                  className="button mini secondary"
+                  onClick={e => {
+                    e.stopPropagation()
+                    handleOpenWritingLog()
+                  }}
+                >
+                  <Terminal size={12} /> 写码日志
+                </button>
+                <button
+                  type="button"
+                  className="button mini secondary"
+                  onClick={e => {
+                    e.stopPropagation()
+                    if (project) loadStrategy(project.id)
+                    setDrawerTab('code')
+                    setDrawerOpen(true)
+                  }}
+                >
+                  <Code2 size={12} /> 查看策略源码
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isWriting && hasResult && isSuccess && (
             <div className="code-success-bar">
-              <span>{res.message || (isSuccess ? '代码已保存至 strategies 目录' : '代码编写失败')}</span>
+              <span>{res.message || '代码已保存至 strategies 目录并通过 Pre-Flight 校验'}</span>
               <div className="code-bar-actions">
                 <button
                   type="button"
@@ -1447,20 +1646,18 @@ function ProcessToolStep({
                 >
                   <Terminal size={12} /> 写码日志
                 </button>
-                {isSuccess && (
-                  <button
-                    type="button"
-                    className="button mini primary"
-                    onClick={e => {
-                      e.stopPropagation()
-                      if (project) loadStrategy(project.id)
-                      setDrawerTab('code')
-                      setDrawerOpen(true)
-                    }}
-                  >
-                    <Code2 size={12} /> 查看策略代码
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="button mini primary"
+                  onClick={e => {
+                    e.stopPropagation()
+                    if (project) loadStrategy(project.id)
+                    setDrawerTab('code')
+                    setDrawerOpen(true)
+                  }}
+                >
+                  <Code2 size={12} /> 查看策略代码
+                </button>
               </div>
             </div>
           )}
@@ -1982,9 +2179,13 @@ export default function Research(){
     }
   }
 
-  function handleConfirmRepair(_errorMessage?: string, _stratName?: string, runId?:string){
+  function handleConfirmRepair(errorMessage?: string, stratName?: string, runId?:string){
     const failedRun=runId?runs.find(run=>run.id===runId):runs.find(run=>run.status==='FAILED')
-    void runFixedAction('FIX_ERROR',{run_id:failedRun?.id})
+    void runFixedAction('FIX_ERROR',{
+      run_id: failedRun?.id,
+      content: errorMessage ? `修复策略报错：${errorMessage}` : undefined,
+      arguments: { strategy_name: stratName || strategyName, error_message: errorMessage },
+    })
   }
 
   function handleConfirmAnalysis(_metrics?: Record<string, any>, _stratName?: string, runId?:string){
@@ -2606,6 +2807,7 @@ export default function Research(){
                         strategyName={strategyName}
                         busy={busy}
                         handleConfirmAnalysis={handleConfirmAnalysis}
+                        handleConfirmRepair={(errMsg, stratName) => handleConfirmRepair(errMsg, stratName)}
                         handleOpenParamsModal={handleOpenParamsModal}
                       />
                     </div>
@@ -3070,6 +3272,7 @@ export default function Research(){
           onClose={()=>setParamsModalOpen(false)}
           initialParams={activeModalParams}
           project={project}
+          currentStrategyName={strategyName}
           onConfirmAndRun={handleConfirmBacktestParams}
         />
       )}

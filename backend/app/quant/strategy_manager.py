@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.strategy_verifier import verify_strategy_file
 from app.git_versions import code_hash, manifest_hash
-from app.models import ResearchProject, Strategy, StrategyVersion
+from app.models import ResearchProject, SpecificationStatus, Strategy, StrategySpecification, StrategyVersion
 from app.strategy_contract import load_manifest, sanitize_strategy_slug
 from app.strategy_files import _path, save_strategy_code
 
@@ -128,6 +128,17 @@ async def ensure_strategy_db_record(
                 break
 
         if not version_obj:
+            specification_id = None
+            if project_id:
+                specification_id = await db.scalar(
+                    select(StrategySpecification.id)
+                    .where(
+                        StrategySpecification.project_id == project_id,
+                        StrategySpecification.status == SpecificationStatus.APPROVED,
+                    )
+                    .order_by(StrategySpecification.version.desc())
+                    .limit(1)
+                )
             v_name = s_ver
             if any(item.version == v_name for item in strat.versions):
                 v_name = f"{s_ver}.{len(strat.versions) + 1}"
@@ -141,6 +152,7 @@ async def ensure_strategy_db_record(
                 data_requirements=s_dreq,
                 manifest_hash=m_hash,
                 description="QuantLab 策略开发发布",
+                specification_id=specification_id,
             )
             db.add(version_obj)
             await db.flush()

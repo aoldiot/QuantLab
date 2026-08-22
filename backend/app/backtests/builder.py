@@ -144,10 +144,13 @@ def build_run_config(payload: dict[str, Any]) -> tuple[BacktestRunConfig, list[s
             raise ValueError(
                 f"永续合约保证金参数为 0，请在数据管理中重新校准：{', '.join(zero_margin)}"
             )
-    required_timeframes = list(dict.fromkeys(manifest.timeframes))
-    missing = set(required_timeframes) - set(config["timeframes"])
-    if missing:
-        raise ValueError(f"缺少策略要求的数据周期: {', '.join(sorted(missing))}")
+    if manifest.mode == StrategyMode.PORTFOLIO and "data_bar_types" in strategy_config_fields(manifest.config_path):
+        required_timeframes = list(dict.fromkeys(manifest.timeframes))
+        missing = set(required_timeframes) - set(config["timeframes"])
+        if missing:
+            raise ValueError(f"缺少策略要求的数据周期: {', '.join(sorted(missing))}")
+    else:
+        required_timeframes = list(dict.fromkeys(config.get("timeframes") or [manifest.primary_timeframe]))
 
     strategies = []
     primary_spec = timeframe_to_bar_spec(manifest.primary_timeframe)

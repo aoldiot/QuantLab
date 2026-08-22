@@ -16,6 +16,8 @@ import inspect
 import json
 import logging
 import os
+import re
+import shutil
 import threading
 import uuid
 from collections.abc import Callable
@@ -38,7 +40,7 @@ TASK_MAX_TOKENS = {
 }
 
 TASK_TIMEOUT_SECONDS = {
-    "WRITE_STRATEGY": 480,
+    "WRITE_STRATEGY": 960,
     "FIX_ERROR": 360,
     "RUN_BACKTEST": 120,
     "ANALYZE_BACKTEST": 180,
@@ -69,9 +71,18 @@ def _dsh_runtime_dir() -> Path:
 
 
 def _cordis_path(phase: str = "IMPLEMENTATION") -> Path:
-    if phase == "INTENT":
+    phase_normalized = (phase or "").upper()
+    if phase_normalized == "INTENT":
         return _dsh_runtime_dir() / "cordis-intent.yml"
-    return _dsh_runtime_dir() / ("cordis-research.yml" if phase == "RESEARCH" else "cordis.yml")
+    if phase_normalized == "RESEARCH":
+        return _dsh_runtime_dir() / "cordis-research.yml"
+    if phase_normalized in {"REPAIR", "FIX_ERROR", "IMPLEMENTATION", "IMPLEMENTED"}:
+        return _dsh_runtime_dir() / "cordis-coding.yml"
+    if phase_normalized in {"BACKTEST", "BACKTEST_RETRY"}:
+        return _dsh_runtime_dir() / "cordis-backtest.yml"
+    if phase_normalized == "RESULT_REVIEW":
+        return _dsh_runtime_dir() / "cordis-analysis.yml"
+    return _dsh_runtime_dir() / "cordis.yml"
 
 
 def _plugin_path() -> Path:
@@ -131,20 +142,12 @@ def _sdk_session_id(
     phase: str = "RESEARCH",
     turn_id: str | None = None,
 ) -> str:
-    """Use a fresh SDK session when crossing the research/code boundary.
+    """Keep one durable session per specialist worker, not per repair turn."""
+    del turn_id
+    from .profiles import worker_for_phase
 
-    A completed research session is immutable in some Harness runtime builds;
-    attempting to append implementation prompts can return immediately with
-    protocol metadata but no new turn.  Phase-specific sessions avoid that
-    dead-end while QuantLab supplies conversation context through its bridge.
-    """
-    base = f"dsh_project_{project.id}"
-    if phase == "RESEARCH":
-        return base
-    # Some runtime builds do not reopen a completed implementation session.
-    # Each code/backtest request therefore gets a fresh session, while the
-    # QuantLab context bridge supplies durable project conversation state.
-    return f"{base}_implementation_{turn_id or uuid.uuid4().hex}"
+    worker = worker_for_phase(phase).value.lower()
+    return f"dsh_project_{project.id}_{worker}"
 
 
 def _build_harness(
@@ -165,7 +168,16 @@ def _build_harness(
     core_path = _cordis_path(phase)
     if not core_path.exists():
         raise RuntimeError(f"DSH cordis 配置缺失: {core_path}")
-    workspace = (settings.data_root / "dsh" / "workspaces" / project.id).resolve()
+    from .profiles import worker_for_phase
+
+    worker = worker_for_phase(phase)
+    # Coding needs the same source tree, virtualenv and tests as a desktop DSH
+    # coding session. Other workers retain the compact project artifact workspace.
+    workspace = (
+        settings.strategy_repo_path.resolve()
+        if worker.value == "CODING"
+        else (settings.data_root / "dsh" / "workspaces" / project.id).resolve()
+    )
     workspace.mkdir(parents=True, exist_ok=True)
     sessions = (settings.data_root / "dsh" / "sessions").resolve()
     sessions.mkdir(parents=True, exist_ok=True)
@@ -187,6 +199,7 @@ def _build_harness(
             "DSH_RESEARCH_INSTRUCTIONS": system_instructions,
             "DSH_RESEARCH_PHASE": phase,
             "DSH_TASK_PROFILE": task_profile,
+            "DSH_WORKER_TYPE": worker.value,
         },
     )
 
@@ -195,22 +208,75 @@ def _parse_intent_response(text: str) -> dict[str, Any]:
     """Parse and validate the JSON decision produced by the DSH intent turn."""
     decoder = json.JSONDecoder()
     payload: dict[str, Any] | None = None
+
+    # 1. Standard raw_decode scan
     for index, char in enumerate(text):
         if char != "{":
             continue
         try:
             candidate, _ = decoder.raw_decode(text[index:])
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict):
-            payload = candidate
-            break
+
+    # 2. Strip markdown fences and try direct json.loads
+    if payload is None:
+        cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
+        cleaned = re.sub(r"```$", "", cleaned.strip(), flags=re.MULTILINE).strip()
+        try:
+            candidate = json.loads(cleaned)
+            if isinstance(candidate, dict):
+                payload = candidate
+        except Exception:
+            pass
+
+    # 3. Try repairing unclosed strings and braces (common when hitting token limits)
+    if payload is None:
+        trimmed = text.strip()
+        for fix_suffix in ['"}', '}', '\"}}', '}}', '":""}']:
+            for index, char in enumerate(trimmed):
+                if char != "{":
+                    continue
+                try:
+                    candidate = json.loads(trimmed[index:] + fix_suffix)
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                        break
+                except Exception:
+                    continue
+            if payload is not None:
+                break
+
+    # 4. Regex fallback extraction for partial/truncated output
+    if payload is None:
+        intent_match = re.search(r'["\']intent["\']\s*:\s*["\']([A-Za-z0-9_]+)["\']', text)
+        if intent_match:
+            intent_val = intent_match.group(1).upper()
+            conf_match = re.search(r'["\']confidence["\']\s*:\s*([0-9.]+)', text)
+            confidence = float(conf_match.group(1)) if conf_match else 0.8
+            req_match = re.search(r'["\']normalized_request["\']\s*:\s*"(.*?)(?:",|"\s*}|\Z)', text, re.DOTALL)
+            normalized_request = req_match.group(1) if req_match else ""
+            clarif_match = re.search(r'["\']needs_clarification["\']\s*:\s*(true|false)', text, re.IGNORECASE)
+            needs_clarification = clarif_match.group(1).lower() == "true" if clarif_match else False
+            payload = {
+                "intent": intent_val,
+                "confidence": confidence,
+                "normalized_request": normalized_request,
+                "needs_clarification": needs_clarification,
+                "clarification_question": "",
+                "pending_request_id": "",
+                "reason": "从截断或非标准响应中容错解析",
+            }
+
     if payload is None:
         raise ValueError("DSH 意图路由未返回 JSON 对象")
 
     intent = str(payload.get("intent") or "").strip().upper()
     if intent not in INTENT_NAMES:
-        raise ValueError(f"DSH 返回了未知意图: {intent or '<empty>'}")
+        empty_str = "<empty>"
+        raise ValueError(f"DSH 返回了未知意图: {intent or empty_str}")
     try:
         confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0))))
     except (TypeError, ValueError):
@@ -248,7 +314,7 @@ async def classify_intent(
     workspace.mkdir(parents=True, exist_ok=True)
     sessions = (settings.data_root / "dsh" / "sessions").resolve()
     sessions.mkdir(parents=True, exist_ok=True)
-    timeout_seconds = max(10, int(os.environ.get("DSH_INTENT_TIMEOUT_SECONDS", "45")))
+    timeout_seconds = max(10, int(os.environ.get("DSH_INTENT_TIMEOUT_SECONDS", "60")))
 
     compact_messages = recent_messages[-12:]
     context = json.dumps(compact_messages, ensure_ascii=False, default=str)[-16_000:]
@@ -301,10 +367,11 @@ async def classify_intent(
 {{"intent":"DISCUSS_STRATEGY","confidence":0.0,"normalized_request":"","needs_clarification":false,"clarification_question":"","pending_request_id":"","reason":""}}
 """
 
+    max_intent_tokens = int(os.environ.get("DSH_INTENT_MAX_TOKENS", "8192"))
     harness = DeepSeekHarness(
         provider="deepseek-official",
         model=model,
-        max_tokens=512,
+        max_tokens=max_intent_tokens,
         cwd=str(workspace),
         session_root=str(sessions),
         base_url=base_url,
@@ -345,7 +412,10 @@ async def _harness_for(
     config_fingerprint = hashlib.sha256(
         f"{runtime_config['base_url']}\0{runtime_config['model']}\0{runtime_config['api_key']}".encode()
     ).hexdigest()[:16]
-    key = f"{project.id}:{phase}:{task_profile or 'GENERAL'}:{config_fingerprint}"
+    from .profiles import worker_for_phase
+
+    worker = worker_for_phase(phase).value
+    key = f"{project.id}:{worker}:{task_profile or 'GENERAL'}:{config_fingerprint}"
     h = _harnesses.get(key)
     if h is None:
         # Different phases use different Cordis configurations but resume the
@@ -375,6 +445,38 @@ def _discard_harness(project_id: str, harness: Any) -> None:
     for key, item in list(_harnesses.items()):
         if key.startswith(f"{project_id}:") and item is harness:
             _harnesses.pop(key, None)
+
+
+def _archive_session_directory(session_id_or_pattern: str) -> list[Path]:
+    """Archive corrupted, cancelled, or timed-out session directories on disk.
+
+    Prevents subsequent turns from deadlocking on broken session state
+    (e.g., 0-event immediate exit after an abrupt process termination or timeout).
+    """
+    if not session_id_or_pattern:
+        return []
+    sessions_root = (settings.data_root / "dsh" / "sessions").resolve()
+    if not sessions_root.exists():
+        return []
+    archived_paths: list[Path] = []
+    try:
+        # Match exact session_id or wildcard patterns (e.g. "*project_id*")
+        search_pattern = f"**/{session_id_or_pattern}" if not session_id_or_pattern.startswith("*") else f"**/{session_id_or_pattern}"
+        for session_dir in sessions_root.glob(search_pattern):
+            if not session_dir.is_dir() or "_archived_" in session_dir.name:
+                continue
+            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            archive_dir = session_dir.parent / f"{session_dir.name}_archived_{timestamp}"
+            try:
+                shutil.move(str(session_dir), str(archive_dir))
+                archived_paths.append(archive_dir)
+                logger.warning("已归档超时或异常的 DSH Session 目录: %s -> %s", session_dir, archive_dir)
+            except Exception:
+                logger.warning("归档 DSH Session 目录失败，尝试直接删除: %s", session_dir, exc_info=True)
+                shutil.rmtree(str(session_dir), ignore_errors=True)
+    except Exception:
+        logger.warning("扫描或归档 DSH Session 失败 (target=%s)", session_id_or_pattern, exc_info=True)
+    return archived_paths
 
 
 def get_status(project_id: str) -> dict[str, Any]:
@@ -688,6 +790,7 @@ async def _execute_turn(
     system_instructions: str = "",
     phase: str = "RESEARCH",
     task_profile: str = "",
+    _retry_count: int = 0,
 ) -> dict[str, Any]:
     """Run one agent turn in the project's DSH session and persist its events."""
     harness_or_awaitable = _harness_for(
@@ -758,6 +861,7 @@ async def _execute_turn(
         set_status(project.id, "FAILED", stage="DSH 回合超时，正在终止", error=f"超过 {timeout_seconds} 秒执行预算")
         await asyncio.to_thread(harness.close)
         _discard_harness(project.id, harness)
+        _archive_session_directory(sdk_session_id)
         try:
             await asyncio.wait_for(asyncio.shield(run_task), timeout=10)
         except Exception:  # noqa: BLE001
@@ -815,6 +919,7 @@ async def _execute_turn(
         else:
             await asyncio.to_thread(harness.close)
             _discard_harness(project.id, harness)
+            _archive_session_directory(sdk_session_id)
 
     # Recovery notifications are collected by the same callback; wait for
     # their persistence and return the complete event list.
@@ -830,9 +935,30 @@ async def _execute_turn(
             event.get("kind") in {"assistant_message", "tool_call", "tool_result"}
             for event in mapped
         )
-        start_failed = phase != "RESEARCH" and not has_meaningful_event
+        if not has_meaningful_event and _retry_count == 0:
+            logger.warning("检测到 DSH 会话未产生有效事件（可能是会话 ID 冲突或 SDK 启动异常），正在自动归档并自愈重试: project=%s, session=%s", project.id, sdk_session_id)
+            _archive_session_directory(sdk_session_id)
+            _discard_harness(project.id, harness)
+            try:
+                harness.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return await _execute_turn(
+                project,
+                prompt,
+                on_event=on_event,
+                system_instructions=system_instructions,
+                phase=phase,
+                task_profile=task_profile,
+                _retry_count=1,
+            )
+
+        start_failed = not has_meaningful_event
+        if start_failed:
+            _archive_session_directory(sdk_session_id)
+            _discard_harness(project.id, harness)
         error = (
-            "DSH 编码阶段未成功启动：运行时没有产生任何 SDK 事件"
+            f"DSH {phase} 阶段未成功启动：运行时没有产生任何 SDK 事件"
             if start_failed
             else "DSH 已结束，但未生成最终研究结论；自动收束仍未产生用户可见正文"
         )
@@ -905,6 +1031,7 @@ def cancel_turn(project_id: str) -> None:
             harness.close()
         except Exception:  # noqa: BLE001
             logger.warning("取消回合时关闭 DSH Harness 失败: %s", key, exc_info=True)
+    _archive_session_directory(f"*{project_id}*")
     set_status(project_id, "IDLE", stage="已取消", error="")
 
 

@@ -34,12 +34,18 @@ def ensure_catalog_coverage(run_config, ignore_missing: bool = True) -> list[str
                 missing_items.append(f"{identifier}: {coverage.message}")
 
     if missing_items:
-        print(
-            "[WARN] 检测到以下 Catalog 数据未覆盖请求范围（宽松模式自动跳过并继续回测）：\n  "
-            + "\n  ".join(missing_items),
-            flush=True,
-        )
-        if not ignore_missing:
+        if ignore_missing:
+            print(
+                "[WARN] 检测到以下 Catalog 数据未覆盖请求范围（宽松模式自动跳过并继续回测）：\n  "
+                + "\n  ".join(missing_items),
+                flush=True,
+            )
+        else:
+            print(
+                "[ERROR] 检测到以下 Catalog 数据未覆盖请求范围（严格模式将中断回测）：\n  "
+                + "\n  ".join(missing_items),
+                flush=True,
+            )
             raise ValueError(
                 "Catalog 数据不覆盖请求范围：\n  "
                 + "\n  ".join(missing_items)

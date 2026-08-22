@@ -4,6 +4,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 const BRIDGE_URL = (process.env.DSH_BRIDGE_URL || 'http://127.0.0.1:8000/api').replace(/\/+$/, '')
 const BRIDGE_TOKEN = process.env.DSH_BRIDGE_TOKEN || ''
 const PROJECT_ID = process.env.DSH_PROJECT_ID || ''
+const PHASE = (process.env.DSH_RESEARCH_PHASE || '').toUpperCase()
 
 async function bridge(path, body) {
   const res = await fetch(`${BRIDGE_URL}${path}`, {
@@ -37,7 +38,7 @@ function argsFor(args) {
   return { ...(args || {}), ...(PROJECT_ID && !args.project_id ? { project_id: PROJECT_ID } : {}) }
 }
 
-const awaitingHint = 'If the status is "awaiting_approval", stop your turn immediately and clearly present the proposal to the user for approval. Do not retry the same tool call until the user approves.'
+const awaitingHint = 'The backend normally executes this action directly. If an installation explicitly enables approvals and returns "awaiting_approval", stop and present it to the user.'
 
 export const name = 'quantlab-tools'
 export const inject = ['tools', 'systemPrompt']
@@ -46,13 +47,14 @@ export function apply(ctx) {
   const researchInstructions = process.env.DSH_RESEARCH_INSTRUCTIONS || ''
   if (researchInstructions) {
     ctx.systemPrompt.section({
-      name: 'quantlab:research-instructions',
+      name: 'quantlab:phase-instructions',
       order: 10,
       text: researchInstructions,
     })
   }
 
-  ctx.tools.register(defineTool({
+  // Define tools
+  const proposeBacktestParamsTool = defineTool({
     name: 'propose_backtest_params',
     description: 'Present an editable backtest parameter proposal card to the user. This does not start a backtest and does not require approval. After calling it, stop and wait for the user to review or edit the card.',
     parameters: {
@@ -63,7 +65,10 @@ export function apply(ctx) {
       end_date: { type: 'string', required: true, description: 'End date YYYY-MM-DD' },
       initial_balance: { type: 'number', description: 'Initial balance, default 10000.0' },
       leverage: { type: 'number', description: 'Leverage, default 1.0' },
-      execution_model: { type: 'string', description: 'Execution model, default CONSERVATIVE' },
+      execution_model: { type: 'string', enum: ['CONSERVATIVE'], description: 'Execution model, default CONSERVATIVE' },
+      venue: { type: 'string', description: 'Venue, default BINANCE' },
+      market_type: { type: 'string', enum: ['spot', 'um'], description: 'Market type, default um' },
+      check_data_integrity: { type: 'boolean', description: 'Check data integrity before backtesting, default true' },
       parameters: { type: 'object', additionalProperties: true, description: 'Strategy parameter overrides' },
     },
     output: {
@@ -78,11 +83,11 @@ export function apply(ctx) {
         message: '回测参数方案已生成，等待用户确认。',
       })
     },
-  }))
+  })
 
-  ctx.tools.register(defineTool({
+  const writeStrategyCodeTool = defineTool({
     name: 'write_strategy_code',
-    description: `Write or update a NautilusTrader strategy Python source file for the current research project. Writes into the project's isolated workspace and runs the 4-level Pre-Flight sandbox verification. Requires user approval before the file is written. ${awaitingHint}`,
+    description: `Verify and publish a NautilusTrader strategy. Technical writes execute directly; iterate until verification passes. ${awaitingHint}`,
     parameters: {
       strategy_name: { type: 'string', required: true, description: 'Snake_case strategy identifier, e.g. btc_ema_atr_trend' },
       code: { type: 'string', required: true, description: 'Complete Python source code for the strategy file' },
@@ -103,9 +108,75 @@ export function apply(ctx) {
         arguments: { strategy_name: a.strategy_name, code: a.code },
       }))
     },
-  }))
+  })
 
-  ctx.tools.register(defineTool({
+  const readStrategyCandidateTool = defineTool({
+    name: 'read_strategy_candidate',
+    description: 'Read the complete Python source currently staged in this project isolated candidate workspace. No approval needed and never reads the shared published strategy directory.',
+    parameters: {
+      strategy_name: { type: 'string', required: true, description: 'Snake_case strategy identifier' },
+      project_id: { type: 'string', description: 'Research project id (usually injected automatically)' },
+    },
+    output: { schema: { type: 'string' }, render: renderText },
+    async execute(args) {
+      const a = argsFor(args)
+      return JSON.stringify(await bridge('/dsh-tools/call', {
+        project_id: a.project_id,
+        tool: 'read_strategy_candidate',
+        arguments: { strategy_name: a.strategy_name },
+      }))
+    },
+  })
+
+  const stageStrategyCandidateTool = defineTool({
+    name: 'stage_strategy_candidate',
+    description: 'Atomically stage a complete initial strategy source in the isolated project candidate workspace and immediately run 4-level Pre-Flight. No publication and no approval. If validation fails, keep the candidate and repair it with patch_strategy_candidate.',
+    parameters: {
+      strategy_name: { type: 'string', required: true, description: 'Snake_case strategy identifier' },
+      code: { type: 'string', required: true, description: 'Complete Python source code' },
+      project_id: { type: 'string', description: 'Research project id (usually injected automatically)' },
+    },
+    output: { schema: { type: 'string' }, render: renderText },
+    async execute(args) {
+      const a = argsFor(args)
+      return JSON.stringify(await bridge('/dsh-tools/call', {
+        project_id: a.project_id,
+        tool: 'stage_strategy_candidate',
+        arguments: { strategy_name: a.strategy_name, code: a.code },
+      }))
+    },
+  })
+
+  const patchStrategyCandidateTool = defineTool({
+    name: 'patch_strategy_candidate',
+    description: 'Apply minimal exact old-to-new replacements to the staged candidate and rerun Pre-Flight. Every old fragment must match exactly once; otherwise the whole patch is rejected without changing the file.',
+    parameters: {
+      strategy_name: { type: 'string', required: true, description: 'Snake_case strategy identifier' },
+      edits: {
+        type: 'array', required: true, description: 'One or more exact local replacements',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            old: { type: 'string', required: true, description: 'Exact existing source fragment' },
+            new: { type: 'string', required: true, description: 'Replacement source fragment' },
+          },
+        },
+      },
+      project_id: { type: 'string', description: 'Research project id (usually injected automatically)' },
+    },
+    output: { schema: { type: 'string' }, render: renderText },
+    async execute(args) {
+      const a = argsFor(args)
+      return JSON.stringify(await bridge('/dsh-tools/call', {
+        project_id: a.project_id,
+        tool: 'patch_strategy_candidate',
+        arguments: { strategy_name: a.strategy_name, edits: a.edits },
+      }))
+    },
+  })
+
+  const verifyStrategyFileTool = defineTool({
     name: 'verify_strategy_file',
     description: 'Run the read-only 4-level Pre-Flight sandbox verification (L1 syntax, L2 manifest contract, L3 indicator coverage, L4 Nautilus instantiation) on the strategy file currently in the project workspace. No approval needed.',
     parameters: {
@@ -124,11 +195,11 @@ export function apply(ctx) {
         arguments: { strategy_name: a.strategy_name },
       }))
     },
-  }))
+  })
 
-  ctx.tools.register(defineTool({
+  const executeBacktestTool = defineTool({
     name: 'execute_backtest_tool',
-    description: `Submit an isolated NautilusTrader backtest run for the given strategy in the project workspace. Requires user approval before the run is created and started. ${awaitingHint}`,
+    description: `Submit and start an isolated NautilusTrader backtest directly. ${awaitingHint}`,
     parameters: {
       strategy_name: { type: 'string', required: true, description: 'Strategy identifier to backtest' },
       symbols: { type: 'array', required: true, items: { type: 'string' }, description: 'Symbols to backtest, e.g. ["BTCUSDT"]' },
@@ -137,6 +208,10 @@ export function apply(ctx) {
       end_date: { type: 'string', required: true, description: 'End date YYYY-MM-DD' },
       initial_balance: { type: 'number', description: 'Initial balance, default 10000.0' },
       leverage: { type: 'number', description: 'Leverage, default 1.0' },
+      venue: { type: 'string', description: 'Venue, default BINANCE' },
+      market_type: { type: 'string', enum: ['spot', 'um'], description: 'Market type, default um' },
+      execution_model: { type: 'string', enum: ['CONSERVATIVE'], description: 'Execution model, fixed to CONSERVATIVE' },
+      check_data_integrity: { type: 'boolean', description: 'Check data integrity before backtesting, default true' },
       parameters: { type: 'object', additionalProperties: true, description: 'Strategy parameter overrides' },
       project_id: { type: 'string', description: 'Research project id (usually injected automatically)' },
       request_id: { type: 'string', description: 'Approval request id returned by a previous awaiting_approval response; pass it back unchanged when retrying after user approval' },
@@ -155,7 +230,11 @@ export function apply(ctx) {
         end_date: a.end_date,
         initial_balance: a.initial_balance,
         leverage: a.leverage,
+        venue: a.venue,
+        market_type: a.market_type,
+        execution_model: a.execution_model,
         parameters: a.parameters,
+        check_data_integrity: a.check_data_integrity !== false,
       }
       return JSON.stringify(await bridge('/dsh-tools/call', {
         project_id: a.project_id,
@@ -165,15 +244,20 @@ export function apply(ctx) {
         arguments: callArgs,
       }))
     },
-  }))
+  })
 
-  ctx.tools.register(defineTool({
+  const dispatchToolCall = defineTool({
     name: 'dispatch_tool_call',
-    description: 'Dispatch a bounded read-only QuantLab research tool. Prefer platform/context tools over inspecting source. Research may use market data, factor experiments and cited web research; implementation verification belongs to the implementation phase.',
+    description: 'Dispatch a bounded read-only QuantLab domain tool. Research tools provide market data and factor analysis; review tools provide attribution and robustness metrics.',
     parameters: {
       tool_name: {
         type: 'string', required: true,
-        enum: ['quant_get_capabilities', 'quant_get_research_context', 'quant_get_strategy_context', 'quant_web_research', 'quant_market_data_query', 'quant_factor_analysis', 'quant_run_experiment', 'quant_parameter_sweep', 'quant_robustness_test', 'quant_get_strategy', 'quant_preflight_verify'],
+        enum: [
+          'quant_get_capabilities', 'quant_get_research_context', 'quant_get_strategy_context',
+          'quant_web_research', 'quant_market_data_query', 'quant_factor_analysis',
+          'quant_run_experiment', 'quant_parameter_sweep', 'quant_robustness_test',
+          'quant_get_strategy', 'quant_preflight_verify',
+        ],
         description: 'Name of the analysis tool to run',
       },
       arguments: { type: 'object', additionalProperties: true, required: true, description: 'Arguments for the named tool, e.g. {"symbol":"BTCUSDT","timeframe":"1h","factor_name":"ema_spread"}' },
@@ -191,5 +275,38 @@ export function apply(ctx) {
         arguments: { tool_name: a.tool_name, arguments: a.arguments || {} },
       }))
     },
-  }))
+  })
+
+  // Phase-aware tool registration gating
+  if (PHASE === 'RESEARCH') {
+    ctx.tools.register(dispatchToolCall)
+    ctx.tools.register(writeStrategyCodeTool) // for submitting strategy proposal if user explicitly requests
+  } else if (PHASE === 'REPAIR' || PHASE === 'FIX_ERROR') {
+    ctx.tools.register(readStrategyCandidateTool)
+    ctx.tools.register(patchStrategyCandidateTool)
+    ctx.tools.register(verifyStrategyFileTool)
+    ctx.tools.register(writeStrategyCodeTool)
+    ctx.tools.register(dispatchToolCall)
+  } else if (PHASE === 'IMPLEMENTATION') {
+    ctx.tools.register(stageStrategyCandidateTool)
+    ctx.tools.register(readStrategyCandidateTool)
+    ctx.tools.register(patchStrategyCandidateTool)
+    ctx.tools.register(writeStrategyCodeTool)
+    ctx.tools.register(verifyStrategyFileTool)
+  } else if (PHASE === 'BACKTEST') {
+    ctx.tools.register(proposeBacktestParamsTool)
+    ctx.tools.register(executeBacktestTool)
+  } else if (PHASE === 'RESULT_REVIEW') {
+    ctx.tools.register(dispatchToolCall)
+  } else {
+    // Fallback: register all tools if phase is unspecific
+    ctx.tools.register(proposeBacktestParamsTool)
+    ctx.tools.register(stageStrategyCandidateTool)
+    ctx.tools.register(readStrategyCandidateTool)
+    ctx.tools.register(patchStrategyCandidateTool)
+    ctx.tools.register(writeStrategyCodeTool)
+    ctx.tools.register(verifyStrategyFileTool)
+    ctx.tools.register(executeBacktestTool)
+    ctx.tools.register(dispatchToolCall)
+  }
 }

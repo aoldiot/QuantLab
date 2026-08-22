@@ -674,10 +674,23 @@ def run_download(task_id: str, payload: DownloadCreate) -> None:
                         except Exception as write_err:
                             if "non-disjoint intervals" in str(write_err):
                                 logger.info(
-                                    "Parquet 区间已存在或重叠 (%s)，自动跳过写入: %s",
+                                    "Parquet 区间存在重叠 (%s)，清理重叠区间并重新写入: %s",
                                     archive.key,
                                     write_err,
                                 )
+                                data_cls = type(bars[0])
+                                identifier = str(
+                                    getattr(bars[0], "bar_type", None)
+                                    or getattr(bars[0], "instrument_id", None)
+                                    or bars[0].id
+                                )
+                                catalog.delete_data_range(
+                                    data_cls,
+                                    identifier=identifier,
+                                    start=bars[0].ts_init,
+                                    end=bars[-1].ts_init,
+                                )
+                                catalog.write_data(bars)
                             else:
                                 raise
                     pending_manifest[archive.key] = {

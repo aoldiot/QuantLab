@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -14,11 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .agent.tools import (
-    ensure_strategy_db_record,
-    get_strategy_code_tool,
-    get_writing_log_tool,
-)
+from .agent.tools import get_strategy_code_tool, get_writing_log_tool
 from .agent.strategy_verifier import extract_python_strategy_code
 from .config import settings
 from .db import get_db, SessionLocal
@@ -28,9 +25,14 @@ from .models import (
     ResearchProject,
     ResearchStatus,
     RunStatus,
+    SpecificationStatus,
     Strategy,
+    StrategySpecification,
     StrategyVersion,
+    AgentTask,
+    WorkerType,
 )
+from .quant.strategy_manager import ensure_strategy_db_record
 from .schemas import (
     DshActionRequest,
     DshApproveRequest,
@@ -39,6 +41,7 @@ from .schemas import (
 )
 from .strategy_contract import sanitize_strategy_slug
 from .strategy_files import _path, save_strategy_code, PERSISTENT_STRATEGY_DIR, STRATEGY_DIR
+from .research_workflow import apply_research_phase
 
 
 router = APIRouter(prefix="/api/research", tags=["strategy-research"])
@@ -212,13 +215,13 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
 
 4. 回测参数方案生成时机（CRITICAL - 必须用户明确要求回测，且必须先查验 Catalog 真实数据）：
    - 【严格限制生成时机】：只有当用户在对话中【明确提出要进行回测】（例如明确表达“进行回测”、“回测一下”、“运行回测”等意图）时，你才可以生成回测参数方案。
-   - 【必须先查验 Catalog 真实可用数据】：在生成回测方案前，你必须调用工具 `get_available_data` 或通过终端检查本地 Catalog 中已存在的交易标的、K线周期与历史起止时间，**严禁臆测本地不存在的远期时间区间**（否则会导致回测 0 根 Bar 空转）！
-   - 在用户未明确要求回测之前（如策略讨论、代码编写完成阶段），严禁擅自生成回测参数方案，更严禁直接调用 `execute_backtest` 执行回测！
+   - 【必须先查验 Catalog 真实可用数据】：在生成回测方案前，你必须调用工具 `quant_market_data_query`（通过 `dispatch_tool_call` 或直接调用）检查本地 Catalog 中已存在的交易标的、K线周期与历史起止时间，**严禁臆测本地不存在的远期时间区间**（否则会导致回测 0 根 Bar 空转）！
+   - 在用户未明确要求回测之前（如策略讨论、代码编写完成阶段），严禁擅自生成回测参数方案，更严禁直接调用 `execute_backtest_tool` 执行回测！
    - 当用户要求回测时，根据策略 Manifest 规范与可用行情数据提出合理的回测参数，必须调用 `propose_backtest_params` 生成可编辑的参数方案卡片，然后停止并等待用户确认。只有该工具成功返回后才能声称“卡片已生成”。如果工具不可用，才可在正文末尾输出如下格式的 `backtest_params` 机器块作为兼容回退。此阶段不要调用 `execute_backtest_tool`：
 
 ```backtest_params
 {
-  "strategy_name": "btc_ema_atr",
+  "strategy_name": "当前编写的策略名（例如 btc_bollinger_regime_mr）",
   "symbols": ["BTCUSDT"],
   "timeframes": ["1h"],
   "start_date": "2024-01-01",
@@ -227,10 +230,9 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
   "leverage": 1.0,
   "execution_model": "CONSERVATIVE",
   "parameters": {
-    "fast_period": 12,
-    "slow_period": 26,
-    "atr_period": 14,
-    "position_size_pct": 0.1
+    "bb_period": 20,
+    "bb_k": 2.0,
+    "atr_period": 14
   }
 }
 ```
@@ -238,34 +240,20 @@ RESEARCH_INSTRUCTIONS = """你是 QuantLab 的首席量化负责人 (Quant Lead)
 
 5. 回测执行与结果监控（CRITICAL - 真实工具调度与禁止自动循环）：
    - 【严禁在终端运行回测】：严禁调用 terminal / bash 终端执行回测或运行测试脚本！任何在终端私自运行回测或编造数据的行为均被系统判定为无效。
-   - 【必须调用 execute_backtest 工具】：回测必须且只能由 QuantLab 主系统的 NautilusTrader 引擎执行。当收到用户确认回测参数的指令后，你必须调用工具 `execute_backtest`，或在回复中直接输出以下标准的工具调用机器块启动回测：
-```tool_call
-{
-  "name": "execute_backtest",
-  "arguments": {
-    "strategy_name": "策略英文名",
-    "symbols": ["BTCUSDT"],
-    "start_date": "2024-01-01",
-    "end_date": "2024-06-30",
-    "initial_balance": 10000.0,
-    "leverage": 1.0,
-    "parameters": {}
-  }
-}
-```
-   - 【严禁虚构回测数据】：严禁在没有调用 `execute_backtest` 工具的情况下在文本中凭空编造/虚构回测收益、夏普比率等结果！
+   - 【必须调用 execute_backtest_tool 工具】：回测必须且只能由 QuantLab 主系统的 NautilusTrader 引擎执行。当收到用户确认回测参数的指令后，你必须调用工具 `execute_backtest_tool` 启动回测。
+   - 【严禁虚构回测数据】：严禁在没有调用 `execute_backtest_tool` 工具的情况下在文本中凭空编造/虚构回测收益、夏普比率等结果！
    - 【禁止自动修改策略报错与自动分析结果（CRITICAL）】：
      - 当回测执行完成（无论成功与否），系统会将回测结果与指标卡片直接呈现在前端界面供用户查看。
-     - **严禁在回测报错后自动修改代码！严禁在报错后自动反复调用 execute_backtest 重新回测！**
+     - **严禁在回测报错后自动修改代码！严禁在报错后自动反复调用 execute_backtest_tool 重新回测！**
      - **严禁在回测成功后自动输出冗长分析或自动进行参数调优！** 回测完成后必须等待用户确认后才进行下一步。
 
 6. 策略报错单次受控修复模式（用户确认后执行 1 次，只改代码，禁止回测）：
-   - 仅当用户在对话中明确确认修复报错（如点击「确认修复策略代码」或发送明确修复指令）时，你才执行 **1 次策略代码修复**（修复 `backend/app/strategies/{strategy_name}.py` 中的报错代码并自动通过 4 级沙盒自愈，完成后向用户汇报）。
-   - **【安全红线 - 严禁自动回测】**：代码修复完成后，**严禁自动调用 `execute_backtest` 执行回测，严禁擅自生成回测参数卡片**！修复完成后仅简要向用户总结修复内容，等待用户下一步指令。
+   - 仅当用户在对话中明确确认修复报错（如点击「确认修复策略代码」或发送明确修复指令）时，你才执行 **1 次策略代码修复**（使用 `patch_strategy_candidate` 修复候选区报错代码并自动通过 4 级沙盒自愈，完成后向用户汇报）。
+   - **【安全红线 - 严禁自动回测】**：代码修复完成后，**严禁自动调用 `execute_backtest_tool` 执行回测，严禁擅自生成回测参数卡片**！修复完成后仅简要向用户总结修复内容，等待用户下一步指令。
 
 7. 回测结果单次受控归因分析模式（用户确认后执行 1 次，只分析原因，禁止改代码和回测）：
    - 仅当用户在对话中明确确认分析回测结果（如点击「确认进行回测深度分析」或发送分析指令）时，你才执行 **1 次深度回测归因分析**（分析收益率、夏普比率、最大回撤、胜率、盈亏比与市场行情适应性）。
-   - **【安全红线 - 严禁改代码与回测】**：在归因分析时，**严格只分析指标与交易原因，严禁修改策略代码，严禁调用 `execute_backtest` 启动回测**。
+   - **【安全红线 - 严禁改代码与回测】**：在归因分析时，**严格只分析指标与交易原因，严禁修改策略代码，严禁调用 `execute_backtest_tool` 启动回测**。
 """
 
 RESEARCH_PHASE_INSTRUCTIONS = """你是 QuantLab 策略研究负责人。当前阶段严格限定为 RESEARCH（策略研究），使用简体中文。
@@ -278,23 +266,47 @@ RESEARCH_PHASE_INSTRUCTIONS = """你是 QuantLab 策略研究负责人。当前�
 若用户提到现有策略，只能通过 quant_get_strategy_context 获取该策略上下文。
 
 最终必须输出完整 Markdown《量化策略设计方案》，至少包含：假设与收益来源、适用标的/周期、指标公式、入场/出场、风险与仓位、参数表、防过拟合建议，以及需要用户确认的下一步。
-研究方案完成前不得写代码或执行正式回测。如用户希望开发，可调用 write_strategy_code 仅提交审批提案；收到 awaiting_approval 后立即结束本轮。
+研究方案完成前不得写代码或执行正式回测。开发由独立 Coding Worker 执行；你的输出只需形成明确、可交接的研究规格。
 无论资料是否完整，都必须基于已知信息给出明确结论；禁止以工具调用或内部准备说明作为最终答案。
 """
 
 
 IMPLEMENTATION_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略实现负责人。当前阶段严格限定为 IMPLEMENTATION（策略编码），使用简体中文。
 
-用户已经完成策略方案确认并明确要求开始编码。不要重新输出研究方案，不要再次询问实现授权，不要执行回测。
-你会在本轮用户提示中收到完整原始需求与最新确认；直接依据这些内容生成完整、可运行的单文件 Python 策略。
+用户已经完成策略方案确认并明确要求开始编码。不要重新输出研究方案，不要再次询问实现授权，不要执行回测，不要调用 skill 加载外部技能。
+策略规范与契约已完全注入当前上下文；直接依据本轮用户提示中的需求与确认，生成完整、可运行的单文件 Python 策略。
 
 必须满足以下交付契约：
 1. 完整导出 StrategyConfig、Strategy、calculate_indicators、STRATEGY_MANIFEST，配置字段、Manifest 参数、指标列和 plot_config 必须一致。
-2. 禁止使用 portfolio.account_balance、portfolio.is_net_flat、portfolio.position、close_position、instrument.round_quantity；订单数量必须使用 Quantity 或 instrument.make_qty。
-3. calculate_indicators 必须覆盖 plot_config 声明的全部列，并对头部 NaN 使用 bfill().fillna(0.0)。
-4. strategy_path/config_path 必须使用 app.strategies.{slug}:ClassName；不得输出残缺代码、占位符或省略实现。
-5. 代码生成完成后必须立即调用 write_strategy_code，完整传入 strategy_name 与 code。收到 awaiting_approval 后立即停止本轮，简短告知用户审批卡已生成。
-6. 只有 write_strategy_code 真实返回 awaiting_approval 后才能声称存在审批卡。不得用 Markdown 代码块冒充审批或直接写入文件。
+2. 必须从 app.strategy_contract 导入并实例化 StrategyManifest（严禁写成原生 dict 字典）。
+3. 禁止使用 portfolio.account_balance、portfolio.is_net_flat、portfolio.position、close_position、instrument.round_quantity；订单数量必须使用 Quantity 或 instrument.make_qty。
+4. calculate_indicators 必须覆盖 plot_config 声明的全部列，并对头部 NaN 使用 bfill().fillna(0.0)。
+5. strategy_path/config_path 必须使用 app.strategies.{slug}:ClassName；不得输出残缺代码、占位符或省略实现。
+6. 必须使用 stage_strategy_candidate 在项目专属隔离候选区生成策略源码，并自动执行 4 级 Pre-Flight 运行期沙盒；若校验失败则使用 patch_strategy_candidate 定点精准修补，最多三轮；不得因为技术错误改变交易规则。禁止通过通用文件工具直接修改生产策略目录。
+7. 你可以在完整 QuantLab 项目文件系统和终端中使用 coding-tools（read_file/search_code/list_files/run_command）读取相关示例或运行验证。
+8. 4 级沙盒全部通过后，读取最终权威源码并调用 write_strategy_code 提交正式发布审批。只汇报最终 Diff、验证和烟雾回测结果。
+"""
+
+
+REPAIR_PHASE_INSTRUCTIONS = """你是 QuantLab NautilusTrader 策略诊断与修复专家。当前阶段严格限定为 REPAIR（策略检查与定向修复），使用简体中文。
+
+你的唯一目标是：使用完整项目文件系统搜索和 coding-tools 读取当前真实策略、契约、测试与完整报错，定位根因，做最小修复并确保通过 Pre-Flight 和相关测试。
+禁止重新讨论研究方案，禁止生成回测参数，禁止执行回测。
+
+必须满足以下修复铁律（CRITICAL）：
+1. 【四大核心导出声明】：
+   - `class <SlugPascalCase>Config(StrategyConfig, frozen=True)`
+   - `class <SlugPascalCase>Strategy(Strategy)`
+   - `calculate_indicators(df: pd.DataFrame, params: dict | None = None) -> pd.DataFrame`：必须计算并返回 `plot_config` 中声明的全部指标列，且使用 `.bfill().fillna(0.0)` 处理头部 NaN。
+   - `STRATEGY_MANIFEST = StrategyManifest(...)`：必须从 `app.strategy_contract` 导入 `StrategyManifest`, `ParameterSpec`, `StrategyMode` 并实例化对象（严禁写成原生 dict 字典！），`strategy_path` 与 `config_path` 必须带 `app.strategies.{slug}:` 前缀。
+2. 【API 安全与合规】：
+   - 禁止 `portfolio.account_balance`、`portfolio.is_net_flat`、`portfolio.position`、`close_position`、`instrument.round_quantity`。
+   - 订单数量必须使用 `Quantity` 或 `instrument.make_qty`。
+3. 【单轮闭环】：
+   - 使用 read_strategy_candidate 读取候选区权威源码并使用 patch_strategy_candidate 进行局部定点编辑；禁止根据 Prompt 中的旧源码盲目重建整份策略。
+   - 运行 Pre-Flight 获取结构化 diagnostics，并一次处理同批可确定问题；每轮后运行相关测试。
+   - 最多三轮。同一错误重复出现两次时读取真实契约实现，不再猜测；三次仍失败则输出框架缺陷报告。
+   - 校验通过后调用 write_strategy_code 同步版本记录并结束，不生成审批卡，不执行正式回测。
 """
 
 
@@ -303,6 +315,8 @@ def _instructions_for_phase(phase: str) -> str:
         return RESEARCH_PHASE_INSTRUCTIONS
     if phase == "IMPLEMENTATION":
         return IMPLEMENTATION_PHASE_INSTRUCTIONS
+    if phase in {"REPAIR", "FIX_ERROR"}:
+        return REPAIR_PHASE_INSTRUCTIONS
     return RESEARCH_INSTRUCTIONS
 
 
@@ -310,7 +324,7 @@ INTENT_PHASES = {
     "DISCUSS_STRATEGY": "RESEARCH",
     "MODIFY_STRATEGY_PLAN": "RESEARCH",
     "START_IMPLEMENTATION": "IMPLEMENTATION",
-    "MODIFY_STRATEGY_CODE": "IMPLEMENTATION",
+    "MODIFY_STRATEGY_CODE": "REPAIR",
     "REQUEST_BACKTEST": "BACKTEST",
     "MODIFY_BACKTEST_PARAMS": "BACKTEST",
     "ANALYZE_BACKTEST": "RESULT_REVIEW",
@@ -322,14 +336,99 @@ def _implementation_prompt(
     project: ResearchProject,
     user_confirmation: str,
     approved_plan: str = "",
+    candidate_code: str = "",
+    original_idea: str = "",
 ) -> str:
+    eff_idea = (original_idea or project.original_idea or "").strip()
+    candidate_section = (
+        f"\n\n【已有候选源码草稿（已通过 4 级 Pre-Flight 校验）】\n```python\n{candidate_code}\n```\n"
+        "如已有草稿完全符合要求，可直接调用 write_strategy_code 提交正式发布审批，或调用 stage_strategy_candidate 进行微调。"
+        if candidate_code
+        else ""
+    )
     return (
-        "用户已明确确认进入策略编码阶段。请直接生成完整策略代码，并调用 write_strategy_code 提交真实审批提案。"
+        "用户已明确确认进入策略编码阶段。请生成完整策略代码，第一步直接调用 stage_strategy_candidate 提交策略源码并完成 4 级 Pre-Flight 校验；"
+        "禁止在写码前调用 list_files/search_code/run_command 做多余的漫游检索；"
+        "失败时只用 patch_strategy_candidate 修复报错片段；通过后再调用 write_strategy_code 提交真实发布审批。"
         "不要重新研究、不要再次询问授权、不要执行回测。\n\n"
-        f"【完整原始需求】\n{project.original_idea.strip()}\n\n"
+        f"【完整原始需求】\n{eff_idea}\n\n"
         f"【已确认的最新研究方案】\n{approved_plan.strip()}\n\n"
         f"【用户最新确认与范围调整】\n{user_confirmation.strip()}"
+        f"{candidate_section}"
     )
+
+
+async def _resolve_implementation_context(
+    project: ResearchProject,
+    db: AsyncSession,
+) -> tuple[str, str, str]:
+    """Retrieve robust original idea, substantive research plan, and existing candidate code."""
+    from .models import CandidateRevision
+
+    # 1. Resolve original idea
+    original_idea = (getattr(project, "original_idea", "") or "").strip()
+    if not original_idea and hasattr(db, "scalar"):
+        try:
+            first_user_msg = await db.scalar(
+                select(ResearchMessage.content)
+                .where(ResearchMessage.project_id == project.id, ResearchMessage.role == "user")
+                .order_by(ResearchMessage.created_at.asc())
+                .limit(1)
+            )
+            if first_user_msg and first_user_msg.strip():
+                original_idea = first_user_msg.strip()
+                project.original_idea = original_idea
+        except Exception:
+            pass
+
+    # 2. Resolve substantive approved plan
+    approved_plan = ""
+    if hasattr(db, "scalars"):
+        try:
+            specs = list((await db.scalars(
+                select(StrategySpecification)
+                .where(StrategySpecification.project_id == project.id)
+                .order_by(StrategySpecification.version.asc())
+            )).all())
+            for spec in reversed(specs):
+                content = spec.content or {}
+                plan = str(content.get("approved_plan") or "").strip()
+                if len(plan) > 100:
+                    approved_plan = plan
+                    break
+
+            if not approved_plan:
+                assistant_msgs = list((await db.scalars(
+                    select(ResearchMessage)
+                    .where(ResearchMessage.project_id == project.id, ResearchMessage.role == "assistant")
+                    .order_by(ResearchMessage.created_at.desc())
+                    .limit(15)
+                )).all())
+                for msg in assistant_msgs:
+                    text = (msg.content or "").strip()
+                    if len(text) > 100:
+                        approved_plan = text
+                        break
+                if not approved_plan and assistant_msgs:
+                    approved_plan = (assistant_msgs[0].content or "").strip()
+        except Exception:
+            pass
+
+    # 3. Check for existing candidate revision code
+    candidate_code = ""
+    if hasattr(db, "scalar"):
+        try:
+            latest_candidate = await db.scalar(
+                select(CandidateRevision)
+                .where(CandidateRevision.project_id == project.id)
+                .order_by(CandidateRevision.created_at.desc())
+                .limit(1)
+            )
+            candidate_code = (latest_candidate.code or "").strip() if latest_candidate else ""
+        except Exception:
+            pass
+
+    return original_idea, approved_plan, candidate_code
 
 
 async def _recent_intent_context(
@@ -352,6 +451,87 @@ async def _recent_intent_context(
         {"role": row.role, "content": (row.content or "")[-6000:]}
         for row in reversed(rows)
     ]
+
+
+async def _approve_research_specification(
+    project: ResearchProject,
+    approved_plan: str,
+    db: AsyncSession,
+) -> StrategySpecification:
+    """Freeze the exact research plan used as implementation input."""
+    existing = (
+        await db.scalars(
+            select(StrategySpecification)
+            .where(StrategySpecification.project_id == project.id)
+            .order_by(StrategySpecification.version.desc())
+        )
+    ).all()
+    for item in existing:
+        if item.status == SpecificationStatus.APPROVED:
+            item.status = SpecificationStatus.SUPERSEDED
+    spec = StrategySpecification(
+        project_id=project.id,
+        version=(existing[0].version + 1) if existing else 1,
+        status=SpecificationStatus.APPROVED,
+        content={
+            "approved_plan": approved_plan.strip(),
+            "original_idea": (project.original_idea or "").strip(),
+            "frozen_at": datetime.now(UTC).isoformat(),
+        },
+        approved_at=datetime.now(UTC),
+    )
+    db.add(spec)
+    await db.commit()
+    await db.refresh(spec)
+    return spec
+
+
+def _build_auto_repair_prompt(
+    strategy_name: str,
+    candidate_code: str,
+    verification: dict[str, Any],
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    verification_json = json.dumps(verification, ensure_ascii=False, default=str)
+    return f"""这是框架自动启动的策略契约修复回合（第 {attempt}/{max_attempts} 次）。
+策略名：{strategy_name}
+
+【Pre-Flight 结构化错误】
+{verification_json}
+
+【已落盘到项目隔离候选区的失败源码副本】
+```python
+{candidate_code}
+```
+
+只修复上述校验错误以及由同一契约直接暴露的问题，不改变交易假设、信号、参数默认值或风险规则。
+必须保持完整单文件，并严格满足当前 QuantLab 合同：
+1. 从 app.strategy_contract 导入并实例化 StrategyManifest、ParameterSpec、StrategyMode。
+2. STRATEGY_MANIFEST.parameters 必须是 dict[str, ParameterSpec]，不能是 list 或原生 dict 参数项。
+3. plot_config 必须使用 main_plot/subplots 双层字典，且 calculate_indicators 覆盖全部声明列。
+4. strategy_path/config_path 必须指向当前模块的实际 Strategy/Config 类。
+5. 禁止使用被平台列入黑名单的 Nautilus API。
+
+先调用 read_strategy_candidate 读取候选区权威源码，再用 patch_strategy_candidate 仅修复错误片段；每次补丁都会重跑 Pre-Flight。
+全部通过后再次读取最终源码，调用 write_strategy_code 提交正式发布审批。收到 awaiting_approval 后立即停止；禁止回测。
+"""
+
+
+async def _auto_repair_attempt_count(project_id: str, db: AsyncSession) -> int:
+    rows = (
+        await db.scalars(
+            select(ResearchMessage).where(
+                ResearchMessage.project_id == project_id,
+                ResearchMessage.message_type == "system",
+            )
+        )
+    ).all()
+    return sum(
+        1
+        for row in rows
+        if (row.metadata_json or {}).get("event_type") == "auto_repair_started"
+    )
 
 
 def _intent_routed_prompt(intent_result: dict[str, Any], user_message: str) -> str:
@@ -594,6 +774,7 @@ def _start_dsh_turn(
     step: str = "DSH Quant Lead 正在拆解任务并调度研究闭环...",
     phase: str | None = None,
     task_profile: str = "",
+    agent_task_id: str | None = None,
 ) -> asyncio.Task[None]:
     """Kick off one DSH orchestrator turn in the background.
 
@@ -613,6 +794,12 @@ def _start_dsh_turn(
             thought or "",
         )
         try:
+            if agent_task_id:
+                from .workflow.task_service import start_task
+                async with SessionLocal() as s:
+                    durable_task = await s.get(AgentTask, agent_task_id)
+                    if durable_task:
+                        await start_task(s, durable_task, dsh_engine._sdk_session_id(project, resolved_phase))
             res = await dsh_engine.run_turn(
                 project,
                 content,
@@ -623,6 +810,12 @@ def _start_dsh_turn(
         except Exception as exc:
             logger.error("DSH 回合异常 (project=%s): %s", project.id, exc, exc_info=True)
             _set_thinking_status(project.id, "IDLE", "DSH 回合异常", f"运行出错：{exc}")
+            if agent_task_id:
+                from .workflow.task_service import fail_task
+                async with SessionLocal() as s:
+                    durable_task = await s.get(AgentTask, agent_task_id)
+                    if durable_task:
+                        await fail_task(s, durable_task, "DSH_RUN_EXCEPTION", str(exc))
             return
         final_text = res.get("final_response") if res.get("ok") else ""
         if final_text and not res.get("final_response_persisted"):
@@ -649,10 +842,24 @@ def _start_dsh_turn(
                 ))
                 await s.commit()
             _set_thinking_status(project.id, "FAILED", "DSH 回合未完成", error)
+            if agent_task_id:
+                from .workflow.error_router import classify_error
+                from .workflow.task_service import fail_task
+                route = classify_error(error)
+                async with SessionLocal() as s:
+                    durable_task = await s.get(AgentTask, agent_task_id)
+                    if durable_task:
+                        await fail_task(s, durable_task, route.code, error)
         elif res.get("pending"):
             _set_thinking_status(project.id, "WAITING_APPROVAL", "等待你的审批", res["pending"][0].get("summary", "DSH 提交了待确认操作"))
         else:
             _set_thinking_status(project.id, "IDLE", "就绪", "")
+            if agent_task_id:
+                from .workflow.task_service import complete_task
+                async with SessionLocal() as s:
+                    durable_task = await s.get(AgentTask, agent_task_id)
+                    if durable_task:
+                        await complete_task(s, durable_task, res)
 
     task = asyncio.create_task(_worker())
     ACTIVE_RESEARCH_TASKS[project.id] = task
@@ -1305,21 +1512,29 @@ async def run_dsh_action_endpoint(
     if project.id in ACTIVE_RESEARCH_TASKS and not ACTIVE_RESEARCH_TASKS[project.id].done():
         raise HTTPException(409, "当前 DSH 任务仍在执行，请等待完成或先停止任务")
 
-    from app.dsh.bridge import create_pending_proposal, pending_approvals
-
-    if pending_approvals(project.id):
-        raise HTTPException(409, "当前已有待审批卡片，请先批准或拒绝后再启动新任务")
-
     action_run: BacktestRun | None = None
     if data.action in {"RUN_BACKTEST", "FIX_ERROR"} and not project.strategy_id:
-        raise HTTPException(409, "当前项目还没有可执行策略，请先编写策略")
-    if data.action == "FIX_ERROR":
-        action_run = await _resolve_action_run(
-            project,
-            db,
-            run_id=data.run_id,
-            status=RunStatus.FAILED,
+        from .dsh.bridge import _resolve_strategy_name_for_project
+        resolved_name = await _resolve_strategy_name_for_project(
+            project, (data.arguments or {}).get("strategy_name"), db
         )
+        strat_rec = await ensure_strategy_db_record(resolved_name, db, project_id=project.id)
+        if strat_rec and strat_rec[0]:
+            project.strategy_id = strat_rec[0].id
+            await db.commit()
+        elif data.action == "RUN_BACKTEST":
+            raise HTTPException(409, "当前项目还没有可执行策略，请先编写策略")
+
+    if data.action == "FIX_ERROR":
+        try:
+            action_run = await _resolve_action_run(
+                project,
+                db,
+                run_id=data.run_id,
+                status=RunStatus.FAILED,
+            )
+        except HTTPException:
+            action_run = None
     elif data.action == "ANALYZE_BACKTEST":
         action_run = await _resolve_action_run(
             project,
@@ -1350,46 +1565,132 @@ async def run_dsh_action_endpoint(
     project.updated_at = datetime.now(UTC)
     await db.commit()
 
+    from .workflow.task_service import create_task
+
+    worker_by_action = {
+        "WRITE_STRATEGY": WorkerType.CODING,
+        "FIX_ERROR": WorkerType.CODING,
+        "RUN_BACKTEST": WorkerType.BACKTEST,
+        "ANALYZE_BACKTEST": WorkerType.ANALYSIS,
+    }
+    durable_task = await create_task(
+        db,
+        project_id=project.id,
+        worker_type=worker_by_action[data.action],
+        task_type=data.action,
+        input_json={
+            "content": user_content,
+            "arguments": dict(data.arguments or {}),
+            "run_id": data.run_id,
+        },
+        max_attempts=3 if data.action in {"WRITE_STRATEGY", "FIX_ERROR"} else 2,
+    )
+
     if data.action == "RUN_BACKTEST" and _complete_backtest_arguments(data.arguments):
+        from .dsh.bridge import _exec_execute_backtest, _normalize_backtest_arguments
+        from .workflow.task_service import complete_task, fail_task, start_task
+
         arguments = dict(data.arguments)
         if "parameters" not in arguments and "strategy_parameters" in arguments:
             arguments["parameters"] = arguments.pop("strategy_parameters")
-        proposal = await create_pending_proposal(
-            project,
-            "execute_backtest_tool",
-            arguments,
-            db,
-            proposal_key=f"fixed-action:{user_msg.id}",
-        )
+        arguments = _normalize_backtest_arguments(arguments)
+        await start_task(db, durable_task, f"direct-backtest-{project.id}")
+        try:
+            result = await _exec_execute_backtest(project, arguments, db)
+            if not result.get("ok"):
+                err_msg = str(result.get("error") or result.get("error_message") or "回测执行失败")
+                await fail_task(db, durable_task, "BACKTEST_FAILED", err_msg)
+                db.add(ResearchMessage(
+                    project_id=project.id,
+                    role="system",
+                    content=f"回测任务启动失败：{err_msg}",
+                    message_type="error",
+                    metadata_json={"event_type": "fixed_action_failed", "action": data.action, "result": result},
+                ))
+                await db.commit()
+                _set_thinking_status(project.id, "FAILED", "回测任务启动失败", err_msg)
+                return {
+                    "ok": False,
+                    "error": err_msg,
+                    "action": data.action,
+                    "phase": project.research_phase,
+                    "result": result,
+                }
+            await complete_task(db, durable_task, result)
+        except Exception as exc:
+            from .workflow.error_router import classify_error
+
+            route = classify_error(exc)
+            await fail_task(db, durable_task, route.code, str(exc))
+            raise
+        strat_name = arguments.get("strategy_name") or "策略"
+        run_id = result.get("run_id")
+        metrics = result.get("metrics") or {}
+        if result.get("ok") and metrics:
+            total_ret = metrics.get("total_return")
+            sharpe = (
+                metrics.get("sharpe_ratio")
+                if metrics.get("sharpe_ratio") is not None
+                else metrics.get("sharpe")
+            )
+            max_dd = metrics.get("max_drawdown")
+            trades = (
+                metrics.get("total_trades")
+                if metrics.get("total_trades") is not None
+                else metrics.get("trades")
+            )
+            ret_str = f"{total_ret:.2f}%" if total_ret is not None else "—"
+            sharpe_str = f"{sharpe:.2f}" if sharpe is not None else "—"
+            dd_str = f"{max_dd:.2f}%" if max_dd is not None else "—"
+            content = (
+                f"回测任务 `{run_id}` 已完成！\n"
+                f"- **策略**: {strat_name}\n"
+                f"- **总收益率**: {ret_str}\n"
+                f"- **夏普比率**: {sharpe_str}\n"
+                f"- **最大回撤**: {dd_str}\n"
+                f"- **交易次数**: {trades or 0} 笔\n\n"
+                f"已生成回测指标卡片，可点击下方卡片查看完整报告或发起深度归因分析。"
+            )
+        else:
+            content = f"已直接提交回测任务：{run_id}。"
+
         db.add(ResearchMessage(
             project_id=project.id,
             role="assistant",
-            content="已使用确认后的参数生成回测执行卡。请在下方核对并批准；批准后将直接提交 QuantLab 引擎，不再调用模型。",
+            content=content,
             message_type="message",
-            metadata_json={"event_type": "fixed_action_ready", "action": data.action},
+            metadata_json={
+                "event_type": "fixed_action_executed",
+                "action": data.action,
+                "tool": "execute_backtest_tool",
+                "run_id": run_id,
+                "arguments": arguments,
+                "result": result,
+                "ok": result.get("ok", True),
+            },
         ))
         await db.commit()
-        _set_thinking_status(project.id, "WAITING_APPROVAL", "等待你确认回测执行卡", "")
+        _set_thinking_status(project.id, "IDLE", "回测任务已就绪", "")
         return {
             "ok": True,
             "kicked_off": False,
             "action": data.action,
             "phase": project.research_phase,
-            "proposal": proposal,
+            "result": result,
         }
 
     recent_messages = await _recent_intent_context(project.id, db)
     task_profile = data.action
     if data.action == "WRITE_STRATEGY":
-        latest_plan = next(
-            (item["content"] for item in reversed(recent_messages) if item["role"] == "assistant"),
-            "",
-        )
+        eff_idea, latest_plan, candidate_code = await _resolve_implementation_context(project, db)
+        await _approve_research_specification(project, latest_plan, db)
         phase = "IMPLEMENTATION"
         prompt = _implementation_prompt(
             project,
             data.content.strip() or "按已确认方案直接生成策略代码",
             latest_plan,
+            candidate_code=candidate_code,
+            original_idea=eff_idea,
         )
         step = "DSH 正在直接编写策略并进行一次集中验证..."
     elif data.action == "RUN_BACKTEST":
@@ -1401,20 +1702,42 @@ async def run_dsh_action_endpoint(
         )
         step = "DSH 正在准备最小回测参数卡..."
     elif data.action == "FIX_ERROR":
-        run = action_run
-        assert run is not None
-        config = run.config or {}
-        strategy_name = str(config.get("strategy_name") or run.name or "strategy")
-        phase = "IMPLEMENTATION"
-        prompt = (
-            f"这是用户点击的单次修复动作。失败回测 ID：{run.id}\n"
-            f"策略：{strategy_name}\n"
-            f"失败阶段：{run.stage}\n"
-            f"报错：{(run.error_message or '未知错误')[-6000:]}\n\n"
-            "直接读取当前策略，定位根因，只进行一次针对性修复和一次集中验证，"
-            "然后调用 write_strategy_code 提交审批卡并停止。禁止生成回测参数，禁止执行回测。"
+        if action_run is not None:
+            run = action_run
+            config = run.config or {}
+            strategy_name = str(config.get("strategy_name") or run.name or "strategy")
+            err_text = str(run.error_message or "未知错误")[-6000:]
+            run_desc = f"失败回测 ID：{run.id}\n失败阶段：{run.stage}\n"
+        else:
+            from .dsh.bridge import _resolve_strategy_name_for_project, _workspace_strategy_file
+            strategy_name = await _resolve_strategy_name_for_project(
+                project, (data.arguments or {}).get("strategy_name"), db
+            )
+            err_text = str((data.arguments or {}).get("error_message") or data.content or "策略运行/加载报错")[-6000:]
+            run_desc = ""
+
+        candidate_path = _workspace_strategy_file(project, strategy_name)
+        candidate_code = (
+            candidate_path.read_text(encoding="utf-8")
+            if candidate_path.exists()
+            else ""
         )
-        step = "DSH 正在针对失败记录执行单次代码修复..."
+        candidate_context = (
+            f"\n【当前项目未发布候选源码】\n```python\n{candidate_code}\n```\n"
+            if candidate_code
+            else ""
+        )
+
+        phase = "REPAIR"
+        prompt = (
+            f"这是用户发起的单次修复动作。\n{run_desc}"
+            f"策略：{strategy_name}\n"
+            f"报错：{err_text}\n{candidate_context}\n"
+            "直接使用完整项目文件系统和终端读取当前策略、契约和相关测试，定位根因并做最小修改。"
+            "运行统一 Pre-Flight 和相关测试；失败后根据完整错误继续修复，最多三轮。"
+            "全部通过后保存结果并停止。禁止改变策略交易规则，禁止执行正式回测。"
+        )
+        step = "DSH 正在针对策略报错执行单次代码修复..."
     else:
         run = action_run
         assert run is not None
@@ -1425,11 +1748,13 @@ async def run_dsh_action_endpoint(
             f"配置：{json.dumps(run.config or {}, ensure_ascii=False, default=str)[:4000]}\n"
             f"指标：{json.dumps(run.metrics or {}, ensure_ascii=False, default=str)[:4000]}\n\n"
             "直接输出简洁、可执行的绩效归因：收益来源、亏损来源、市场适应性、风险与下一步建议。"
+            "必须明确说明当前结果属于单区间策略级回测，不得把因子实验等同于策略级稳健性，"
+            "若未执行未见样本或 walk-forward，必须将其列为证据限制。"
             "禁止修改代码、生成参数或重新回测。"
         )
         step = "DSH 正在直接分析指定回测结果..."
 
-    project.research_phase = phase
+    apply_research_phase(project, phase)
     project.updated_at = datetime.now(UTC)
     await db.commit()
     _start_dsh_turn(
@@ -1438,6 +1763,7 @@ async def run_dsh_action_endpoint(
         step=step,
         phase=phase,
         task_profile=task_profile,
+        agent_task_id=durable_task.id,
     )
     return {
         "ok": True,
@@ -1598,18 +1924,18 @@ async def run_dsh_pipeline_endpoint(
         _set_thinking_status(project.id, "IDLE", "当前没有可分析的回测结果", "")
         return {"ok": True, "kicked_off": False, "intent": intent, "message": reply}
 
-    project.research_phase = phase
+    apply_research_phase(project, phase)
     project.updated_at = datetime.now(UTC)
     await db.commit()
     if phase == "IMPLEMENTATION":
-        latest_plan = next(
-            (item["content"] for item in reversed(recent_messages) if item["role"] == "assistant"),
-            "",
-        )
+        eff_idea, latest_plan, candidate_code = await _resolve_implementation_context(project, db)
+        await _approve_research_specification(project, latest_plan, db)
         turn_prompt = _implementation_prompt(
             project,
             intent_result.get("normalized_request") or data.content,
             latest_plan,
+            candidate_code=candidate_code,
+            original_idea=eff_idea,
         )
         step = "DSH 正在生成完整策略代码并准备审批提案..."
     else:
@@ -1629,12 +1955,28 @@ async def run_dsh_pipeline_endpoint(
         "REQUEST_BACKTEST": "RUN_BACKTEST",
         "ANALYZE_BACKTEST": "ANALYZE_BACKTEST",
     }.get(intent, "")
+    from .dsh.profiles import worker_for_phase
+    from .workflow.task_service import create_task
+
+    durable_task = await create_task(
+        db,
+        project_id=project.id,
+        worker_type=worker_for_phase(phase),
+        task_type=task_profile or intent,
+        input_json={
+            "intent": intent,
+            "content": data.content,
+            "normalized_request": intent_result.get("normalized_request"),
+        },
+        max_attempts=3 if phase in {"IMPLEMENTATION", "REPAIR", "FIX_ERROR"} else 2,
+    )
     _start_dsh_turn(
         project,
         turn_prompt,
         step=step,
         phase=phase,
         task_profile=task_profile,
+        agent_task_id=durable_task.id,
     )
     return {
         "ok": True,
@@ -1680,6 +2022,33 @@ async def dsh_pending_approvals(
     return pending_approvals(project_id)
 
 
+@router.get("/{project_id}/tasks")
+async def research_tasks(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Expose the durable specialist-worker timeline for recovery and UI diagnostics."""
+    await _project(project_id, db)
+    rows = list((await db.scalars(
+        select(AgentTask).where(AgentTask.project_id == project_id).order_by(AgentTask.created_at.desc())
+    )).all())
+    return [{
+        "id": item.id,
+        "worker_type": item.worker_type.value,
+        "task_type": item.task_type,
+        "status": item.status.value,
+        "attempt": item.attempt,
+        "max_attempts": item.max_attempts,
+        "session_id": item.session_id,
+        "input": item.input_json,
+        "output": item.output_json,
+        "error_code": item.error_code,
+        "error_message": item.error_message,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    } for item in rows]
+
+
 @router.post("/{project_id}/dsh/approve")
 async def dsh_approve_request(
     project_id: str,
@@ -1701,15 +2070,23 @@ async def dsh_approve_request(
         # message after the approval has already been consumed.
         dsh_engine.cancel_turn(project.id)
         if approved_tool == "write_strategy_code":
-            project.research_phase = "IMPLEMENTATION"
+            apply_research_phase(project, "IMPLEMENTATION")
         elif approved_tool == "execute_backtest_tool":
-            project.research_phase = "BACKTEST"
+            apply_research_phase(project, "BACKTEST")
         await db.commit()
         execution = await execute_approved_proposal(project, data.request_id, db)
         result = execution.get("result") or {}
         result_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
         result_run_id = result.get("run_id") if isinstance(result, dict) else None
         result_summary = json.dumps(result, ensure_ascii=False, default=str)[:12_000]
+        reviewed_arguments = dict(pending_entry.get("arguments") or {})
+        candidate_code = str(reviewed_arguments.get("code") or "")
+        audit_arguments = {
+            key: value for key, value in reviewed_arguments.items() if key != "code"
+        }
+        if candidate_code:
+            audit_arguments["code_sha256"] = hashlib.sha256(candidate_code.encode()).hexdigest()
+            audit_arguments["code_chars"] = len(candidate_code)
         db.add(ResearchMessage(
             project_id=project.id,
             role="assistant",
@@ -1726,13 +2103,83 @@ async def dsh_approve_request(
                 "tool": approved_tool,
                 "ok": result_ok,
                 "run_id": result_run_id,
-                "arguments": pending_entry.get("arguments") or {},
+                "arguments": audit_arguments,
+                "result": result,
             },
         ))
         await db.commit()
+        if approved_tool == "write_strategy_code":
+            apply_research_phase(project, "IMPLEMENTED" if result_ok else "REPAIR")
+            await db.commit()
+            if not result_ok:
+                attempts = await _auto_repair_attempt_count(project.id, db)
+                max_attempts = max(0, settings.dsh_auto_repair_max_attempts)
+                verification = result.get("verification") if isinstance(result, dict) else None
+                strategy_name = str(
+                    (result.get("strategy_name") if isinstance(result, dict) else None)
+                    or reviewed_arguments.get("strategy_name")
+                    or "strategy"
+                )
+                if candidate_code and isinstance(verification, dict) and attempts < max_attempts:
+                    attempt = attempts + 1
+                    repair_prompt = _build_auto_repair_prompt(
+                        strategy_name,
+                        candidate_code,
+                        verification,
+                        attempt,
+                        max_attempts,
+                    )
+                    db.add(ResearchMessage(
+                        project_id=project.id,
+                        role="system",
+                        content=(
+                            f"Pre-Flight 未通过，框架已自动启动第 {attempt}/{max_attempts} 次受限修复回合。"
+                            "修复完成后会生成新的代码审批卡。"
+                        ),
+                        message_type="system",
+                        metadata_json={
+                            "event_type": "auto_repair_started",
+                            "strategy_name": strategy_name,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "failed_level": verification.get("failed_level"),
+                            "error_message": verification.get("error_message"),
+                        },
+                    ))
+                    await db.commit()
+                    _set_thinking_status(
+                        project.id,
+                        "THINKING",
+                        f"正在自动修复策略契约错误 ({attempt}/{max_attempts})",
+                        "",
+                    )
+                    _start_dsh_turn(
+                        project,
+                        repair_prompt,
+                        step=f"DSH 正在执行受限契约修复 ({attempt}/{max_attempts})...",
+                        phase="REPAIR",
+                        task_profile="FIX_ERROR",
+                    )
+                    return {
+                        "ok": True,
+                        **decision,
+                        "auto_repair_started": True,
+                        "auto_repair_attempt": attempt,
+                    }
+                db.add(ResearchMessage(
+                    project_id=project.id,
+                    role="system",
+                    content=(
+                        "Pre-Flight 未通过，自动修复未启动："
+                        + ("已达到最大修复次数。" if attempts >= max_attempts else "缺少候选源码或结构化校验信息。")
+                    ),
+                    message_type="system",
+                    metadata_json={"event_type": "auto_repair_exhausted", "attempts": attempts},
+                ))
+                await db.commit()
         _set_thinking_status(project.id, "IDLE", "审批操作已执行", "")
     else:
-        project.research_phase = "RESEARCH" if approved_tool == "write_strategy_code" else "IMPLEMENTATION"
+        apply_research_phase(project, "RESEARCH" if approved_tool == "write_strategy_code" else "IMPLEMENTATION")
         await db.commit()
         _set_thinking_status(project.id, "IDLE", "已拒绝该操作", data.feedback or "")
 

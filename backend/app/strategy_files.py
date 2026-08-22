@@ -1,7 +1,9 @@
 import ast
 import logging
+import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -22,47 +24,23 @@ def ensure_strategy_storage() -> None:
     STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Sync from STRATEGY_DIR to PERSISTENT_STRATEGY_DIR (preserve newer / larger / valid strategies)
+    # 1. Sync from STRATEGY_DIR to PERSISTENT_STRATEGY_DIR (preserve newer strategies)
     for p in STRATEGY_DIR.glob("*.py"):
         if p.name == "__init__.py":
             continue
         dest = PERSISTENT_STRATEGY_DIR / p.name
-        should_sync = False
-        if not dest.exists():
-            should_sync = True
-        else:
-            p_size = p.stat().st_size
-            dest_size = dest.stat().st_size
-            if p_size > dest_size and p_size > 1000:
-                should_sync = True
-            elif p.stat().st_mtime > dest.stat().st_mtime and p_size >= (dest_size - 100):
-                should_sync = True
-
-        if should_sync:
+        if not dest.exists() or p.stat().st_mtime >= dest.stat().st_mtime:
             try:
                 shutil.copy2(p, dest)
             except Exception as e:
                 logger.warning("同步策略到持久化目录失败 %s: %s", p.name, e)
 
-    # 2. Sync from PERSISTENT_STRATEGY_DIR to STRATEGY_DIR (never overwrite a large strategy with a small template)
+    # 2. Restore from PERSISTENT_STRATEGY_DIR to STRATEGY_DIR if missing in STRATEGY_DIR
     for p in PERSISTENT_STRATEGY_DIR.glob("*.py"):
         if p.name == "__init__.py":
             continue
         dest = STRATEGY_DIR / p.name
-        should_restore = False
         if not dest.exists():
-            should_restore = True
-        else:
-            p_size = p.stat().st_size
-            dest_size = dest.stat().st_size
-            if dest_size > p_size and dest_size > 1200:
-                should_restore = False
-            elif p_size > dest_size and p_size > 1000:
-                should_restore = True
-            elif p.stat().st_mtime > dest.stat().st_mtime:
-                should_restore = True
-
-        if should_restore:
             try:
                 shutil.copy2(p, dest)
             except Exception as e:
@@ -100,6 +78,22 @@ def ensure_strategy_storage() -> None:
                     logger.warning("恢复 Agent 策略文件失败 %s: %s", wt_file.name, e)
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace a text file atomically without exposing a partial strategy."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def save_strategy_code(name: str, code: str) -> Path:
     """Save strategy code to both ephemeral STRATEGY_DIR and persistent PERSISTENT_STRATEGY_DIR."""
     from .agent.strategy_verifier import extract_python_strategy_code, _clean_code_lines
@@ -112,8 +106,10 @@ def save_strategy_code(name: str, code: str) -> Path:
     PERSISTENT_STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
     canonical = (STRATEGY_DIR / f"{name}.py").resolve()
     persisted = (PERSISTENT_STRATEGY_DIR / f"{name}.py").resolve()
-    canonical.write_text(clean_code, encoding="utf-8")
-    persisted.write_text(clean_code, encoding="utf-8")
+    # Persistent storage is replaced first. If the second replace fails, startup
+    # recovery restores the canonical copy from this complete persisted file.
+    _atomic_write_text(persisted, clean_code)
+    _atomic_write_text(canonical, clean_code)
     return canonical
 
 
@@ -303,4 +299,3 @@ def delete_file(name: str):
         path.unlink(missing_ok=True)
     if persisted.exists():
         persisted.unlink(missing_ok=True)
-

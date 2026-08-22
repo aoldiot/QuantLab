@@ -1,6 +1,5 @@
-# QuantLab DSH runtime cordis config. The SDK injects this path via
-# DSH_CORDIS_CONFIG. $DSH_CWD / $DSH_SESSION_ROOT come from the engine.
-
+# Backtest DSH runtime. Isolates backtesting workflow: generates editable parameter
+# cards and submits backtest execution proposals under approval gating.
 - id: sdk-jsonrpc-server
   name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
 
@@ -8,7 +7,7 @@
   name: '@deepseek-ai/dsh-agent-spine-demo'
   config:
     workspaceContext:
-      maxBytes: 65536
+      maxBytes: 32768
 
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek'
@@ -24,13 +23,5 @@
 - id: subprocess
   name: '@deepseek-ai/dsh-subprocess-local'
 
-- id: coding-tools
-  name: './src/coding-tools.mjs'
-
-# QuantLab domain tools exposed over the HTTP bridge. The plugin must be a
-# plain ESM .mjs module: the bundled loader does not transpile TypeScript.
-# Cordis resolves relative plugin names from this config file's directory, so
-# the runtime remains portable without evaluating an object-valued `!!js`
-# expression in the loader's `name` field.
 - id: quantlab-tools
   name: './src/quantlab-tools.mjs'

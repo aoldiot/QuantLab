@@ -1,20 +1,60 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib.metadata
 import logging
+import os
+import platform
+import sys
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import SessionLocal
 from app.git_versions import code_hash, manifest_hash
 from app.models import BacktestRun, RunStatus, Strategy, StrategyVersion
 from app.runner import execute_backtest
-from app.strategy_contract import load_manifest, validate_parameters
+from app.strategy_contract import StrategyMode, load_manifest, validate_parameters
 from app.strategy_files import _path
 
 logger = logging.getLogger(__name__)
+
+
+def _catalog_snapshot(path: Path) -> dict[str, Any]:
+    """Create a bounded metadata fingerprint for reproducibility/audit."""
+    digest = hashlib.sha256()
+    file_count = 0
+    total_bytes = 0
+    if path.exists():
+        for item in sorted((p for p in path.rglob("*") if p.is_file()), key=lambda p: str(p.relative_to(path))):
+            stat = item.stat()
+            relative = str(item.relative_to(path))
+            digest.update(f"{relative}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+            file_count += 1
+            total_bytes += stat.st_size
+    return {
+        "path": str(path),
+        "metadata_sha256": digest.hexdigest(),
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+    }
+
+
+def _environment_snapshot() -> dict[str, str]:
+    try:
+        nt_version = importlib.metadata.version("nautilus_trader")
+    except importlib.metadata.PackageNotFoundError:
+        nt_version = "unknown"
+    return {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "nautilus_trader": nt_version,
+        "quantlab_git_commit": os.environ.get("QUANTLAB_GIT_COMMIT", "unknown"),
+    }
 
 
 async def run_nautilus_backtest(
@@ -24,13 +64,28 @@ async def run_nautilus_backtest(
     end_date: str,
     initial_balance: float = 10000.0,
     leverage: float = 1.0,
+    timeframes: list[str] | None = None,
+    venue: str = "BINANCE",
+    market_type: str = "um",
+    execution_model: str = "CONSERVATIVE",
+    approval_hash: str | None = None,
     parameters: dict[str, Any] | None = None,
+    check_data_integrity: bool = True,
+    ignore_missing_data: bool = True,
     project_id: str | None = None,
     db: AsyncSession | None = None,
     timeout_seconds: int = 180,
 ) -> dict[str, Any]:
     """Execute a deterministic NautilusTrader event-driven backtest."""
     strategy_name = strategy_name.strip().lower()
+    source_path = _path(strategy_name)
+    if not source_path.exists():
+        from app.strategy_contract import sanitize_strategy_slug
+        clean_slug = sanitize_strategy_slug(strategy_name)
+        if _path(clean_slug).exists():
+            strategy_name = clean_slug
+            source_path = _path(strategy_name)
+
     module = f"app.strategies.{strategy_name}"
 
     try:
@@ -38,7 +93,6 @@ async def run_nautilus_backtest(
     except Exception as exc:
         return {"ok": False, "error": f"加载策略 Manifest 失败：{exc}"}
 
-    source_path = _path(strategy_name)
     code = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
     if not code:
         return {"ok": False, "error": f"未找到策略代码文件：{strategy_name}.py"}
@@ -86,10 +140,25 @@ async def run_nautilus_backtest(
             await s.flush()
             await s.refresh(version_obj)
 
-        resolved_params = validate_parameters(manifest, parameters or {})
+        try:
+            valid_input_params = {k: v for k, v in (parameters or {}).items() if k in manifest.parameters}
+            resolved_params = validate_parameters(manifest, valid_input_params)
+        except Exception as exc:
+            return {"ok": False, "error": f"策略参数校验失败：{exc}"}
 
         clean_symbols = [s_item.strip() for s_item in symbols if s_item.strip()]
-        timeframes = manifest.data_requirements().get("timeframes", ["15m"])
+        from ..backtests.builder import strategy_config_fields
+        if manifest.mode == StrategyMode.PORTFOLIO and "data_bar_types" in strategy_config_fields(manifest.config_path):
+            required_timeframes = list(dict.fromkeys(manifest.timeframes))
+            approved_timeframes = list(dict.fromkeys(timeframes or required_timeframes))
+            missing = set(required_timeframes) - set(approved_timeframes)
+            if missing:
+                return {
+                    "ok": False,
+                    "error": f"缺少策略要求的数据周期: {', '.join(sorted(missing))}",
+                }
+        else:
+            approved_timeframes = list(dict.fromkeys(timeframes or [manifest.primary_timeframe]))
         run_name = f"{manifest.name}_{start_date}_{end_date}"
 
         config_dict = {
@@ -97,21 +166,30 @@ async def run_nautilus_backtest(
             "strategy_name": strategy_name,
             "strategy_version_id": version_obj.id,
             "strategy_parameters": resolved_params,
-            "venue": "BINANCE",
+            "venue": venue,
             "symbols": clean_symbols,
-            "timeframes": timeframes,
+            "timeframes": approved_timeframes,
+            "market_type": market_type,
             "start_date": start_date,
             "end_date": end_date,
             "initial_balance": initial_balance,
             "leverage": leverage,
-            "execution_model": "CONSERVATIVE",
-            # Automated research runs cannot ask for interactive confirmation,
-            # so fail closed instead of silently skipping catalog gaps.
-            "ignore_missing_data": False,
+            "execution_model": execution_model,
+            "check_data_integrity": check_data_integrity,
+            "ignore_missing_data": ignore_missing_data,
             "strategy_version": {
                 "version": version_obj.version,
                 "code_hash": version_obj.code_hash,
                 "manifest_hash": version_obj.manifest_hash,
+            },
+            "approval_hash": approval_hash,
+            "environment_snapshot": _environment_snapshot(),
+            "catalog_snapshot": _catalog_snapshot(Path(settings.catalog_path).resolve()),
+            "methodology": {
+                "engine": "nautilus_event_driven",
+                "evidence_level": "strategy_backtest",
+                "out_of_sample": False,
+                "walk_forward": False,
             },
         }
 
