@@ -1747,6 +1747,8 @@ async def run_dsh_action_endpoint(
         )
         step = "DSH 正在准备最小回测参数卡..."
     elif data.action == "FIX_ERROR":
+        from .dsh.bridge import _resolve_strategy_name_for_project, _workspace_strategy_file
+
         if action_run is not None:
             run = action_run
             config = run.config or {}
@@ -1754,7 +1756,6 @@ async def run_dsh_action_endpoint(
             err_text = str(run.error_message or "未知错误")[-6000:]
             run_desc = f"失败回测 ID：{run.id}\n失败阶段：{run.stage}\n"
         else:
-            from .dsh.bridge import _resolve_strategy_name_for_project, _workspace_strategy_file
             strategy_name = await _resolve_strategy_name_for_project(
                 project, (data.arguments or {}).get("strategy_name"), db
             )

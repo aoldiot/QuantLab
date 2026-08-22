@@ -267,6 +267,65 @@ def test_generate_backtest_params_uses_bound_strategy_and_dedicated_profile(monk
     assert "只能调用它一次" in started["content"]
 
 
+def test_fix_error_with_failed_run_loads_candidate_workspace(monkeypatch, tmp_path) -> None:
+    project = SimpleNamespace(
+        id="repair-failed-run",
+        status=ResearchStatus.READY_FOR_BACKTEST,
+        updated_at=None,
+        research_phase="BACKTEST",
+        strategy_id="strategy-id",
+    )
+    started = {}
+    candidate = tmp_path / "bound_strategy.py"
+    candidate.write_text("# candidate source\n", encoding="utf-8")
+
+    class FakeDb:
+        def add(self, value) -> None:
+            pass
+
+        async def commit(self) -> None:
+            pass
+
+    async def fake_project(project_id, db):
+        return project
+
+    async def fake_resolve_action_run(*args, **kwargs):
+        return SimpleNamespace(
+            id="failed-run-1",
+            name="bound_strategy",
+            stage="RUNNING",
+            config={"strategy_name": "bound_strategy"},
+            error_message="runtime failed",
+        )
+
+    async def fake_context(project_id, db):
+        return []
+
+    async def fake_create_task(*args, **kwargs):
+        return SimpleNamespace(id="task-1", attempt=0, max_attempts=3)
+
+    def fake_start(project_arg, content, **kwargs):
+        started.update(content=content, **kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(research, "_project", fake_project)
+    monkeypatch.setattr(research, "_resolve_action_run", fake_resolve_action_run)
+    monkeypatch.setattr(research, "_recent_intent_context", fake_context)
+    monkeypatch.setattr(research, "_start_dsh_turn", fake_start)
+    monkeypatch.setattr("app.workflow.task_service.create_task", fake_create_task)
+    monkeypatch.setattr(bridge, "_workspace_strategy_file", lambda *args: candidate)
+
+    result = asyncio.run(research.run_dsh_action_endpoint(
+        project.id,
+        DshActionRequest(action="FIX_ERROR", run_id="failed-run-1"),
+        FakeDb(),
+    ))
+
+    assert result["phase"] == "REPAIR"
+    assert "# candidate source" in started["content"]
+    assert "失败回测 ID：failed-run-1" in started["content"]
+
+
 def test_intent_cordis_is_tool_free() -> None:
     text = (Path(__file__).parents[1] / "dsh_runtime" / "cordis-intent.yml").read_text(encoding="utf-8")
     assert "quantlab-tools" not in text
