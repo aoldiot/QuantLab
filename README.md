@@ -40,7 +40,7 @@ uv sync
 ./start.sh
 ```
 
-首次启动会自动建表，并注册标准 ATR 单标的策略与动量轮动组合策略。API 文档位于 `http://localhost:8000/docs`。
+宿主机需要安装 Node.js 22（含 npm），供 DeepSeek Harness 的 Node.js 运行时使用。`start.sh` 会在首次启动或 `package-lock.json` 变化时自动执行 `npm ci --omit=dev`，然后自动建表并注册标准 ATR 单标的策略与动量轮动组合策略。API 文档位于 `http://localhost:8000/docs`。
 
 ## 启动前端
 
