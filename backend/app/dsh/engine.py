@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1088,9 +1089,17 @@ async def run_llm_connectivity_test(
         except Exception:  # noqa: BLE001
             pass
 
+    logger.info("开始 DSH SDK 连通性测试 (model=%s, base_url=%s, prompt=%r)...", mdl, url, prompt)
+    t0 = time.monotonic()
     try:
-        result = await asyncio.to_thread(_run)
+        result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=60.0)
+        duration = time.monotonic() - t0
+        logger.info("DSH SDK 连通性测试完成，耗时 %.2fs", duration)
+    except asyncio.TimeoutError:
+        logger.warning("DSH SDK 连通性测试超时 (60s)")
+        return False, "DSH 连通性测试超时（60秒内未完成），请检查上游接口网络延迟或模型响应速度"
     except Exception as exc:  # noqa: BLE001
+        logger.warning("DSH SDK 连通性测试异常: %s", exc)
         return False, f"DSH SDK 运行失败: {exc}"
     finally:
         await asyncio.to_thread(_close)

@@ -137,7 +137,11 @@ async def test_llm_configuration(deep: bool = False, db: AsyncSession = Depends(
     api_key = decrypt_api_key(config.api_key_encrypted) if config.api_key_encrypted else ""
     base_url = (config.base_url or "").strip()
     model = (config.model or "").strip()
-    test_prompt = "请测试工具调用能力，回复 quantlab-agent-ok" if deep else "请只回复 quantlab-ok"
+    test_prompt = (
+        "请调用一次 list_files 工具验证工具调用能力，然后直接回复 quantlab-agent-ok，无需调用其他工具"
+        if deep
+        else "请只回复 quantlab-ok"
+    )
     try:
         from app.dsh import engine as dsh_engine
 
